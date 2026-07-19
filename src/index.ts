@@ -12,6 +12,7 @@ import { ConversationStore } from "./core/conversation-store.js";
 import { ensureCloudflared } from "./miniapp/cloudflared.js";
 import { MiniAppServer } from "./miniapp/server.js";
 import { QuickTunnel } from "./miniapp/tunnel.js";
+import { deferred } from "./shared/async.js";
 import { errorMessage } from "./shared/errors.js";
 import { atomicWriteFile, ensureDirectory } from "./shared/fs.js";
 import { Logger } from "./shared/logger.js";
@@ -46,6 +47,7 @@ export async function runTelex(): Promise<TelexRunResult> {
   const toolchainsDirectory = join(config.dataDirectory, "toolchains");
   const statePath = join(config.dataDirectory, "conversations.json");
   const resources: Stoppable[] = [];
+  const manuallyInstalledUpdate = deferred<string>();
   let updateMonitor: Promise<string | undefined> | undefined;
 
   try {
@@ -132,7 +134,30 @@ export async function runTelex(): Promise<TelexRunResult> {
       }
     }
 
-    const bridge = new CodexBridge(codex, publicUrl, logger.child({ component: "bridge" }));
+    const updater = new ReleaseUpdater({
+      repository: config.updateRepository,
+      currentVersion: bridgeVersion,
+      ...(config.installDirectory === undefined
+        ? {}
+        : { installDirectory: config.installDirectory }),
+      logger: logger.child({ component: "updater" }),
+    });
+    const bridge = new CodexBridge(codex, publicUrl, logger.child({ component: "bridge" }), {
+      canInstall: config.installDirectory !== undefined,
+      run: async () => {
+        const status = await updater.check("latest", updateAbort.signal);
+        if (!status.updateAvailable) {
+          return { status: "current", version: status.currentVersion };
+        }
+        const installed = await updater.install(status.release, updateAbort.signal);
+        return {
+          status: "installed",
+          previousVersion: installed.previousVersion,
+          version: installed.version,
+        };
+      },
+      onInstalled: manuallyInstalledUpdate.resolve,
+    });
     const telegram = new TelegramChannel(
       config.telegramToken,
       config.telegramApiBase,
@@ -150,14 +175,6 @@ export async function runTelex(): Promise<TelexRunResult> {
       miniApp: `${config.host}:${config.port}`,
     });
 
-    const updater = new ReleaseUpdater({
-      repository: config.updateRepository,
-      currentVersion: bridgeVersion,
-      ...(config.installDirectory === undefined
-        ? {}
-        : { installDirectory: config.installDirectory }),
-      logger: logger.child({ component: "updater" }),
-    });
     if (config.updateMode !== "off") {
       updateMonitor = monitorUpdates({
         updater,
@@ -168,10 +185,11 @@ export async function runTelex(): Promise<TelexRunResult> {
         signal: updateAbort.signal,
       });
     }
-    const update =
+    const automaticUpdate =
       updateMonitor?.then((version): Promise<string> | string =>
         version === undefined ? new Promise<string>(() => undefined) : version,
       ) ?? new Promise<string>(() => undefined);
+    const update = Promise.race([automaticUpdate, manuallyInstalledUpdate.promise]);
     const completed = await Promise.race([
       shutdown.promise.then(() => ({ reason: "shutdown" }) as const),
       update.then((version) => ({ reason: "updated", version }) as const),

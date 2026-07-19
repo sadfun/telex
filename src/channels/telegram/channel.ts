@@ -76,6 +76,7 @@ export class TelegramChannel implements MessagingChannel {
         { command: "login", description: "Sign in to Codex", is_ephemeral: true },
         { command: "logout", description: "Sign out of Codex", is_ephemeral: true },
         { command: "config", description: "Open Codex settings", is_ephemeral: true },
+        { command: "update", description: "Update Telex", is_ephemeral: true },
         { command: "help", description: "Show commands", is_ephemeral: true },
       ])
       .catch((error: unknown) => {

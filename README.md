@@ -149,6 +149,7 @@ Then restart the service. Rollback changes application code only; it does not re
 | `/login` | Start Codex's ChatGPT device-code login in a private chat. |
 | `/logout` | Sign out through Codex in a private chat. |
 | `/config` | Open the authenticated settings Mini App in a private chat. |
+| `/update` | Check for and install the latest Telex release, then restart the service. |
 | `/help` | Show the command list. |
 
 Messages that are not commands become `turn/start` requests. Codex commentary drives Telegram's thinking indicator, final-answer deltas drive the draft, and approval or user-input requests become inline choices.

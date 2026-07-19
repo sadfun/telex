@@ -43,7 +43,7 @@ export class QuickTunnel {
     const origin = `http://${this.#options.host === "0.0.0.0" ? "127.0.0.1" : this.#options.host}:${this.#options.port}`;
     const child = spawn(
       this.#options.binary ?? "cloudflared",
-      ["tunnel", "--no-autoupdate", "--url", origin],
+      ["tunnel", "--protocol", "http2", "--no-autoupdate", "--url", origin],
       {
         env: externalProcessEnvironment(),
         stdio: ["ignore", "pipe", "pipe"],

@@ -52,11 +52,14 @@ interface ActiveTurn {
   turnId: string | undefined;
 }
 
+export type LoginCompletedListener = (notification: AccountLoginCompletedNotification) => void;
+
 export class CodexService {
   readonly #queue = new KeyedSerialQueue();
   readonly #activeByThread = new Map<string, ActiveTurn>();
   readonly #activeByConversation = new Map<string, ActiveTurn>();
   readonly #loadedThreads = new Set<string>();
+  readonly #loginListeners = new Set<LoginCompletedListener>();
   readonly #rpc: CodexAppServer;
   readonly #conversations: ConversationStore;
   readonly #workspace: string;
@@ -172,6 +175,10 @@ export class CodexService {
 
   public async logout(): Promise<void> {
     await this.#rpc.request<unknown>({ method: "account/logout", params: undefined });
+  }
+
+  public onLoginCompleted(listener: LoginCompletedListener): void {
+    this.#loginListeners.add(listener);
   }
 
   private async ensureThread(conversationKey: string, ephemeral: boolean): Promise<string> {
@@ -347,6 +354,13 @@ export class CodexService {
       success: notification.success,
       error: notification.error,
     });
+    for (const listener of this.#loginListeners) {
+      try {
+        listener(notification);
+      } catch (error) {
+        this.#logger.error("Login completion listener failed", error);
+      }
+    }
   }
 
   private async handleServerRequest(request: ServerRequest): Promise<void> {
