@@ -2,7 +2,7 @@
 
 Telex is a self-hosted Telegram bridge for OpenAI Codex. Telegram is only the transport: a dedicated [Codex app-server](https://github.com/openai/codex/blob/main/codex-rs/app-server/README.md) owns threads, turns, tools, approvals, authentication, and configuration.
 
-Telex supports private conversations, Telegram photos and files, forwarded and replied-to context, polls and other structured messages, streamed replies and thinking, interactive approvals, guest mentions, persistent Codex threads, and an authenticated settings Mini App. It installs a pinned Codex CLI into isolated application storage, so it never depends on a global Codex installation.
+Telex supports private conversations, Telegram photos and files in both directions, forwarded and replied-to context, polls and other structured messages, streamed replies and thinking, interactive approvals, guest mentions, persistent Codex threads, and an authenticated settings Mini App. It installs a pinned Codex CLI into isolated application storage, so it never depends on a global Codex installation.
 
 ## Requirements
 
@@ -13,7 +13,7 @@ Telex supports private conversations, Telegram photos and files, forwarded and r
 - The numeric Telegram user IDs allowed to use the bot
 - Optionally, a public HTTPS URL for the settings Mini App; without one, Telex exposes it through an automatic quick tunnel
 
-In BotFather, enable guest mode if the bot should answer mentions in group chats. Guest replies are intentionally one-shot: they do not persist a thread and cannot answer interactive approval prompts.
+In BotFather, enable guest mode if the bot should answer mentions in group chats. Guest replies are intentionally one-shot: they do not persist a thread, cannot answer interactive approval prompts, and cannot upload newly generated local files. When a guest result includes a file, Telex explains that file attachments require a direct bot chat instead of silently omitting it.
 
 ## Install a release
 
@@ -154,7 +154,9 @@ Then restart the service. Rollback changes application code only; it does not re
 
 Messages that are not commands become `turn/start` requests. Photos and supported image files use Codex's native image input. Videos, audio, documents, animated stickers, and other binary files are downloaded under `.telex/attachments` in the Codex workspace and passed as local paths; captions, replies, forwards, polls, contacts, locations, checklists, and Telegram-only structures are preserved as concise text context. Codex commentary drives Telegram's thinking indicator, final-answer deltas drive the draft, and approval or user-input requests become inline choices.
 
-Telegram's hosted Bot API only allows bots to download files up to 20 MB. Telex still forwards the file metadata and a clear limitation notice when a download is unavailable. Set `TELEGRAM_API_BASE` to a [local Bot API server](https://core.telegram.org/bots/api#using-a-local-bot-api-server) to remove that download limit.
+In the other direction, Telex uploads completed Codex image-generation results and regular workspace files explicitly linked in the final answer. JPEG and PNG images, GIF animations, MP4 videos, and MP3 or M4A audio use Telegram's native media methods; everything else is sent as a document. Native-media failures retry as documents, individual upload failures remain visible, and Telex snapshots canonically validated files before upload. Markdown links are limited to the configured workspace; structured image-generation outputs are also accepted from Codex's dedicated generated-image directory. Ordinary source edits, code examples, arbitrary paths, and unlinked files are never uploaded automatically.
+
+Telegram's hosted Bot API only allows bots to download files up to 20 MB and upload general files up to 50 MB. Telex still forwards the file metadata and a clear limitation notice when a download or upload is unavailable. Set `TELEGRAM_API_BASE` to a [local Bot API server](https://core.telegram.org/bots/api#using-a-local-bot-api-server) to remove the download limit and support larger uploads.
 
 ## Settings Mini App
 

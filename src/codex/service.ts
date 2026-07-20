@@ -1,4 +1,5 @@
-import { basename } from "node:path";
+import { rm } from "node:fs/promises";
+import { basename, join } from "node:path";
 import type {
   ChoiceOption,
   InboundAttachment,
@@ -37,6 +38,7 @@ import type { UserInput } from "../generated/codex/v2/UserInput.js";
 import { type Deferred, deferred, KeyedSerialQueue, withTimeout } from "../shared/async.js";
 import { BridgeError, errorMessage } from "../shared/errors.js";
 import type { Logger } from "../shared/logger.js";
+import { generatedFilePaths, resolveOutboundAttachments } from "./output-files.js";
 import type { CodexAppServer } from "./rpc.js";
 
 interface ActiveTurn {
@@ -48,6 +50,7 @@ interface ActiveTurn {
   readonly phases: Map<string, "commentary" | "final_answer" | null>;
   readonly actions: Map<string, readonly ProgressAction[]>;
   readonly reasoning: Map<string, readonly string[]>;
+  readonly generatedPaths: string[];
   progressMessage: string;
   plan: readonly ProgressPlanStep[];
   finalText: string;
@@ -65,17 +68,23 @@ export class CodexService {
   readonly #rpc: CodexAppServer;
   readonly #conversations: ConversationStore;
   readonly #workspace: string;
+  readonly #generatedImagesDirectory: string;
+  readonly #outboundDirectory: string;
   readonly #logger: Logger;
 
   public constructor(
     rpc: CodexAppServer,
     conversations: ConversationStore,
     workspace: string,
+    generatedImagesDirectory: string,
+    outboundDirectory: string,
     logger: Logger,
   ) {
     this.#rpc = rpc;
     this.#conversations = conversations;
     this.#workspace = workspace;
+    this.#generatedImagesDirectory = generatedImagesDirectory;
+    this.#outboundDirectory = outboundDirectory;
     this.#logger = logger;
     rpc.onNotification((notification) => this.handleNotification(notification));
     rpc.setServerRequestHandler(async (request) => await this.handleServerRequest(request));
@@ -91,6 +100,7 @@ export class CodexService {
     await this.#queue.run(conversationKey, async () => {
       const stream = responder.createStream();
       await stream.start();
+      const stagingDirectory = join(this.#outboundDirectory, crypto.randomUUID());
       let active: ActiveTurn | undefined;
       try {
         const threadId = await this.ensureThread(conversationKey, ephemeral);
@@ -103,6 +113,7 @@ export class CodexService {
           phases: new Map(),
           actions: new Map(),
           reasoning: new Map(),
+          generatedPaths: [],
           progressMessage: "",
           plan: [],
           finalText: "",
@@ -130,10 +141,21 @@ export class CodexService {
         }
 
         const finalText = this.finalTextFromTurn(turn) || active.finalText;
-        if (turn.status === "interrupted" && finalText.length === 0) {
-          await stream.complete("Stopped.");
+        const resolution = await resolveOutboundAttachments(
+          this.#workspace,
+          this.#generatedImagesDirectory,
+          stagingDirectory,
+          finalText,
+          [...active.generatedPaths, ...generatedFilePaths(turn.items)],
+        );
+        const responseText = appendAttachmentWarning(finalText, resolution.unavailable);
+        if (turn.status === "interrupted" && responseText.length === 0) {
+          await stream.complete("Stopped.", resolution.attachments);
         } else {
-          await stream.complete(finalText || "Done.");
+          await stream.complete(
+            responseText || (resolution.attachments.length === 0 ? "Done." : ""),
+            resolution.attachments,
+          );
         }
       } catch (error) {
         this.#logger.error("Codex turn failed", error, { conversationKey });
@@ -143,6 +165,7 @@ export class CodexService {
           this.#activeByThread.delete(active.threadId);
           this.#activeByConversation.delete(conversationKey);
         }
+        await rm(stagingDirectory, { recursive: true, force: true }).catch(() => undefined);
       }
     });
   }
@@ -271,6 +294,13 @@ export class CodexService {
     if (notification.item.type === "reasoning") {
       active.reasoning.set(notification.item.id, notification.item.summary);
     }
+    if (
+      notification.item.type === "imageGeneration" &&
+      notification.item.savedPath !== undefined &&
+      !active.generatedPaths.includes(notification.item.savedPath)
+    ) {
+      active.generatedPaths.push(notification.item.savedPath);
+    }
     this.updateItemActions(active, notification.item);
   }
 
@@ -281,10 +311,19 @@ export class CodexService {
       active.phases.set(notification.item.id, notification.item.phase);
       if (notification.item.phase === "commentary") {
         active.progressMessage = notification.item.text;
+      } else if (notification.item.text.length > 0) {
+        active.finalText = notification.item.text;
       }
     }
     if (notification.item.type === "reasoning") {
       active.reasoning.set(notification.item.id, notification.item.summary);
+    }
+    if (
+      notification.item.type === "imageGeneration" &&
+      notification.item.savedPath !== undefined &&
+      !active.generatedPaths.includes(notification.item.savedPath)
+    ) {
+      active.generatedPaths.push(notification.item.savedPath);
     }
     this.updateItemActions(active, notification.item);
   }
@@ -473,6 +512,12 @@ export class CodexService {
       .filter(Boolean)
       .join("\n\n");
   }
+}
+
+function appendAttachmentWarning(text: string, unavailable: readonly string[]): string {
+  if (unavailable.length === 0) return text;
+  const warning = `Could not attach ${unavailable.join(", ")}.`;
+  return text.length === 0 ? warning : `${warning}\n\n${text}`;
 }
 
 export function createTurnInput(

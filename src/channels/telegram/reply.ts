@@ -1,8 +1,10 @@
-import type { Api } from "grammy";
+import { basename, extname } from "node:path";
+import { type Api, InputFile } from "grammy";
 import type { Chat, InlineKeyboardMarkup, InputRichMessageWithoutUpload } from "grammy/types";
 import type {
   ChoiceOption,
   MessageResponder,
+  OutboundAttachment,
   OutboundStream,
   ProgressSnapshot,
   SendOptions,
@@ -150,8 +152,17 @@ class TelegramGuestReplyStream implements OutboundStream {
   public setProgress(_progress: ProgressSnapshot): void {}
   public appendFinal(_delta: string): void {}
 
-  public async complete(text: string): Promise<void> {
-    await this.#responder.answer(text);
+  public async complete(
+    text: string,
+    attachments: readonly OutboundAttachment[] = [],
+  ): Promise<void> {
+    const attachmentNote =
+      attachments.length === 0
+        ? ""
+        : `Generated files can only be attached in a direct chat with this bot: ${attachments
+            .map((attachment) => safeAttachmentName(attachment.filename))
+            .join(", ")}${text.length === 0 ? "" : "\n\n"}`;
+    await this.#responder.answer(attachmentNote + text);
   }
 
   public async fail(message: string): Promise<void> {
@@ -200,12 +211,24 @@ class TelegramReplyStream implements OutboundStream {
     this.scheduleDraft(!this.#hasPublishedContent);
   }
 
-  public async complete(text: string): Promise<void> {
+  public async complete(
+    text: string,
+    attachments: readonly OutboundAttachment[] = [],
+  ): Promise<void> {
     if (this.#completed) return;
     this.#completed = true;
     this.clearTimers();
     await this.#draftInFlight?.catch(() => undefined);
-    await this.sendFinal(text);
+    if (text.length > 0) {
+      try {
+        await this.sendFinal(text);
+      } catch (error) {
+        this.#logger.warn("Telegram final text delivery failed", {
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+    }
+    await this.sendAttachments(attachments);
   }
 
   public async fail(message: string): Promise<void> {
@@ -337,12 +360,102 @@ class TelegramReplyStream implements OutboundStream {
     }
   }
 
+  private async sendAttachments(attachments: readonly OutboundAttachment[]): Promise<void> {
+    const failed: string[] = [];
+    for (const attachment of attachments) {
+      if (!(await this.sendAttachment(attachment)))
+        failed.push(safeAttachmentName(attachment.filename));
+    }
+    if (failed.length === 0) return;
+
+    const message = `Could not send ${failed.join(", ")} as ${failed.length === 1 ? "an attachment" : "attachments"}.`;
+    try {
+      for (const chunk of splitTelegramText(message)) {
+        await this.#api.sendMessage(this.#chat.id, chunk, { ...threadParams(this.#threadId) });
+      }
+    } catch (error) {
+      this.#logger.warn("Telegram attachment failure notice could not be sent", {
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+
+  private async sendAttachment(attachment: OutboundAttachment): Promise<boolean> {
+    const filename = safeAttachmentName(attachment.filename);
+    const input = (): InputFile => new InputFile(attachment.path, filename);
+    const params = { ...threadParams(this.#threadId) };
+    const kind = telegramAttachmentKind(attachment.path);
+
+    try {
+      switch (kind) {
+        case "photo":
+          await this.#api.sendPhoto(this.#chat.id, input(), params);
+          return true;
+        case "animation":
+          await this.#api.sendAnimation(this.#chat.id, input(), params);
+          return true;
+        case "video":
+          await this.#api.sendVideo(this.#chat.id, input(), params);
+          return true;
+        case "audio":
+          await this.#api.sendAudio(this.#chat.id, input(), params);
+          return true;
+        case "document":
+          await this.#api.sendDocument(this.#chat.id, input(), params);
+          return true;
+      }
+    } catch (error) {
+      let uploadError = error;
+      if (kind !== "document") {
+        this.#logger.debug("Native Telegram attachment failed; using document", {
+          filename,
+          error: error instanceof Error ? error.message : String(error),
+        });
+        try {
+          await this.#api.sendDocument(this.#chat.id, input(), params);
+          return true;
+        } catch (fallbackError) {
+          uploadError = fallbackError;
+        }
+      }
+      this.#logger.warn("Telegram attachment upload failed", {
+        filename,
+        error: uploadError instanceof Error ? uploadError.message : String(uploadError),
+      });
+    }
+    return false;
+  }
+
   private clearTimers(): void {
     if (this.#draftTimer !== undefined) clearTimeout(this.#draftTimer);
     if (this.#typingTimer !== undefined) clearInterval(this.#typingTimer);
     this.#draftTimer = undefined;
     this.#typingTimer = undefined;
   }
+}
+
+type TelegramAttachmentKind = "photo" | "animation" | "video" | "audio" | "document";
+
+function telegramAttachmentKind(path: string): TelegramAttachmentKind {
+  switch (extname(path).toLowerCase()) {
+    case ".jpg":
+    case ".jpeg":
+    case ".png":
+      return "photo";
+    case ".gif":
+      return "animation";
+    case ".mp4":
+      return "video";
+    case ".mp3":
+    case ".m4a":
+      return "audio";
+    default:
+      return "document";
+  }
+}
+
+function safeAttachmentName(path: string): string {
+  return basename(path).replace(/[\r\n]/g, "_") || "attachment";
 }
 
 export function formatThinkingBlock(progress: ProgressSnapshot, limit = 800): string {

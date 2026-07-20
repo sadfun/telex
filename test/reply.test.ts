@@ -4,6 +4,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   formatThinkingBlock,
   splitTelegramText,
+  TelegramGuestResponder,
   TelegramResponder,
 } from "../src/channels/telegram/reply.js";
 import { Logger } from "../src/shared/logger.js";
@@ -134,9 +135,143 @@ describe("Telegram streaming", () => {
       blocks: [{ type: "thinking" }, { type: "paragraph", text: "Hello" }],
     });
   });
+
+  it("sends final text before routing files through native Telegram methods", async () => {
+    const sendRichMessage = uploadMock(1);
+    const sendPhoto = uploadMock(2);
+    const sendAnimation = uploadMock(3);
+    const sendVideo = uploadMock(4);
+    const sendAudio = uploadMock(5);
+    const sendDocument = uploadMock(6);
+    const stream = createStream(
+      { sendRichMessage, sendPhoto, sendAnimation, sendVideo, sendAudio, sendDocument },
+      17,
+    );
+
+    await stream.complete("Your files:", [
+      attachment("/workspace/chart.png"),
+      attachment("/workspace/demo.gif"),
+      attachment("/workspace/clip.mp4"),
+      attachment("/workspace/song.mp3"),
+      attachment("/workspace/report.pdf"),
+    ]);
+
+    expect(sendRichMessage.mock.invocationCallOrder[0]).toBeLessThan(
+      sendPhoto.mock.invocationCallOrder[0] ?? 0,
+    );
+    for (const send of [sendPhoto, sendAnimation, sendVideo, sendAudio, sendDocument]) {
+      expect(send).toHaveBeenCalledOnce();
+      expect(send.mock.calls[0]?.[2]).toEqual({ message_thread_id: 17 });
+    }
+  });
+
+  it("falls back from native media to a fresh document upload", async () => {
+    const sendRichMessage = uploadMock(1);
+    const sendPhoto = vi.fn(async (_chatId: number, _file: unknown, _params: unknown) => {
+      throw new Error("unsupported photo");
+    });
+    const sendDocument = uploadMock(2);
+    const stream = createStream({ sendRichMessage, sendPhoto, sendDocument });
+
+    await stream.complete("", [attachment("/workspace/chart.png")]);
+
+    expect(sendRichMessage).not.toHaveBeenCalled();
+    expect(sendPhoto).toHaveBeenCalledOnce();
+    expect(sendDocument).toHaveBeenCalledOnce();
+    expect(sendPhoto.mock.calls[0]?.[1]).not.toBe(sendDocument.mock.calls[0]?.[1]);
+  });
+
+  it("reports one failed upload and continues with later files", async () => {
+    const sendPhoto = vi.fn(async (_chatId: number, _file: unknown, _params: unknown) => {
+      throw new Error("unsupported photo");
+    });
+    const sendDocument = vi
+      .fn(async (_chatId: number, _file: unknown, _params: unknown) => ({ message_id: 1 }))
+      .mockRejectedValueOnce(new Error("upload failed"))
+      .mockResolvedValueOnce({ message_id: 2 });
+    const sendMessage = uploadMock(3);
+    const stream = createStream({ sendPhoto, sendDocument, sendMessage });
+
+    await stream.complete("", [
+      attachment("/workspace/bad.png"),
+      attachment("/workspace/good.pdf"),
+    ]);
+
+    expect(sendDocument).toHaveBeenCalledTimes(2);
+    expect(sendMessage).toHaveBeenCalledWith(42, "Could not send bad.png as an attachment.", {});
+  });
+
+  it("explains the guest-mode attachment limitation instead of silently omitting files", async () => {
+    const answerGuestQuery = vi.fn(async (_queryId: string, _result: unknown) => true);
+    const responder = new TelegramGuestResponder(
+      { answerGuestQuery } as unknown as Api,
+      "guest-query",
+    );
+
+    await responder
+      .createStream()
+      .complete("x".repeat(9_000), [attachment("/workspace/report.pdf")]);
+
+    expect(answerGuestQuery).toHaveBeenCalledOnce();
+    expect(answerGuestQuery.mock.calls[0]?.[1]).toMatchObject({
+      input_message_content: {
+        rich_message: {
+          markdown: expect.stringContaining(
+            "Generated files can only be attached in a direct chat with this bot: report.pdf",
+          ),
+        },
+      },
+    });
+  });
+
+  it("preserves a missing-file warning in a long guest response", async () => {
+    const answerGuestQuery = vi.fn(async (_queryId: string, _result: unknown) => true);
+    const responder = new TelegramGuestResponder(
+      { answerGuestQuery } as unknown as Api,
+      "guest-query",
+    );
+
+    await responder
+      .createStream()
+      .complete(`Could not attach missing.zip.\n\n${"x".repeat(9_000)}`);
+
+    expect(answerGuestQuery.mock.calls[0]?.[1]).toMatchObject({
+      input_message_content: {
+        rich_message: { markdown: expect.stringMatching(/^Could not attach missing\.zip\./) },
+      },
+    });
+  });
+
+  it("still uploads attachments when final text delivery fails", async () => {
+    const sendRichMessage = vi.fn(async () => {
+      throw new Error("rich text failed");
+    });
+    const sendMessage = vi.fn(async () => {
+      throw new Error("plain text failed");
+    });
+    const sendDocument = uploadMock(2);
+    const stream = createStream({ sendRichMessage, sendMessage, sendDocument });
+
+    await stream.complete("Finished.", [attachment("/workspace/report.pdf")]);
+
+    expect(sendDocument).toHaveBeenCalledOnce();
+  });
 });
 
-function createStream(apiOverrides: Readonly<Record<string, unknown>>) {
+function attachment(path: string) {
+  return { path, filename: path.slice(path.lastIndexOf("/") + 1) };
+}
+
+function uploadMock(messageId: number) {
+  return vi.fn(async (_chatId: number, _file: unknown, _params: unknown) => ({
+    message_id: messageId,
+  }));
+}
+
+function createStream(
+  apiOverrides: Readonly<Record<string, unknown>>,
+  threadId: number | undefined = undefined,
+) {
   const api = {
     sendRichMessageDraft: vi.fn(async () => true),
     sendMessageDraft: vi.fn(async () => true),
@@ -149,7 +284,7 @@ function createStream(apiOverrides: Readonly<Record<string, unknown>>) {
   const responder = new TelegramResponder(
     api,
     chat,
-    undefined,
+    threadId,
     42,
     async () => "decline",
     new Logger("error"),

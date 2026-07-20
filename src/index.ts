@@ -44,6 +44,7 @@ export async function runTelex(): Promise<TelexRunResult> {
   const projectRoot = fileURLToPath(new URL("../", import.meta.url));
   const bridgeVersion = await readTelexVersion(projectRoot);
   const codexHome = join(config.dataDirectory, "codex-home");
+  const outboundDirectory = join(config.dataDirectory, "outbound");
   const toolchainsDirectory = join(config.dataDirectory, "toolchains");
   const statePath = join(config.dataDirectory, "conversations.json");
   const resources: Stoppable[] = [];
@@ -55,6 +56,7 @@ export async function runTelex(): Promise<TelexRunResult> {
       ensureDirectory(config.dataDirectory),
       ensureDirectory(config.workspace),
       ensureDirectory(codexHome),
+      ensureDirectory(outboundDirectory),
     ]);
     await ensureDefaultCodexConfig(join(codexHome, "config.toml"));
 
@@ -93,6 +95,8 @@ export async function runTelex(): Promise<TelexRunResult> {
       rpc,
       conversations,
       config.workspace,
+      join(codexHome, "generated_images"),
+      outboundDirectory,
       logger.child({ component: "codex" }),
     );
     const configService = new CodexConfigService(rpc, config.workspace);

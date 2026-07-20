@@ -16,6 +16,11 @@ export interface InboundAttachment {
   readonly description: string;
 }
 
+export interface OutboundAttachment {
+  readonly path: string;
+  readonly filename: string;
+}
+
 export interface ActionButton {
   readonly label: string;
   readonly kind: "url" | "webApp";
@@ -52,7 +57,7 @@ export interface OutboundStream {
   start(): Promise<void>;
   setProgress(progress: ProgressSnapshot): void;
   appendFinal(delta: string): void;
-  complete(text: string): Promise<void>;
+  complete(text: string, attachments?: readonly OutboundAttachment[]): Promise<void>;
   fail(message: string): Promise<void>;
 }
 
