@@ -299,6 +299,11 @@ export class CodexConfigService {
     this.#cwd = cwd;
   }
 
+  /** Drop app-server-derived catalogs after an external reload or child restart. */
+  public invalidateCapabilities(): void {
+    this.#capabilitiesCache = undefined;
+  }
+
   public async read(): Promise<EditableConfigSnapshot> {
     const state = await this.readState();
     return {

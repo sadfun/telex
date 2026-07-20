@@ -4,6 +4,7 @@ import { fileURLToPath } from "node:url";
 import { TelegramChannel } from "./channels/telegram/channel.js";
 import { CodexConfigService } from "./codex/config-service.js";
 import { CodexAppServer } from "./codex/rpc.js";
+import { CodexRuntimeService } from "./codex/runtime-service.js";
 import { CodexService } from "./codex/service.js";
 import { CodexToolchainManager, readPinnedCodexVersion } from "./codex/toolchain.js";
 import { loadAppConfig } from "./config/env.js";
@@ -114,6 +115,7 @@ export async function runTelex(): Promise<TelexRunResult> {
         });
       },
     );
+    let liveRuntime: CodexRuntimeService | undefined;
     const codex = new CodexService(
       rpc,
       conversations,
@@ -123,8 +125,22 @@ export async function runTelex(): Promise<TelexRunResult> {
       logger.child({ component: "codex" }),
       voiceTranscriber,
       () => settings.read().remoteClientContext,
+      {
+        effectiveSettings: () => liveRuntime?.settings() ?? {},
+        explicitSkillInputs: (text) => liveRuntime?.skillInputs(text) ?? [],
+      },
     );
     const configService = new CodexConfigService(rpc, config.workspace);
+    const runtime = new CodexRuntimeService({
+      rpc,
+      codex,
+      configService,
+      workspace: config.workspace,
+      logger: logger.child({ component: "codex-runtime" }),
+    });
+    liveRuntime = runtime;
+    resources.push(runtime);
+    await runtime.start();
 
     const miniApp = new MiniAppServer({
       host: config.host,
@@ -132,6 +148,7 @@ export async function runTelex(): Promise<TelexRunResult> {
       botToken: config.telegramToken,
       allowedUserIds: config.allowedUserIds,
       configService,
+      runtime,
       settings,
       logger: logger.child({ component: "miniapp" }),
     });
@@ -172,22 +189,28 @@ export async function runTelex(): Promise<TelexRunResult> {
         : { installDirectory: config.installDirectory }),
       logger: logger.child({ component: "updater" }),
     });
-    const bridge = new CodexBridge(codex, publicUrl, logger.child({ component: "bridge" }), {
-      canInstall: config.installDirectory !== undefined,
-      run: async () => {
-        const status = await updater.check("latest", updateAbort.signal);
-        if (!status.updateAvailable) {
-          return { status: "current", version: status.currentVersion };
-        }
-        const installed = await updater.install(status.release, updateAbort.signal);
-        return {
-          status: "installed",
-          previousVersion: installed.previousVersion,
-          version: installed.version,
-        };
+    const bridge = new CodexBridge(
+      codex,
+      publicUrl,
+      logger.child({ component: "bridge" }),
+      {
+        canInstall: config.installDirectory !== undefined,
+        run: async () => {
+          const status = await updater.check("latest", updateAbort.signal);
+          if (!status.updateAvailable) {
+            return { status: "current", version: status.currentVersion };
+          }
+          const installed = await updater.install(status.release, updateAbort.signal);
+          return {
+            status: "installed",
+            previousVersion: installed.previousVersion,
+            version: installed.version,
+          };
+        },
+        onInstalled: manuallyInstalledUpdate.resolve,
       },
-      onInstalled: manuallyInstalledUpdate.resolve,
-    });
+      runtime,
+    );
     const telegram = new TelegramChannel(
       config.telegramToken,
       config.telegramApiBase,

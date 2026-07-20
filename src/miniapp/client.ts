@@ -144,7 +144,24 @@ interface LoadedSnapshot {
   readonly capabilities: ConfigCapabilities;
   readonly validation: ValidationResult;
   readonly telex: TelexSettings;
+  readonly runtime: RuntimeStatus;
   readonly writeOutcome: WriteOutcome | undefined;
+}
+
+interface RuntimeComponentStatus {
+  readonly state: string;
+  readonly message: string | null;
+}
+
+interface RuntimeStatus {
+  readonly state: string;
+  readonly lastAppliedAt: string | null;
+  readonly configPath: string | null;
+  readonly restartRequired: boolean;
+  readonly lastError: string | null;
+  readonly config: RuntimeComponentStatus | undefined;
+  readonly mcp: RuntimeComponentStatus | undefined;
+  readonly skills: RuntimeComponentStatus | undefined;
 }
 
 interface TelexSettings {
@@ -291,6 +308,7 @@ function SettingsApp(): ReactElement {
   const [remoteClientContext, setRemoteClientContext] = useState(true);
   const [loadError, setLoadError] = useState<string>();
   const [saving, setSaving] = useState(false);
+  const [runtimeAction, setRuntimeAction] = useState<"reload" | "restart">();
   const [validation, setValidation] = useState<ValidationResult>({ valid: true, issues: [] });
   const [validating, setValidating] = useState(false);
   const [notice, setNotice] = useState("Settings are up to date.");
@@ -426,7 +444,7 @@ function SettingsApp(): ReactElement {
 
   const save = async (event: FormEvent<HTMLFormElement>): Promise<void> => {
     event.preventDefault();
-    if (!dirty || snapshot === undefined || saving) return;
+    if (!dirty || snapshot === undefined || saving || runtimeAction !== undefined) return;
     setSaving(true);
     setNotice("Checking and saving…");
     try {
@@ -455,10 +473,14 @@ function SettingsApp(): ReactElement {
           ? (loaded.writeOutcome?.overriddenMetadata?.message ??
               "Saved, but a higher-priority layer overrides this value.")
           : configDirty
-            ? "Saved. Codex reloaded the config."
+            ? runtimeSaveNotice(loaded.runtime)
             : "Saved.",
       );
-      webApp?.HapticFeedback?.notificationOccurred(overridden ? "warning" : "success");
+      webApp?.HapticFeedback?.notificationOccurred(
+        overridden || loaded.runtime.state === "degraded" || loaded.runtime.restartRequired
+          ? "warning"
+          : "success",
+      );
     } catch (error) {
       if (error instanceof ConfigApiError && error.issues !== undefined) {
         setValidation({ valid: false, issues: error.issues });
@@ -467,6 +489,27 @@ function SettingsApp(): ReactElement {
       webApp?.HapticFeedback?.notificationOccurred("error");
     } finally {
       setSaving(false);
+    }
+  };
+
+  const runRuntimeAction = async (action: "reload" | "restart"): Promise<void> => {
+    if (runtimeAction !== undefined || dirty) return;
+    setRuntimeAction(action);
+    setNotice(action === "reload" ? "Applying Codex changes…" : "Restarting Codex…");
+    try {
+      const runtime = await requestRuntime(action);
+      setSnapshot((current) =>
+        current === undefined ? current : { ...current, runtime, writeOutcome: undefined },
+      );
+      setNotice(runtimeActionNotice(runtime, action));
+      webApp?.HapticFeedback?.notificationOccurred(
+        runtime.state === "degraded" || runtime.restartRequired ? "warning" : "success",
+      );
+    } catch (error) {
+      setNotice(messageOf(error));
+      webApp?.HapticFeedback?.notificationOccurred("error");
+    } finally {
+      setRuntimeAction(undefined);
     }
   };
 
@@ -482,8 +525,10 @@ function SettingsApp(): ReactElement {
           dirty,
           saving,
           validating,
+          runtimeAction,
           notice,
           onSave: save,
+          onRuntimeAction: runRuntimeAction,
           updateScalar,
           updateModel,
           updateGranularApproval,
@@ -502,8 +547,10 @@ interface FormRenderOptions {
   readonly dirty: boolean;
   readonly saving: boolean;
   readonly validating: boolean;
+  readonly runtimeAction: "reload" | "restart" | undefined;
   readonly notice: string;
   readonly onSave: (event: FormEvent<HTMLFormElement>) => Promise<void>;
+  readonly onRuntimeAction: (action: "reload" | "restart") => Promise<void>;
   readonly updateScalar: (key: ScalarDraftKey, value: string) => void;
   readonly updateModel: (value: string) => void;
   readonly updateGranularApproval: (key: keyof GranularApproval, value: boolean) => void;
@@ -528,6 +575,87 @@ function renderForm(options: FormRenderOptions): ReactElement {
   const allowedSearchModes = stringSet(requirements?.allowedWebSearchModes);
   const allowedWindowsSandboxes = stringSet(requirements?.allowedWindowsSandboxImplementations);
   const issueSummary = renderIssueSummary(issues);
+
+  const runtime = snapshot.runtime;
+  const runtimeComponents = [
+    ["Config", runtime.config],
+    ["MCP", runtime.mcp],
+    ["Skills", runtime.skills],
+  ] as const;
+  const runtimeDetail =
+    runtime.lastError ??
+    runtimeComponents
+      .map(([label, component]) =>
+        component?.message === null || component?.message === undefined
+          ? undefined
+          : `${label}: ${component.message}`,
+      )
+      .filter(isDefined)
+      .join(" · ");
+  const runtimeControlsDisabled = options.dirty || options.runtimeAction !== undefined;
+  const runtimeSection = h(
+    Section,
+    {
+      header: "Codex runtime",
+      footer: options.dirty
+        ? "Save the draft before applying it to Codex."
+        : "Reload uses Codex's native config, MCP, and skill refresh APIs. MCP changes become active on the next turn.",
+    },
+    h(
+      "div",
+      { className: "runtimePanel" },
+      h(
+        "div",
+        { className: "runtimeSummary" },
+        h("span", {
+          className: `runtimeDot runtimeDot-${runtime.restartRequired ? "degraded" : runtime.state}`,
+          "aria-hidden": "true",
+        }),
+        h(
+          "div",
+          { className: "runtimeCopy" },
+          h("strong", null, runtimeStateLabel(runtime)),
+          h(
+            Caption,
+            { className: "runtimeDetail" },
+            runtimeDetail.length > 0
+              ? runtimeDetail
+              : runtime.configPath === null
+                ? "Runtime configuration is loaded."
+                : `Watching ${runtime.configPath}`,
+          ),
+        ),
+      ),
+      h(
+        "div",
+        { className: "runtimeActions" },
+        h(
+          Button,
+          {
+            type: "button",
+            mode: "bezeled",
+            size: "s",
+            loading: options.runtimeAction === "reload",
+            disabled: runtimeControlsDisabled,
+            onClick: () => void options.onRuntimeAction("reload"),
+          },
+          "Apply changes",
+        ),
+        h(
+          Button,
+          {
+            type: "button",
+            mode: "bezeled",
+            size: "s",
+            loading: options.runtimeAction === "restart",
+            disabled: runtimeControlsDisabled,
+            onClick: () => void options.onRuntimeAction("restart"),
+          },
+          "Restart Codex",
+        ),
+      ),
+    ),
+  );
 
   const telexSection = h(
     Section,
@@ -823,7 +951,12 @@ function renderForm(options: FormRenderOptions): ReactElement {
       : undefined;
 
   const errorCount = issues.filter((issue) => issue.severity === "error").length;
-  const saveDisabled = !options.dirty || options.saving || options.validating || errorCount > 0;
+  const saveDisabled =
+    !options.dirty ||
+    options.saving ||
+    options.validating ||
+    options.runtimeAction !== undefined ||
+    errorCount > 0;
   const saveText = !options.dirty
     ? "Up to date"
     : errorCount > 0
@@ -858,6 +991,7 @@ function renderForm(options: FormRenderOptions): ReactElement {
       h(
         "div",
         { className: "sectionStack" },
+        runtimeSection,
         telexSection,
         modelSection,
         accessSection,
@@ -1250,6 +1384,13 @@ async function requestValidation(
   return parseValidation(value);
 }
 
+async function requestRuntime(action: "reload" | "restart"): Promise<RuntimeStatus> {
+  const value = await requestJson(`/api/runtime/${action}`, { method: "POST" });
+  const runtime = parseRuntimeStatus(recordValue(value)?.runtime);
+  if (runtime === undefined) throw new Error("The bridge returned an invalid runtime response.");
+  return runtime;
+}
+
 async function requestJson(path: string, init: RequestInit): Promise<unknown> {
   const initData = webApp?.initData;
   if (initData === undefined || initData.length === 0) {
@@ -1277,11 +1418,13 @@ function parseSnapshot(value: unknown): LoadedSnapshot {
   const outerRecord = recordValue(value);
   const record = recordValue(outerRecord?.snapshot) ?? outerRecord;
   const telex = recordValue(record?.telex);
+  const runtime = parseRuntimeStatus(outerRecord?.runtime ?? record?.runtime);
   if (
     record === undefined ||
     !(typeof record.version === "string" || record.version === null) ||
     !isEditableConfig(record.values) ||
-    typeof telex?.remoteClientContext !== "boolean"
+    typeof telex?.remoteClientContext !== "boolean" ||
+    runtime === undefined
   ) {
     throw new Error("The bridge returned an invalid config response.");
   }
@@ -1294,7 +1437,32 @@ function parseSnapshot(value: unknown): LoadedSnapshot {
       issues: [],
     },
     telex: { remoteClientContext: telex.remoteClientContext },
+    runtime,
     writeOutcome: parseWriteOutcome(outerRecord?.writeOutcome ?? record.writeOutcome),
+  };
+}
+
+function parseRuntimeStatus(value: unknown): RuntimeStatus | undefined {
+  const record = recordValue(value);
+  if (record === undefined || typeof record.state !== "string") return undefined;
+  return {
+    state: record.state,
+    lastAppliedAt: typeof record.lastAppliedAt === "string" ? record.lastAppliedAt : null,
+    configPath: typeof record.configPath === "string" ? record.configPath : null,
+    restartRequired: record.restartRequired === true,
+    lastError: typeof record.lastError === "string" ? record.lastError : null,
+    config: parseRuntimeComponent(record.config),
+    mcp: parseRuntimeComponent(record.mcp),
+    skills: parseRuntimeComponent(record.skills),
+  };
+}
+
+function parseRuntimeComponent(value: unknown): RuntimeComponentStatus | undefined {
+  const record = recordValue(value);
+  if (record === undefined || typeof record.state !== "string") return undefined;
+  return {
+    state: record.state,
+    message: typeof record.message === "string" ? record.message : null,
   };
 }
 
@@ -1684,6 +1852,47 @@ function displayValue(value: unknown): string {
   }
   const singleLine = displayed.replaceAll(/\s+/g, " ").trim();
   return singleLine.length <= 120 ? singleLine : `${singleLine.slice(0, 119)}…`;
+}
+
+function runtimeStateLabel(runtime: RuntimeStatus): string {
+  if (runtime.restartRequired) return "Restart recommended";
+  switch (runtime.state) {
+    case "ready":
+      return "Ready for the next turn";
+    case "applying":
+      return "Applying changes";
+    case "restarting":
+      return "Restarting Codex";
+    case "degraded":
+      return "Some resources need attention";
+    default:
+      return sentenceCase(runtime.state);
+  }
+}
+
+function runtimeSaveNotice(runtime: RuntimeStatus): string {
+  if (runtime.restartRequired) {
+    return "Saved. Restart Codex to apply the startup-only changes.";
+  }
+  return runtime.state === "degraded"
+    ? "Saved. Some Codex resources could not refresh; check runtime status."
+    : "Saved. Changes apply on the next turn.";
+}
+
+function runtimeActionNotice(runtime: RuntimeStatus, action: "reload" | "restart"): string {
+  if (runtime.restartRequired) {
+    return action === "reload"
+      ? "Reloaded available resources. Restart Codex to apply startup-only changes."
+      : "Restart did not complete; check runtime status and retry.";
+  }
+  if (runtime.state === "degraded") {
+    return action === "reload"
+      ? "Reload finished with warnings; check runtime status."
+      : "Restart needs attention; check runtime status.";
+  }
+  return action === "reload"
+    ? "Config and skills refreshed; MCP changes are queued for the next turn."
+    : "Codex restarted and is ready.";
 }
 
 function booleanValue(value: unknown): boolean | undefined {

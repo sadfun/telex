@@ -26,6 +26,7 @@ import type { PermissionsRequestApprovalResponse } from "../generated/codex/v2/P
 import type { ReasoningSummaryTextDeltaNotification } from "../generated/codex/v2/ReasoningSummaryTextDeltaNotification.js";
 import type { ThreadItem } from "../generated/codex/v2/ThreadItem.js";
 import type { ThreadResumeResponse } from "../generated/codex/v2/ThreadResumeResponse.js";
+import type { ThreadStartParams } from "../generated/codex/v2/ThreadStartParams.js";
 import type { ThreadStartResponse } from "../generated/codex/v2/ThreadStartResponse.js";
 import type { ToolRequestUserInputAnswer } from "../generated/codex/v2/ToolRequestUserInputAnswer.js";
 import type { ToolRequestUserInputResponse } from "../generated/codex/v2/ToolRequestUserInputResponse.js";
@@ -33,6 +34,7 @@ import type { Turn } from "../generated/codex/v2/Turn.js";
 import type { TurnCompletedNotification } from "../generated/codex/v2/TurnCompletedNotification.js";
 import type { TurnInterruptResponse } from "../generated/codex/v2/TurnInterruptResponse.js";
 import type { TurnPlanUpdatedNotification } from "../generated/codex/v2/TurnPlanUpdatedNotification.js";
+import type { TurnStartParams } from "../generated/codex/v2/TurnStartParams.js";
 import type { TurnStartResponse } from "../generated/codex/v2/TurnStartResponse.js";
 import type { UserInput } from "../generated/codex/v2/UserInput.js";
 import { type Deferred, deferred, KeyedSerialQueue, withTimeout } from "../shared/async.js";
@@ -60,6 +62,54 @@ interface ActiveTurn {
 
 export type LoginCompletedListener = (notification: AccountLoginCompletedNotification) => void;
 
+export type CodexThreadSettings = Readonly<
+  Pick<
+    ThreadStartParams,
+    | "model"
+    | "modelProvider"
+    | "serviceTier"
+    | "approvalPolicy"
+    | "approvalsReviewer"
+    | "sandbox"
+    | "config"
+    | "baseInstructions"
+    | "developerInstructions"
+    | "personality"
+  >
+>;
+
+export type CodexTurnSettings = Readonly<
+  Pick<
+    TurnStartParams,
+    | "approvalPolicy"
+    | "approvalsReviewer"
+    | "sandboxPolicy"
+    | "model"
+    | "serviceTier"
+    | "effort"
+    | "summary"
+    | "personality"
+  >
+>;
+
+export interface EffectiveCodexSettings {
+  readonly thread?: CodexThreadSettings;
+  readonly turn?: CodexTurnSettings;
+}
+
+export type ExplicitSkillInput = Extract<UserInput, { readonly type: "skill" }>;
+export type EffectiveCodexSettingsProvider = () =>
+  | EffectiveCodexSettings
+  | Promise<EffectiveCodexSettings>;
+export type ExplicitSkillInputProvider = (
+  text: string,
+) => readonly ExplicitSkillInput[] | Promise<readonly ExplicitSkillInput[]>;
+
+export interface CodexServiceProviders {
+  readonly effectiveSettings?: EffectiveCodexSettingsProvider;
+  readonly explicitSkillInputs?: ExplicitSkillInputProvider;
+}
+
 export class CodexService {
   readonly #queue = new KeyedSerialQueue();
   readonly #activeByThread = new Map<string, ActiveTurn>();
@@ -74,6 +124,11 @@ export class CodexService {
   readonly #logger: Logger;
   readonly #voiceTranscriber: VoiceTranscriber | undefined;
   readonly #remoteClientContextEnabled: () => boolean;
+  readonly #effectiveSettings: EffectiveCodexSettingsProvider;
+  readonly #explicitSkillInputs: ExplicitSkillInputProvider;
+  #pauseGate: Deferred<void> | undefined;
+  #idleGate: Deferred<void> | undefined;
+  #runningJobs = 0;
 
   public constructor(
     rpc: CodexAppServer,
@@ -84,6 +139,7 @@ export class CodexService {
     logger: Logger,
     voiceTranscriber?: VoiceTranscriber,
     remoteClientContextEnabled: () => boolean = () => true,
+    providers: CodexServiceProviders = {},
   ) {
     this.#rpc = rpc;
     this.#conversations = conversations;
@@ -93,8 +149,28 @@ export class CodexService {
     this.#logger = logger;
     this.#voiceTranscriber = voiceTranscriber;
     this.#remoteClientContextEnabled = remoteClientContextEnabled;
+    this.#effectiveSettings = providers.effectiveSettings ?? (() => ({}));
+    this.#explicitSkillInputs = providers.explicitSkillInputs ?? (() => []);
     rpc.onNotification((notification) => this.handleNotification(notification));
+    rpc.onExit((exit) => this.handleTransportExit(exit.error));
     rpc.setServerRequestHandler(async (request) => await this.handleServerRequest(request));
+  }
+
+  public pause(): void {
+    this.#pauseGate ??= deferred<void>();
+  }
+
+  public async waitForIdle(): Promise<void> {
+    if (this.#runningJobs === 0) return;
+    this.#idleGate ??= deferred<void>();
+    await this.#idleGate.promise;
+  }
+
+  public resume(): void {
+    const gate = this.#pauseGate;
+    if (gate === undefined) return;
+    this.#pauseGate = undefined;
+    gate.resolve();
   }
 
   public async runTurn(
@@ -119,77 +195,92 @@ export class CodexService {
     }
 
     await this.#queue.run(conversationKey, async () => {
-      if (!shouldTranscribe) await stream.start();
-      const stagingDirectory = join(this.#outboundDirectory, crypto.randomUUID());
-      let active: ActiveTurn | undefined;
+      await this.enterJob();
       try {
-        const prepared = preparedText === undefined ? text : await preparedText;
-        const threadId = await this.ensureThread(conversationKey, ephemeral);
-        active = {
-          conversationKey,
-          threadId,
-          responder,
-          stream,
-          completion: deferred<Turn>(),
-          phases: new Map(),
-          actions: new Map(),
-          reasoning: new Map(),
-          generatedPaths: [],
-          progressMessage: "",
-          plan: [],
-          finalText: "",
-          turnId: undefined,
-        };
-        this.#activeByThread.set(threadId, active);
-        this.#activeByConversation.set(conversationKey, active);
-
-        const response = await this.#rpc.request<TurnStartResponse>({
-          method: "turn/start",
-          params: {
-            threadId,
-            clientUserMessageId: crypto.randomUUID(),
-            input: createTurnInput(prepared, connector, attachments),
-            ...(this.#remoteClientContextEnabled()
-              ? { additionalContext: createRemoteClientContext(connector) }
-              : {}),
-          },
-        });
-        active.turnId = response.turn.id;
-        const turn = await withTimeout(
-          active.completion.promise,
-          30 * 60 * 1_000,
-          "Codex turn did not complete within 30 minutes",
-        );
-        if (turn.status === "failed") {
-          throw new BridgeError(turn.error?.message ?? "Codex turn failed", "CODEX_TURN_FAILED");
-        }
-
-        const finalText = this.finalTextFromTurn(turn) || active.finalText;
-        const resolution = await resolveOutboundAttachments(
-          this.#workspace,
-          this.#generatedImagesDirectory,
-          stagingDirectory,
-          finalText,
-          [...active.generatedPaths, ...generatedFilePaths(turn.items)],
-        );
-        const responseText = appendAttachmentWarning(finalText, resolution.unavailable);
-        if (turn.status === "interrupted" && responseText.length === 0) {
-          await stream.complete("Stopped.", resolution.attachments);
-        } else {
-          await stream.complete(
-            responseText || (resolution.attachments.length === 0 ? "Done." : ""),
-            resolution.attachments,
+        const stagingDirectory = join(this.#outboundDirectory, crypto.randomUUID());
+        let active: ActiveTurn | undefined;
+        try {
+          if (!shouldTranscribe) await stream.start();
+          const prepared = preparedText === undefined ? text : await preparedText;
+          const [settings, skillInputs] = await Promise.all([
+            this.#effectiveSettings(),
+            this.#explicitSkillInputs(prepared),
+          ]);
+          const threadId = await this.ensureThread(
+            conversationKey,
+            ephemeral,
+            settings.thread ?? {},
           );
+          active = {
+            conversationKey,
+            threadId,
+            responder,
+            stream,
+            completion: deferred<Turn>(),
+            phases: new Map(),
+            actions: new Map(),
+            reasoning: new Map(),
+            generatedPaths: [],
+            progressMessage: "",
+            plan: [],
+            finalText: "",
+            turnId: undefined,
+          };
+          void active.completion.promise.catch(() => undefined);
+          this.#activeByThread.set(threadId, active);
+          this.#activeByConversation.set(conversationKey, active);
+
+          const response = await this.#rpc.request<TurnStartResponse>({
+            method: "turn/start",
+            params: {
+              ...(settings.turn ?? {}),
+              threadId,
+              clientUserMessageId: crypto.randomUUID(),
+              input: [...createTurnInput(prepared, connector, attachments), ...skillInputs],
+              ...(this.#remoteClientContextEnabled()
+                ? { additionalContext: createRemoteClientContext(connector) }
+                : {}),
+            },
+          });
+          active.turnId = response.turn.id;
+          const turn = await withTimeout(
+            active.completion.promise,
+            30 * 60 * 1_000,
+            "Codex turn did not complete within 30 minutes",
+          );
+          if (turn.status === "failed") {
+            throw new BridgeError(turn.error?.message ?? "Codex turn failed", "CODEX_TURN_FAILED");
+          }
+
+          const finalText = this.finalTextFromTurn(turn) || active.finalText;
+          const resolution = await resolveOutboundAttachments(
+            this.#workspace,
+            this.#generatedImagesDirectory,
+            stagingDirectory,
+            finalText,
+            [...active.generatedPaths, ...generatedFilePaths(turn.items)],
+          );
+          const responseText = appendAttachmentWarning(finalText, resolution.unavailable);
+          if (turn.status === "interrupted" && responseText.length === 0) {
+            await stream.complete("Stopped.", resolution.attachments);
+          } else {
+            await stream.complete(
+              responseText || (resolution.attachments.length === 0 ? "Done." : ""),
+              resolution.attachments,
+            );
+          }
+        } catch (error) {
+          this.#logger.error("Codex turn failed", error, { conversationKey });
+          await stream.fail(errorMessage(error));
+        } finally {
+          if (active !== undefined) {
+            this.#activeByThread.delete(active.threadId);
+            this.#activeByConversation.delete(conversationKey);
+          }
+          await rm(stagingDirectory, { recursive: true, force: true }).catch(() => undefined);
         }
-      } catch (error) {
-        this.#logger.error("Codex turn failed", error, { conversationKey });
-        await stream.fail(errorMessage(error));
       } finally {
-        if (active !== undefined) {
-          this.#activeByThread.delete(active.threadId);
-          this.#activeByConversation.delete(conversationKey);
-        }
-        await rm(stagingDirectory, { recursive: true, force: true }).catch(() => undefined);
+        this.leaveJob();
       }
     });
   }
@@ -252,7 +343,11 @@ export class CodexService {
     this.#loginListeners.add(listener);
   }
 
-  private async ensureThread(conversationKey: string, ephemeral: boolean): Promise<string> {
+  private async ensureThread(
+    conversationKey: string,
+    ephemeral: boolean,
+    settings: CodexThreadSettings,
+  ): Promise<string> {
     if (!ephemeral) {
       const stored = this.#conversations.get(conversationKey);
       if (stored !== undefined) {
@@ -260,11 +355,17 @@ export class CodexService {
           try {
             const resumed = await this.#rpc.request<ThreadResumeResponse>({
               method: "thread/resume",
-              params: { threadId: stored, cwd: this.#workspace },
+              params: { ...settings, threadId: stored, cwd: this.#workspace },
             });
             this.#loadedThreads.add(resumed.thread.id);
             return resumed.thread.id;
           } catch (error) {
+            if (
+              error instanceof BridgeError &&
+              (error.code === "CODEX_NOT_RUNNING" || error.code === "CODEX_EXITED")
+            ) {
+              throw error;
+            }
             this.#logger.warn("Stored Codex thread could not be resumed; starting a new thread", {
               conversationKey,
               error: errorMessage(error),
@@ -280,6 +381,7 @@ export class CodexService {
     const started = await this.#rpc.request<ThreadStartResponse>({
       method: "thread/start",
       params: {
+        ...settings,
         cwd: this.#workspace,
         ephemeral,
         serviceName: "telex",
@@ -289,6 +391,24 @@ export class CodexService {
     this.#loadedThreads.add(started.thread.id);
     if (!ephemeral) await this.#conversations.set(conversationKey, started.thread.id);
     return started.thread.id;
+  }
+
+  private async enterJob(): Promise<void> {
+    while (this.#pauseGate !== undefined) await this.#pauseGate.promise;
+    this.#runningJobs += 1;
+  }
+
+  private leaveJob(): void {
+    this.#runningJobs -= 1;
+    if (this.#runningJobs !== 0) return;
+    const gate = this.#idleGate;
+    this.#idleGate = undefined;
+    gate?.resolve();
+  }
+
+  private handleTransportExit(error: BridgeError): void {
+    this.#loadedThreads.clear();
+    for (const active of this.#activeByThread.values()) active.completion.reject(error);
   }
 
   private handleNotification(notification: ServerNotification): void {

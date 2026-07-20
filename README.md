@@ -49,6 +49,8 @@ The default layout is:
 
 Use `--install-dir`, `--config-dir`, `--bin-dir`, `--version`, or `--no-service` to customize the installation. Run the installer with `--help` for details. Re-running it is safe and preserves existing configuration and data.
 
+Telex intentionally sets `CODEX_HOME` to its own `data/codex-home`. Changes under the interactive CLI's usual `~/.codex` do not affect this app-server. Put user config, MCP definitions, and personal skills in Telex's Codex home (for example `data/codex-home/config.toml` and `data/codex-home/skills`), or use project-scoped files inside the configured workspace.
+
 ### Configure and start
 
 Edit `~/.config/telex/telex.env` and replace these two values:
@@ -152,6 +154,8 @@ Then restart the service. Rollback changes application code only; it does not re
 | `/login` | Start Codex's ChatGPT device-code login in a private chat. |
 | `/logout` | Sign out through Codex in a private chat. |
 | `/config` | Open the authenticated settings Mini App in a private chat. |
+| `/reload` | Reload config, MCP servers, and skills through Codex's native app-server APIs. |
+| `/restart` | Drain active work and safely restart only the Codex app-server. |
 | `/update` | Check for and install the latest Telex release, then restart the service. |
 | `/help` | Show the command list. |
 
@@ -168,6 +172,15 @@ Telegram's hosted Bot API only allows bots to download files up to 20 MB and upl
 The Mini App uses [TelegramUI](https://github.com/telegram-mini-apps-dev/TelegramUI) and accepts only signed Telegram `initData` from allowlisted private users. It includes a default-on remote session context toggle and covers the everyday settings from Codex's [basic configuration guide](https://learn.chatgpt.com/docs/config-file/config-basic), including models, reasoning, approval policy, permission profiles, sandboxing, web search, shell environment, and supported feature flags. Turning remote session context off stops Telex from adding its connector-aware instructions to Codex turns.
 
 Choices come from the running app-server and active configuration layers instead of a handwritten catalog. Every edit is previewed by the same server-side validator used for saves. A save is a version-checked `config/batchWrite`, so all changes either pass Codex validation and land together or leave `config.toml` untouched. The app-server runs with `--strict-config`, so unknown configuration keys fail loudly.
+
+Telex keeps the running Codex process synchronized using the [app-server mechanisms designed for this purpose](https://learn.chatgpt.com/docs/app-server#api-overview):
+
+- Mini App saves hot-reload the effective user configuration and carry supported model, approval, and reasoning choices into the next turn.
+- File-backed active config layers are watched through `fs/watch`; valid external edits trigger the same reconciliation, while invalid edits leave the last healthy runtime active and show a degraded status.
+- Skills use Codex's built-in watcher plus a forced `skills/list` refresh. Explicit `$skill-name` mentions are sent as native skill inputs.
+- MCP definitions use `config/mcpServer/reload`. Codex queues refreshed MCP state for loaded threads, so it becomes active on their next turn.
+
+The runtime card in the Mini App shows the current outcome and offers **Apply changes** and **Restart Codex**. `/reload` and `/restart` provide the same private-chat controls. Restart is the fallback for startup-only state: Telex pauses new turns, lets active turns finish, restarts its child app-server with the same `CODEX_HOME`, reloads watches and resources, and lazily resumes persisted thread IDs. It does not restart the Telegram bridge or discard authentication and conversation history.
 
 ## Source development
 

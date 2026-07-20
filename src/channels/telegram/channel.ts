@@ -60,6 +60,8 @@ export const telegramBotCommands = [
   { command: "login", description: "Sign in to Codex" },
   { command: "logout", description: "Sign out of Codex" },
   { command: "config", description: "Open Codex settings" },
+  { command: "reload", description: "Reload Codex resources" },
+  { command: "restart", description: "Restart the Codex app-server" },
   { command: "update", description: "Update Telex" },
   { command: "help", description: "Show commands" },
 ] as const satisfies readonly BotCommand[];

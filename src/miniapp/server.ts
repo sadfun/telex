@@ -34,10 +34,19 @@ export interface MiniAppServerOptions {
   readonly botToken: string;
   readonly allowedUserIds: ReadonlySet<number>;
   readonly configService: CodexConfigService;
+  readonly runtime: MiniAppRuntimeController;
   readonly settings: TelexSettingsStore;
   readonly logger: Logger;
   readonly maxAuthAgeSeconds?: number;
   readonly assetDirectory?: string;
+}
+
+/** Narrow runtime surface exposed to the authenticated settings Mini App. */
+export interface MiniAppRuntimeController {
+  status(): unknown;
+  afterConfigWrite(): Promise<unknown>;
+  reload(): Promise<unknown>;
+  restart(): Promise<unknown>;
 }
 
 export class MiniAppServer {
@@ -126,7 +135,11 @@ export class MiniAppServer {
       this.authenticate(request);
       if (request.method === "GET") {
         const snapshot = await this.options.configService.read();
-        this.sendJson(response, 200, { ...snapshot, telex: this.options.settings.read() });
+        this.sendJson(response, 200, {
+          ...snapshot,
+          telex: this.options.settings.read(),
+          runtime: this.options.runtime.status(),
+        });
         return;
       }
       if (request.method === "PUT") {
@@ -138,15 +151,40 @@ export class MiniAppServer {
             ? undefined
             : await this.options.configService.update({ expectedVersion, values });
         if (telex !== undefined) await this.options.settings.update(telex);
+        if (writeOutcome !== undefined) {
+          try {
+            await this.options.runtime.afterConfigWrite();
+          } catch (error) {
+            // The version-checked config write has already committed. Preserve that
+            // success and surface the runtime's degraded state in the response.
+            this.options.logger.warn("Codex resources did not fully refresh after config save", {
+              error: error instanceof Error ? error.message : String(error),
+            });
+          }
+        }
         const snapshot = await this.options.configService.read();
         this.sendJson(response, 200, {
           ...snapshot,
           ...(writeOutcome === undefined ? {} : { writeOutcome }),
           telex: this.options.settings.read(),
+          runtime: this.options.runtime.status(),
         });
         return;
       }
       response.setHeader("Allow", "GET, PUT");
+      this.sendError(response, 405, "Method not allowed");
+      return;
+    }
+
+    if (url.pathname === "/api/runtime/reload" || url.pathname === "/api/runtime/restart") {
+      this.authenticate(request);
+      if (request.method === "POST") {
+        if (url.pathname.endsWith("/reload")) await this.options.runtime.reload();
+        else await this.options.runtime.restart();
+        this.sendJson(response, 200, { runtime: this.options.runtime.status() });
+        return;
+      }
+      response.setHeader("Allow", "POST");
       this.sendError(response, 405, "Method not allowed");
       return;
     }

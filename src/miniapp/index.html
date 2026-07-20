@@ -75,6 +75,51 @@
         display: grid;
         gap: 16px;
       }
+      .runtimePanel {
+        display: grid;
+        gap: 14px;
+        padding: 14px 16px 16px;
+      }
+      .runtimeSummary {
+        display: grid;
+        grid-template-columns: auto minmax(0, 1fr);
+        align-items: center;
+        gap: 10px;
+      }
+      .runtimeDot {
+        width: 10px;
+        height: 10px;
+        border-radius: 999px;
+        background: var(--tgui--hint_color);
+        box-shadow: 0 0 0 4px color-mix(in srgb, var(--tgui--hint_color) 16%, transparent);
+      }
+      .runtimeDot-ready {
+        background: #31b545;
+        box-shadow: 0 0 0 4px color-mix(in srgb, #31b545 16%, transparent);
+      }
+      .runtimeDot-applying,
+      .runtimeDot-restarting {
+        background: var(--tgui--accent_text_color);
+        box-shadow: 0 0 0 4px var(--tgui--secondary_fill);
+      }
+      .runtimeDot-degraded {
+        background: var(--tgui--destructive_text_color);
+        box-shadow: 0 0 0 4px color-mix(in srgb, var(--tgui--destructive_text_color) 16%, transparent);
+      }
+      .runtimeCopy {
+        display: grid;
+        min-width: 0;
+        gap: 3px;
+      }
+      .runtimeDetail {
+        overflow-wrap: anywhere;
+        color: var(--tgui--hint_color);
+      }
+      .runtimeActions {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 8px;
+      }
       .field {
         min-width: 0;
         padding: 14px 16px 2px;

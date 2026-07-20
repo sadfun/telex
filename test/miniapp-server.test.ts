@@ -5,6 +5,7 @@ import { z } from "zod";
 import { type CodexConfigService, ConfigValidationError } from "../src/codex/config-service.js";
 import type { TelexSettings, TelexSettingsStore } from "../src/core/settings-store.js";
 import type { ConfigWriteResponse } from "../src/generated/codex/v2/ConfigWriteResponse.js";
+import type { MiniAppRuntimeController } from "../src/miniapp/server.js";
 import { MiniAppServer } from "../src/miniapp/server.js";
 import type { Logger } from "../src/shared/logger.js";
 
@@ -33,11 +34,16 @@ describe("MiniAppServer config API", () => {
     };
     const update = vi.fn(async (_input: unknown) => writeOutcome);
     const read = vi.fn(async () => snapshot);
-    const server = testServer({
-      update,
-      read,
-      validate: vi.fn(async () => ({ valid: true, issues: [] })),
-    });
+    const runtime = testRuntime();
+    const server = testServer(
+      {
+        update,
+        read,
+        validate: vi.fn(async () => ({ valid: true, issues: [] })),
+      },
+      testSettingsStore(),
+      runtime,
+    );
 
     const response = await dispatch(
       server,
@@ -52,12 +58,14 @@ describe("MiniAppServer config API", () => {
       ...snapshot,
       writeOutcome,
       telex: { remoteClientContext: true },
+      runtime: { state: "ready" },
     });
     expect(update).toHaveBeenCalledWith({
       expectedVersion: "revision-1",
       values: { model: "gpt-test" },
     });
     expect(read).toHaveBeenCalledOnce();
+    expect(runtime.afterConfigWrite).toHaveBeenCalledOnce();
   });
 
   it("updates Telex settings without rewriting Codex config", async () => {
@@ -91,9 +99,28 @@ describe("MiniAppServer config API", () => {
     expect(responseJson(response)).toEqual({
       ...snapshot,
       telex: { remoteClientContext: false },
+      runtime: { state: "ready" },
     });
     expect(update).not.toHaveBeenCalled();
     expect(settings.update).toHaveBeenCalledWith({ remoteClientContext: false });
+  });
+
+  it.each([
+    ["reload", "reload"],
+    ["restart", "restart"],
+  ] as const)("runs the authenticated runtime %s action", async (path, method) => {
+    const runtime = testRuntime();
+    const server = testServer(
+      { update: vi.fn(), read: vi.fn(), validate: vi.fn() },
+      testSettingsStore(),
+      runtime,
+    );
+
+    const response = await dispatch(server, request("POST", `/api/runtime/${path}`, undefined));
+
+    expect(response.status).toBe(200);
+    expect(responseJson(response)).toEqual({ runtime: { state: "ready" } });
+    expect(runtime[method]).toHaveBeenCalledOnce();
   });
 
   it("normalizes Zod request failures for inline field display", async () => {
@@ -179,6 +206,7 @@ interface CapturedResponse {
 function testServer(
   configService: TestConfigService,
   settings: TestSettingsStore = testSettingsStore(),
+  runtime: TestRuntimeController = testRuntime(),
 ): MiniAppServer {
   const logger = {
     error: vi.fn(),
@@ -190,9 +218,25 @@ function testServer(
     botToken,
     allowedUserIds: new Set([42]),
     configService: configService as unknown as CodexConfigService,
+    runtime,
     settings: settings as unknown as TelexSettingsStore,
     logger,
   });
+}
+
+interface TestRuntimeController extends MiniAppRuntimeController {
+  readonly afterConfigWrite: ReturnType<typeof vi.fn<() => Promise<unknown>>>;
+  readonly reload: ReturnType<typeof vi.fn<() => Promise<unknown>>>;
+  readonly restart: ReturnType<typeof vi.fn<() => Promise<unknown>>>;
+}
+
+function testRuntime(): TestRuntimeController {
+  return {
+    status: () => ({ state: "ready" }),
+    afterConfigWrite: vi.fn(async () => ({ state: "ready" })),
+    reload: vi.fn(async () => ({ state: "ready" })),
+    restart: vi.fn(async () => ({ state: "ready" })),
+  };
 }
 
 interface TestSettingsStore {
@@ -226,7 +270,7 @@ async function dispatch(
 }
 
 function request(method: string, url: string, body: unknown): IncomingMessage {
-  const encoded = Buffer.from(JSON.stringify(body));
+  const encoded = body === undefined ? Buffer.alloc(0) : Buffer.from(JSON.stringify(body));
   return {
     method,
     url,

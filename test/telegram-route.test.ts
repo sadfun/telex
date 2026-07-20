@@ -7,6 +7,9 @@ describe("telegramBotCommands", () => {
   it("registers /start without claiming long-running command replies are ephemeral", () => {
     expect(telegramBotCommands[0]).toMatchObject({ command: "start" });
     expect(telegramBotCommands.filter((command) => command.command === "start")).toHaveLength(1);
+    expect(telegramBotCommands.map((command) => command.command)).toEqual(
+      expect.arrayContaining(["reload", "restart"]),
+    );
     expect(telegramBotCommands.every((command) => !("is_ephemeral" in command))).toBe(true);
   });
 });

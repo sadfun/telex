@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import type { CodexService } from "../src/codex/service.js";
 import {
   CodexBridge,
+  type CodexRuntimeCommand,
   type TelexUpdateCommand,
   type TelexUpdateResult,
 } from "../src/core/bridge.js";
@@ -362,5 +363,57 @@ describe("CodexBridge updates", () => {
 
     expect(updateCommand.run).not.toHaveBeenCalled();
     expect(responder.sendText.mock.calls[0]?.[0]).toContain("source checkout");
+  });
+});
+
+describe("CodexBridge runtime controls", () => {
+  it.each(["reload", "restart"] as const)("runs /%s in a private chat", async (action) => {
+    const { codex } = createCodex();
+    const runtime: CodexRuntimeCommand = {
+      status: () => ({ state: "ready" }),
+      reload: vi.fn(async () => ({ state: "ready" })),
+      restart: vi.fn(async () => ({ state: "ready" })),
+    };
+    const bridge = new CodexBridge(codex, undefined, logger, undefined, runtime);
+    const responder = createResponder();
+
+    await bridge.handleMessage(createMessage(`/${action}`, responder));
+
+    expect(runtime[action]).toHaveBeenCalledOnce();
+    expect(responder.sendText).toHaveBeenCalledTimes(2);
+    expect(responder.sendText.mock.calls[1]?.[0]).toContain("✅");
+  });
+
+  it("keeps restart controls out of group chats", async () => {
+    const { codex } = createCodex();
+    const runtime: CodexRuntimeCommand = {
+      status: () => ({ state: "ready" }),
+      reload: vi.fn(),
+      restart: vi.fn(),
+    };
+    const bridge = new CodexBridge(codex, undefined, logger, undefined, runtime);
+    const responder = createResponder();
+
+    await bridge.handleMessage(createMessage("/restart", responder, { isPrivate: false }));
+
+    expect(runtime.restart).not.toHaveBeenCalled();
+    expect(responder.sendText.mock.calls[0]?.[0]).toContain("private bot chat");
+  });
+
+  it("points status checks to restart when the app-server is down", async () => {
+    const { codex } = createCodex({
+      account: vi.fn(async () => Promise.reject(new Error("down"))),
+    });
+    const runtime: CodexRuntimeCommand = {
+      status: () => ({ state: "degraded", lastError: "transport exited" }),
+      reload: vi.fn(),
+      restart: vi.fn(),
+    };
+    const bridge = new CodexBridge(codex, undefined, logger, undefined, runtime);
+    const responder = createResponder();
+
+    await bridge.handleMessage(createMessage("/status", responder));
+
+    expect(responder.sendText.mock.calls[0]?.[0]).toContain("/restart");
   });
 });

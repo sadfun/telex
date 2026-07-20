@@ -2,7 +2,7 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { CodexAppServer, NotificationListener } from "../src/codex/rpc.js";
+import type { CodexAppServer, ExitListener, NotificationListener } from "../src/codex/rpc.js";
 import { CodexService } from "../src/codex/service.js";
 import type { MessageResponder, OutboundAttachment, OutboundStream } from "../src/core/channel.js";
 import { ConversationStore } from "../src/core/conversation-store.js";
@@ -180,6 +180,10 @@ class FakeCodexRpc {
 
   public onNotification(listener: NotificationListener): () => void {
     this.#listener = listener;
+    return () => undefined;
+  }
+
+  public onExit(_listener: ExitListener): () => void {
     return () => undefined;
   }
 

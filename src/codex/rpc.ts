@@ -71,9 +71,19 @@ export class CodexRpcError extends BridgeError {
 export type NotificationListener = (notification: ServerNotification) => void;
 export type ServerRequestHandler = (request: ServerRequest) => Promise<void>;
 
+export interface CodexAppServerExit {
+  readonly error: BridgeError;
+  readonly expected: boolean;
+  readonly code: number | null;
+  readonly signal: NodeJS.Signals | string | null;
+}
+
+export type ExitListener = (exit: CodexAppServerExit) => void;
+
 export class CodexAppServer {
   readonly #pending = new Map<RequestId, PendingRequest>();
   readonly #notificationListeners = new Set<NotificationListener>();
+  readonly #exitListeners = new Set<ExitListener>();
   #serverRequestHandler: ServerRequestHandler | undefined;
   #child: ChildProcessWithoutNullStreams | undefined;
   #nextId = 1;
@@ -102,6 +112,7 @@ export class CodexAppServer {
     if (this.#child !== undefined) {
       throw new BridgeError("Codex app-server is already started", "CODEX_ALREADY_STARTED");
     }
+    this.#stopping = false;
 
     const child = spawn(
       this.#binaryPath,
@@ -117,41 +128,63 @@ export class CodexAppServer {
       },
     );
     this.#child = child;
-    child.once("exit", (code, signal) => this.handleExit(code, signal));
-    child.once("error", (error) => this.handleExit(null, errorMessage(error)));
+    let spawned = false;
+    child.once("spawn", () => {
+      spawned = true;
+    });
+    child.once("exit", (code, signal) => this.handleExit(child, code, signal));
+    child.on("error", (error) => {
+      if (this.#child !== child) return;
+      if (!spawned) this.handleExit(child, null, errorMessage(error));
+      else this.#logger.error("Codex app-server process error", error);
+    });
 
     const stdout = createInterface({ input: child.stdout, crlfDelay: Number.POSITIVE_INFINITY });
-    stdout.on("line", (line) => this.handleLine(line));
+    stdout.on("line", (line) => this.handleLine(child, line));
     const stderr = createInterface({ input: child.stderr, crlfDelay: Number.POSITIVE_INFINITY });
     stderr.on("line", (line) => this.#logger.debug("Codex app-server", { line }));
 
-    await once(child, "spawn");
-    const initialized = await this.request<InitializeResponse>({
-      method: "initialize",
-      params: {
-        clientInfo: {
-          name: "telex",
-          title: "Telex",
-          version: this.#clientVersion,
+    try {
+      await once(child, "spawn");
+      const initialized = await this.request<InitializeResponse>({
+        method: "initialize",
+        params: {
+          clientInfo: {
+            name: "telex",
+            title: "Telex",
+            version: this.#clientVersion,
+          },
+          capabilities: {
+            experimentalApi: true,
+            requestAttestation: false,
+          },
         },
-        capabilities: {
-          experimentalApi: true,
-          requestAttestation: false,
-        },
-      },
-    });
-    const notification: ClientNotification = { method: "initialized" };
-    await this.write(notification);
-    this.#logger.info("Codex app-server initialized", {
-      userAgent: initialized.userAgent,
-      platform: initialized.platformOs,
-    });
-    return initialized;
+      });
+      const notification: ClientNotification = { method: "initialized" };
+      await this.write(notification);
+      this.#logger.info("Codex app-server initialized", {
+        userAgent: initialized.userAgent,
+        platform: initialized.platformOs,
+      });
+      return initialized;
+    } catch (error) {
+      if (this.#child === child) {
+        await this.stop().catch((stopError: unknown) => {
+          this.#logger.error("Could not stop Codex after initialization failed", stopError);
+        });
+      }
+      throw error;
+    }
   }
 
   public onNotification(listener: NotificationListener): () => void {
     this.#notificationListeners.add(listener);
     return () => this.#notificationListeners.delete(listener);
+  }
+
+  public onExit(listener: ExitListener): () => void {
+    this.#exitListeners.add(listener);
+    return () => this.#exitListeners.delete(listener);
   }
 
   public setServerRequestHandler(handler: ServerRequestHandler): void {
@@ -183,14 +216,17 @@ export class CodexAppServer {
     const child = this.#child;
     if (child === undefined) return;
     this.#stopping = true;
+    const exited = new Promise<void>((resolve) => child.once("exit", () => resolve()));
+    const killTimer = setTimeout(() => {
+      if (this.#child === child && child.exitCode === null) child.kill("SIGKILL");
+    }, 5_000);
+    killTimer.unref();
     child.kill("SIGTERM");
-    await Promise.race([
-      once(child, "exit").then(() => undefined),
-      delay(5_000).then(() => {
-        if (child.exitCode === null) child.kill("SIGKILL");
-      }),
-    ]);
-    this.#child = undefined;
+    try {
+      await exited;
+    } finally {
+      clearTimeout(killTimer);
+    }
   }
 
   private async requestOnce(request: ClientRequestInput): Promise<unknown> {
@@ -216,7 +252,8 @@ export class CodexAppServer {
     }
   }
 
-  private handleLine(line: string): void {
+  private handleLine(child: ChildProcessWithoutNullStreams, line: string): void {
+    if (this.#child !== child) return;
     let message: z.infer<typeof wireMessageSchema>;
     try {
       message = wireMessageSchema.parse(JSON.parse(line));
@@ -262,7 +299,13 @@ export class CodexAppServer {
     }
   }
 
-  private handleExit(code: number | null, signal: NodeJS.Signals | string | null): void {
+  private handleExit(
+    child: ChildProcessWithoutNullStreams,
+    code: number | null,
+    signal: NodeJS.Signals | string | null,
+  ): void {
+    if (this.#child !== child) return;
+    const expected = this.#stopping;
     const error = new BridgeError(
       `Codex app-server exited (${code ?? signal ?? "unknown"})`,
       "CODEX_EXITED",
@@ -270,6 +313,14 @@ export class CodexAppServer {
     for (const pending of this.#pending.values()) pending.deferred.reject(error);
     this.#pending.clear();
     this.#child = undefined;
-    if (!this.#stopping) this.#logger.error("Codex app-server stopped unexpectedly", error);
+    if (!expected) this.#logger.error("Codex app-server stopped unexpectedly", error);
+    const exit = { error, expected, code, signal } satisfies CodexAppServerExit;
+    for (const listener of this.#exitListeners) {
+      try {
+        listener(exit);
+      } catch (listenerError) {
+        this.#logger.error("Codex app-server exit listener failed", listenerError);
+      }
+    }
   }
 }

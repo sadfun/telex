@@ -3,7 +3,7 @@ import type { Account } from "../generated/codex/v2/Account.js";
 import type { AccountLoginCompletedNotification } from "../generated/codex/v2/AccountLoginCompletedNotification.js";
 import type { GetAccountResponse } from "../generated/codex/v2/GetAccountResponse.js";
 import type { LoginAccountResponse } from "../generated/codex/v2/LoginAccountResponse.js";
-import { errorMessage } from "../shared/errors.js";
+import { BridgeError, errorMessage } from "../shared/errors.js";
 import type { Logger } from "../shared/logger.js";
 import type {
   InboundCommand,
@@ -25,6 +25,8 @@ const helpText = [
   "/login — sign in to ChatGPT",
   "/logout — sign out",
   "/config — open Codex settings",
+  "/reload — reload Codex config, MCP servers, and skills",
+  "/restart — safely restart the Codex app-server",
   "/update — update Telex to the latest release",
   "/help — show this help",
 ].join("\n");
@@ -48,6 +50,12 @@ export interface TelexUpdateCommand {
   readonly onInstalled: (version: string) => void;
 }
 
+export interface CodexRuntimeCommand {
+  status(): unknown;
+  reload(): Promise<unknown>;
+  restart(): Promise<unknown>;
+}
+
 interface PendingLogin {
   readonly responder: MessageResponder;
   readonly timer: NodeJS.Timeout;
@@ -60,6 +68,7 @@ export class CodexBridge {
   readonly #publicUrl: string | undefined;
   readonly #logger: Logger;
   readonly #updateCommand: TelexUpdateCommand | undefined;
+  readonly #runtimeCommand: CodexRuntimeCommand | undefined;
   readonly #pendingLogins = new Map<string, PendingLogin>();
   #signedInConfirmed = false;
   #updateInProgress = false;
@@ -96,11 +105,13 @@ export class CodexBridge {
     publicUrl: string | undefined,
     logger: Logger,
     updateCommand?: TelexUpdateCommand,
+    runtimeCommand?: CodexRuntimeCommand,
   ) {
     this.#codex = codex;
     this.#publicUrl = publicUrl;
     this.#logger = logger;
     this.#updateCommand = updateCommand;
+    this.#runtimeCommand = runtimeCommand;
     codex.onLoginCompleted((notification) => {
       void this.handleLoginCompleted(notification);
     });
@@ -164,12 +175,48 @@ export class CodexBridge {
           },
         });
         return;
+      case "reload":
+        if (!(await this.requirePrivateChat(message))) return;
+        await this.handleRuntimeCommand(message, "reload");
+        return;
+      case "restart":
+        if (!(await this.requirePrivateChat(message))) return;
+        await this.handleRuntimeCommand(message, "restart");
+        return;
       case "update":
         await this.handleUpdate(message);
         return;
       default:
         await message.responder.sendText(`Unknown command /${command.name}.\n\n${helpText}`);
     }
+  }
+
+  private async handleRuntimeCommand(
+    message: InboundMessage,
+    action: "reload" | "restart",
+  ): Promise<void> {
+    const runtime = this.#runtimeCommand;
+    if (runtime === undefined) {
+      await message.responder.sendText("Runtime controls are unavailable in this Telex build.");
+      return;
+    }
+    await message.responder.sendText(
+      action === "reload"
+        ? "Applying Codex config, MCP servers, and skills…"
+        : "Safely restarting the Codex app-server…",
+    );
+    if (action === "reload") await runtime.reload();
+    else await runtime.restart();
+    const status = runtimeStatusSummary(runtime.status());
+    await message.responder.sendText(
+      action === "reload"
+        ? status.degraded
+          ? `Reload finished with warnings: ${status.detail}`
+          : "✅ Config and skills refreshed. MCP changes will be active on the next turn."
+        : status.degraded
+          ? `Restart needs attention: ${status.detail}`
+          : "✅ Codex restarted and is ready.",
+    );
   }
 
   private async handleUpdate(message: InboundMessage): Promise<void> {
@@ -368,15 +415,49 @@ export class CodexBridge {
   }
 
   private async statusText(): Promise<string> {
-    const response = await this.#codex.account();
+    const runtime =
+      this.#runtimeCommand === undefined
+        ? undefined
+        : runtimeStatusSummary(this.#runtimeCommand.status());
+    const response = await this.#codex.account().catch((error: unknown) => {
+      const runtimeDetail = runtime === undefined ? "" : ` Runtime status: ${runtime.detail}.`;
+      throw new BridgeError(
+        `Codex app-server is unavailable: ${errorMessage(error)}.${runtimeDetail} Send /restart to recover it.`,
+        "CODEX_STATUS_UNAVAILABLE",
+      );
+    });
     const account = response.account;
-    if (account === null) {
-      return response.requiresOpenaiAuth
-        ? "Codex app-server is connected. Not signed in — send /login to connect ChatGPT."
-        : "Codex app-server is connected. This configuration does not require OpenAI sign-in.";
-    }
-    return `Codex app-server is connected. You're ${accountSummary(account)}.`;
+    const accountStatus =
+      account === null
+        ? response.requiresOpenaiAuth
+          ? "Codex app-server is connected. Not signed in — send /login to connect ChatGPT."
+          : "Codex app-server is connected. This configuration does not require OpenAI sign-in."
+        : `Codex app-server is connected. You're ${accountSummary(account)}.`;
+    return runtime?.degraded === true
+      ? `${accountStatus}\nRuntime needs attention: ${runtime.detail}`
+      : accountStatus;
   }
+}
+
+function runtimeStatusSummary(value: unknown): {
+  readonly degraded: boolean;
+  readonly detail: string;
+} {
+  if (typeof value !== "object" || value === null) {
+    return { degraded: true, detail: "status unavailable" };
+  }
+  const status = value as Readonly<Record<string, unknown>>;
+  const restartRequired = status.restartRequired === true;
+  const degraded = status.state === "degraded" || restartRequired;
+  const detail =
+    typeof status.lastError === "string"
+      ? status.lastError
+      : restartRequired
+        ? "an app-server restart is required to apply startup-only changes"
+        : typeof status.state === "string"
+          ? status.state
+          : "status unavailable";
+  return { degraded, detail };
 }
 
 function accountSummary(account: Account): string {
