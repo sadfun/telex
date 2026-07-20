@@ -72,6 +72,7 @@ export class CodexBridge {
           message.text,
           message.responder,
           message.address.isGuest,
+          message.attachments,
         );
         return;
       }
@@ -277,6 +278,7 @@ export class CodexBridge {
               resume.text,
               resume.responder,
               resume.address.isGuest,
+              resume.attachments,
             );
           }
         } else {
@@ -391,7 +393,7 @@ function isPrivate(message: InboundMessage): boolean {
 }
 
 function parseCommand(text: string): ParsedCommand | undefined {
-  const match = /^\/([a-z][a-z0-9_]*)(?:@[a-z0-9_]+)?(?:\s+[\s\S]*)?$/i.exec(text.trim());
+  const match = /^\/([a-z][a-z0-9_]*)(?:@[a-z0-9_]+)?$/i.exec(text.trim());
   const name = match?.[1];
   if (name === undefined) return undefined;
   return {

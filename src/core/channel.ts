@@ -10,6 +10,12 @@ export interface SenderIdentity {
   readonly displayName: string;
 }
 
+export interface InboundAttachment {
+  readonly kind: "image" | "file";
+  readonly path: string;
+  readonly description: string;
+}
+
 export interface ActionButton {
   readonly label: string;
   readonly kind: "url" | "webApp";
@@ -61,6 +67,7 @@ export interface InboundMessage {
   readonly address: ConversationAddress;
   readonly sender: SenderIdentity;
   readonly text: string;
+  readonly attachments: readonly InboundAttachment[];
   readonly responder: MessageResponder;
 }
 

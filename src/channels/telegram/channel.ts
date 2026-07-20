@@ -1,8 +1,10 @@
+import { join } from "node:path";
 import { type RunnerHandle, run } from "@grammyjs/runner";
 import { type Api, Bot } from "grammy";
-import type { CallbackQuery, Chat, Message } from "grammy/types";
+import type { CallbackQuery, Chat, Message, Update } from "grammy/types";
 import type {
   ChoiceOption,
+  InboundAttachment,
   InboundMessage,
   MessageHandler,
   MessagingChannel,
@@ -10,6 +12,8 @@ import type {
 import { type Deferred, deferred } from "../../shared/async.js";
 import { errorMessage } from "../../shared/errors.js";
 import type { Logger } from "../../shared/logger.js";
+import { downloadTelegramFile, TelegramFileDownloadError } from "./file.js";
+import { normalizeTelegramMessage, type TelegramFileReference } from "./message.js";
 import { type ChoiceRequester, TelegramGuestResponder, TelegramResponder } from "./reply.js";
 
 interface PendingChoice {
@@ -21,11 +25,22 @@ interface PendingChoice {
   readonly messageId: number;
 }
 
+interface GuestUpdateWithReferences extends Update {
+  readonly reference_messages?: readonly Message[];
+}
+
+interface GuestMessageWithReferences extends Message {
+  readonly reference_messages?: readonly Message[];
+}
+
 export class TelegramChannel implements MessagingChannel {
   public readonly name = "telegram";
   readonly #bot: Bot;
   readonly #allowedUserIds: ReadonlySet<number>;
   readonly #pollTimeout: number;
+  readonly #apiRoot: string;
+  readonly #token: string;
+  readonly #attachmentDirectory: string;
   readonly #logger: Logger;
   readonly #pendingChoices = new Map<string, PendingChoice>();
   #handler: MessageHandler | undefined;
@@ -37,17 +52,28 @@ export class TelegramChannel implements MessagingChannel {
     apiRoot: string,
     allowedUserIds: ReadonlySet<number>,
     pollTimeout: number,
+    attachmentDirectory: string,
     logger: Logger,
   ) {
+    this.#token = token;
+    this.#apiRoot = apiRoot;
     this.#allowedUserIds = allowedUserIds;
     this.#pollTimeout = pollTimeout;
+    this.#attachmentDirectory = attachmentDirectory;
     this.#logger = logger;
     this.#bot = new Bot(token, { client: { apiRoot } });
-    this.#bot.on("message:text", async (context) => {
+    this.#bot.on("message", async (context) => {
       await this.handleMessage(context.message, false, context.api);
     });
-    this.#bot.on("guest_message:text", async (context) => {
-      await this.handleMessage(context.guestMessage, true, context.api);
+    this.#bot.on("guest_message", async (context) => {
+      const update = context.update as GuestUpdateWithReferences;
+      const guestMessage = context.guestMessage as GuestMessageWithReferences;
+      await this.handleMessage(
+        guestMessage,
+        true,
+        context.api,
+        update.reference_messages ?? guestMessage.reference_messages,
+      );
     });
     this.#bot.on("callback_query:data", async (context) => {
       await this.handleCallback(context.callbackQuery, context.api);
@@ -105,9 +131,10 @@ export class TelegramChannel implements MessagingChannel {
   }
 
   private async handleMessage(
-    message: Message.TextMessage,
+    message: Message,
     guest: boolean,
     api: Api,
+    referenceMessages: readonly Message[] = [],
   ): Promise<void> {
     const sender = message.from;
     const handler = this.#handler;
@@ -117,11 +144,43 @@ export class TelegramChannel implements MessagingChannel {
       return;
     }
 
-    const text = message.text.trim();
-    if (text.length === 0) return;
     const guestQueryId = message.guest_query_id;
     if (guest && guestQueryId === undefined) return;
+    const normalized = normalizeTelegramMessage(message, referenceMessages);
+    const directory = join(this.#attachmentDirectory, crypto.randomUUID());
+    const attachments: InboundAttachment[] = [];
+    const failures: string[] = [];
+    for (const [index, file] of normalized.files.entries()) {
+      const description = describeTelegramFile(file);
+      try {
+        const path = await downloadTelegramFile(file, {
+          api,
+          apiRoot: this.#apiRoot,
+          botToken: this.#token,
+          directory,
+          index,
+        });
+        attachments.push({
+          kind: file.nativeImage ? "image" : "file",
+          path,
+          description,
+        });
+      } catch (error) {
+        this.#logger.warn("Could not download Telegram attachment", {
+          messageId: message.message_id,
+          description,
+          error: errorMessage(error).replaceAll(this.#token, "<redacted>"),
+        });
+        const reason =
+          error instanceof TelegramFileDownloadError
+            ? error.userMessage
+            : "Telegram could not download it; the cloud Bot API's 20 MB limit may apply";
+        failures.push(`[${description} was not attached: ${reason}.]`);
+      }
+    }
+    const text = [normalized.text, ...failures].filter((part) => part.length > 0).join("\n\n");
     const normalizedText = guest ? this.stripGuestMention(text) : text;
+    if (normalizedText.length === 0) return;
     const threadId = message.message_thread_id;
     const responder = guest
       ? new TelegramGuestResponder(api, guestQueryId as string)
@@ -134,7 +193,11 @@ export class TelegramChannel implements MessagingChannel {
           this.#logger,
         );
     const inbound: InboundMessage = {
-      id: guest ? `guest:${guestQueryId}` : String(message.message_id),
+      id: guest
+        ? `guest:${guestQueryId}`
+        : message.ephemeral_message_id === undefined
+          ? String(message.message_id)
+          : `ephemeral:${message.ephemeral_message_id}`,
       address: {
         channel: this.name,
         key: guest
@@ -148,6 +211,7 @@ export class TelegramChannel implements MessagingChannel {
         displayName: [sender.first_name, sender.last_name].filter(Boolean).join(" "),
       },
       text: normalizedText,
+      attachments,
       responder,
     };
     try {
@@ -237,4 +301,19 @@ export class TelegramChannel implements MessagingChannel {
     if (username === undefined) return text;
     return text.replace(new RegExp(`@${username}\\b`, "gi"), "").trim();
   }
+}
+
+function describeTelegramFile(file: TelegramFileReference): string {
+  const metadata = [
+    file.suggestedName,
+    file.mimeType,
+    file.size === undefined ? undefined : formatBytes(file.size),
+  ].filter((value): value is string => value !== undefined);
+  return metadata.length === 0 ? file.description : `${file.description} (${metadata.join(", ")})`;
+}
+
+function formatBytes(bytes: number): string {
+  if (bytes < 1_024) return `${bytes} B`;
+  if (bytes < 1_024 * 1_024) return `${Math.round(bytes / 1_024)} KB`;
+  return `${Math.round((bytes / (1_024 * 1_024)) * 10) / 10} MB`;
 }

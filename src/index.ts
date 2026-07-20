@@ -163,6 +163,7 @@ export async function runTelex(): Promise<TelexRunResult> {
       config.telegramApiBase,
       config.allowedUserIds,
       config.telegramPollTimeout,
+      join(config.workspace, ".telex", "attachments"),
       logger.child({ component: "telegram" }),
     );
     resources.push(telegram);

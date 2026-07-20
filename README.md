@@ -2,7 +2,7 @@
 
 Telex is a self-hosted Telegram bridge for OpenAI Codex. Telegram is only the transport: a dedicated [Codex app-server](https://github.com/openai/codex/blob/main/codex-rs/app-server/README.md) owns threads, turns, tools, approvals, authentication, and configuration.
 
-Telex supports private conversations, streamed replies and thinking, interactive approvals, guest mentions, persistent Codex threads, and an authenticated settings Mini App. It installs a pinned Codex CLI into isolated application storage, so it never depends on a global Codex installation.
+Telex supports private conversations, Telegram photos and files, forwarded and replied-to context, polls and other structured messages, streamed replies and thinking, interactive approvals, guest mentions, persistent Codex threads, and an authenticated settings Mini App. It installs a pinned Codex CLI into isolated application storage, so it never depends on a global Codex installation.
 
 ## Requirements
 
@@ -152,7 +152,9 @@ Then restart the service. Rollback changes application code only; it does not re
 | `/update` | Check for and install the latest Telex release, then restart the service. |
 | `/help` | Show the command list. |
 
-Messages that are not commands become `turn/start` requests. Codex commentary drives Telegram's thinking indicator, final-answer deltas drive the draft, and approval or user-input requests become inline choices.
+Messages that are not commands become `turn/start` requests. Photos and supported image files use Codex's native image input. Videos, audio, documents, animated stickers, and other binary files are downloaded under `.telex/attachments` in the Codex workspace and passed as local paths; captions, replies, forwards, polls, contacts, locations, checklists, and Telegram-only structures are preserved as concise text context. Codex commentary drives Telegram's thinking indicator, final-answer deltas drive the draft, and approval or user-input requests become inline choices.
+
+Telegram's hosted Bot API only allows bots to download files up to 20 MB. Telex still forwards the file metadata and a clear limitation notice when a download is unavailable. Set `TELEGRAM_API_BASE` to a [local Bot API server](https://core.telegram.org/bots/api#using-a-local-bot-api-server) to remove that download limit.
 
 ## Settings Mini App
 

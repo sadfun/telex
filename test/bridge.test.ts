@@ -5,7 +5,7 @@ import {
   type TelexUpdateCommand,
   type TelexUpdateResult,
 } from "../src/core/bridge.js";
-import type { InboundMessage, SendOptions } from "../src/core/channel.js";
+import type { InboundAttachment, InboundMessage, SendOptions } from "../src/core/channel.js";
 import type { AccountLoginCompletedNotification } from "../src/generated/codex/v2/AccountLoginCompletedNotification.js";
 import type { GetAccountResponse } from "../src/generated/codex/v2/GetAccountResponse.js";
 import type { LoginAccountResponse } from "../src/generated/codex/v2/LoginAccountResponse.js";
@@ -25,6 +25,7 @@ function createMessage(
   text: string,
   responder: ReturnType<typeof createResponder>,
   address: Partial<InboundMessage["address"]> = {},
+  attachments: readonly InboundAttachment[] = [],
 ): InboundMessage {
   return {
     id: "1",
@@ -37,6 +38,7 @@ function createMessage(
     },
     sender: { id: "1", displayName: "Test" },
     text,
+    attachments,
     responder,
   };
 }
@@ -118,7 +120,10 @@ describe("CodexBridge onboarding", () => {
     const { codex, raw, emitLoginCompleted } = createCodex();
     const bridge = new CodexBridge(codex, undefined, logger);
     const responder = createResponder();
-    await bridge.handleMessage(createMessage("fix the tests", responder));
+    const attachments: readonly InboundAttachment[] = [
+      { kind: "image", path: "/workspace/photo.jpg", description: "Telegram photo" },
+    ];
+    await bridge.handleMessage(createMessage("fix the tests", responder, {}, attachments));
 
     expect(raw.runTurn).not.toHaveBeenCalled();
     expect(raw.startDeviceLogin).toHaveBeenCalledTimes(1);
@@ -127,7 +132,13 @@ describe("CodexBridge onboarding", () => {
     raw.account.mockResolvedValue(signedInAccount);
     emitLoginCompleted({ loginId: "login-1", success: true, error: null });
     await vi.waitFor(() => {
-      expect(raw.runTurn).toHaveBeenCalledWith("telegram:1:0", "fix the tests", responder, false);
+      expect(raw.runTurn).toHaveBeenCalledWith(
+        "telegram:1:0",
+        "fix the tests",
+        responder,
+        false,
+        attachments,
+      );
     });
     const confirmation = responder.sendText.mock.calls[1]?.[0];
     expect(confirmation).toContain("✅");
@@ -171,6 +182,26 @@ describe("CodexBridge onboarding", () => {
 
     expect(raw.runTurn).toHaveBeenCalledTimes(2);
     expect(raw.account).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not treat a media caption that starts with a command as a command", async () => {
+    const { codex, raw } = createCodex({ account: vi.fn(async () => signedInAccount) });
+    const bridge = new CodexBridge(codex, undefined, logger);
+    const responder = createResponder();
+    const attachments: readonly InboundAttachment[] = [
+      { kind: "image", path: "/workspace/photo.jpg", description: "Telegram photo" },
+    ];
+
+    await bridge.handleMessage(createMessage("/new\n[Photo]", responder, {}, attachments));
+
+    expect(raw.resetConversation).not.toHaveBeenCalled();
+    expect(raw.runTurn).toHaveBeenCalledWith(
+      "telegram:1:0",
+      "/new\n[Photo]",
+      responder,
+      false,
+      attachments,
+    );
   });
 
   it("tells an already signed-in user how to switch accounts on /login", async () => {

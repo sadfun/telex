@@ -1,6 +1,7 @@
 import { basename } from "node:path";
 import type {
   ChoiceOption,
+  InboundAttachment,
   MessageResponder,
   OutboundStream,
   ProgressAction,
@@ -32,6 +33,7 @@ import type { TurnCompletedNotification } from "../generated/codex/v2/TurnComple
 import type { TurnInterruptResponse } from "../generated/codex/v2/TurnInterruptResponse.js";
 import type { TurnPlanUpdatedNotification } from "../generated/codex/v2/TurnPlanUpdatedNotification.js";
 import type { TurnStartResponse } from "../generated/codex/v2/TurnStartResponse.js";
+import type { UserInput } from "../generated/codex/v2/UserInput.js";
 import { type Deferred, deferred, KeyedSerialQueue, withTimeout } from "../shared/async.js";
 import { BridgeError, errorMessage } from "../shared/errors.js";
 import type { Logger } from "../shared/logger.js";
@@ -84,6 +86,7 @@ export class CodexService {
     text: string,
     responder: MessageResponder,
     ephemeral = false,
+    attachments: readonly InboundAttachment[] = [],
   ): Promise<void> {
     await this.#queue.run(conversationKey, async () => {
       const stream = responder.createStream();
@@ -113,7 +116,7 @@ export class CodexService {
           params: {
             threadId,
             clientUserMessageId: crypto.randomUUID(),
-            input: [{ type: "text", text, text_elements: [] }],
+            input: createTurnInput(text, attachments),
           },
         });
         active.turnId = response.turn.id;
@@ -470,6 +473,26 @@ export class CodexService {
       .filter(Boolean)
       .join("\n\n");
   }
+}
+
+export function createTurnInput(
+  text: string,
+  attachments: readonly InboundAttachment[],
+): UserInput[] {
+  const files = attachments.filter((attachment) => attachment.kind === "file");
+  const fileContext = files
+    .map((file) => `- ${file.description}: ${JSON.stringify(file.path)}`)
+    .join("\n");
+  const prompt =
+    fileContext.length === 0
+      ? text
+      : `${text}\n\nTelegram files available in the local workspace:\n${fileContext}`;
+  return [
+    { type: "text", text: prompt, text_elements: [] },
+    ...attachments
+      .filter((attachment) => attachment.kind === "image")
+      .map((attachment): UserInput => ({ type: "localImage", path: attachment.path })),
+  ];
 }
 
 function progressActions(item: ThreadItem): readonly ProgressAction[] {
