@@ -5,7 +5,12 @@ import type { GetAccountResponse } from "../generated/codex/v2/GetAccountRespons
 import type { LoginAccountResponse } from "../generated/codex/v2/LoginAccountResponse.js";
 import { errorMessage } from "../shared/errors.js";
 import type { Logger } from "../shared/logger.js";
-import type { InboundMessage, MessageHandler, MessageResponder } from "./channel.js";
+import type {
+  InboundCommand,
+  InboundMessage,
+  MessageHandler,
+  MessageResponder,
+} from "./channel.js";
 
 const introText =
   "👋 Hi, I'm Telex. Send me a message and I'll hand it to Codex, then stream progress and results back into this chat.";
@@ -13,6 +18,7 @@ const introText =
 const helpText = [
   "Send me a message to work with Codex in this conversation.",
   "",
+  "/start — show setup and sign-in help",
   "/new — start a fresh Codex task",
   "/stop — stop the current turn",
   "/status — check Codex and sign-in status",
@@ -27,10 +33,6 @@ const readyText =
   'Try something like "explain what this project does", or send /help for all commands.';
 
 const loginCodeTtl = 15 * 60 * 1_000;
-
-interface ParsedCommand {
-  readonly name: string;
-}
 
 export type TelexUpdateResult =
   | { readonly status: "current"; readonly version: string }
@@ -64,7 +66,9 @@ export class CodexBridge {
 
   public readonly handleMessage: MessageHandler = async (message) => {
     try {
-      const command = message.attachments.length === 0 ? parseCommand(message.text) : undefined;
+      const command =
+        message.command ??
+        (message.attachments.length === 0 ? parseCommand(message.text) : undefined);
       if (command === undefined) {
         if (!(await this.ensureSignedIn(message))) return;
         await this.#codex.runTurn(
@@ -102,7 +106,7 @@ export class CodexBridge {
     });
   }
 
-  private async handleCommand(message: InboundMessage, command: ParsedCommand): Promise<void> {
+  private async handleCommand(message: InboundMessage, command: InboundCommand): Promise<void> {
     switch (command.name) {
       case "start":
         await this.handleStart(message);
@@ -394,11 +398,12 @@ function isPrivate(message: InboundMessage): boolean {
   return message.address.isPrivate && !message.address.isGuest;
 }
 
-function parseCommand(text: string): ParsedCommand | undefined {
-  const match = /^\/([a-z][a-z0-9_]*)(?:@[a-z0-9_]+)?$/i.exec(text.trim());
+function parseCommand(text: string): InboundCommand | undefined {
+  const match = /^\/([a-z][a-z0-9_]*)(?:@[a-z0-9_]+)?(?:[ \t]+([^\r\n]*))?$/i.exec(text.trim());
   const name = match?.[1];
   if (name === undefined) return undefined;
   return {
     name: name.toLowerCase(),
+    args: match?.[2]?.trimStart() ?? "",
   };
 }

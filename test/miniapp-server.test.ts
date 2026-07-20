@@ -3,6 +3,7 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import { describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 import { type CodexConfigService, ConfigValidationError } from "../src/codex/config-service.js";
+import type { TelexSettings, TelexSettingsStore } from "../src/core/settings-store.js";
 import type { ConfigWriteResponse } from "../src/generated/codex/v2/ConfigWriteResponse.js";
 import { MiniAppServer } from "../src/miniapp/server.js";
 import type { Logger } from "../src/shared/logger.js";
@@ -47,12 +48,52 @@ describe("MiniAppServer config API", () => {
     );
 
     expect(response.status).toBe(200);
-    expect(responseJson(response)).toEqual({ ...snapshot, writeOutcome });
+    expect(responseJson(response)).toEqual({
+      ...snapshot,
+      writeOutcome,
+      telex: { remoteClientContext: true },
+    });
     expect(update).toHaveBeenCalledWith({
       expectedVersion: "revision-1",
       values: { model: "gpt-test" },
     });
     expect(read).toHaveBeenCalledOnce();
+  });
+
+  it("updates Telex settings without rewriting Codex config", async () => {
+    const snapshot = {
+      version: "revision-1",
+      values: { model: "gpt-test" },
+      capabilities: { models: [] },
+      validation: { valid: true, issues: [] },
+    };
+    const update = vi.fn();
+    const settings = testSettingsStore();
+    const server = testServer(
+      {
+        update,
+        read: vi.fn(async () => snapshot),
+        validate: vi.fn(),
+      },
+      settings,
+    );
+
+    const response = await dispatch(
+      server,
+      request("PUT", "/api/config", {
+        expectedVersion: "revision-1",
+        values: {},
+        telex: { remoteClientContext: false },
+      }),
+    );
+
+    expect(response.status).toBe(200);
+    expect(responseJson(response)).toEqual({
+      ...snapshot,
+      telex: { remoteClientContext: false },
+    });
+    expect(update).not.toHaveBeenCalled();
+    expect(settings.update).toHaveBeenCalledWith({ remoteClientContext: false });
   });
 
   it("normalizes Zod request failures for inline field display", async () => {
@@ -135,7 +176,10 @@ interface CapturedResponse {
   body: Buffer | undefined;
 }
 
-function testServer(configService: TestConfigService): MiniAppServer {
+function testServer(
+  configService: TestConfigService,
+  settings: TestSettingsStore = testSettingsStore(),
+): MiniAppServer {
   const logger = {
     error: vi.fn(),
     info: vi.fn(),
@@ -146,8 +190,25 @@ function testServer(configService: TestConfigService): MiniAppServer {
     botToken,
     allowedUserIds: new Set([42]),
     configService: configService as unknown as CodexConfigService,
+    settings: settings as unknown as TelexSettingsStore,
     logger,
   });
+}
+
+interface TestSettingsStore {
+  readonly read: () => TelexSettings;
+  readonly update: ReturnType<typeof vi.fn<(input: unknown) => Promise<TelexSettings>>>;
+}
+
+function testSettingsStore(): TestSettingsStore {
+  let settings: TelexSettings = { remoteClientContext: true };
+  return {
+    read: () => settings,
+    update: vi.fn(async (input: unknown) => {
+      settings = input as TelexSettings;
+      return settings;
+    }),
+  };
 }
 
 async function dispatch(

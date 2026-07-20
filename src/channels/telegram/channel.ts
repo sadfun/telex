@@ -1,20 +1,39 @@
 import { join } from "node:path";
 import { type RunnerHandle, run } from "@grammyjs/runner";
 import { type Api, Bot } from "grammy";
-import type { CallbackQuery, Chat, Message, Update } from "grammy/types";
+import type { BotCommand, CallbackQuery, Chat, Message, Update } from "grammy/types";
 import type {
   ChoiceOption,
   InboundAttachment,
   InboundMessage,
   MessageHandler,
+  MessageResponder,
   MessagingChannel,
 } from "../../core/channel.js";
 import { type Deferred, deferred } from "../../shared/async.js";
 import { errorMessage } from "../../shared/errors.js";
 import type { Logger } from "../../shared/logger.js";
 import { downloadTelegramFile, TelegramFileDownloadError } from "./file.js";
-import { normalizeTelegramMessage, type TelegramFileReference } from "./message.js";
-import { type ChoiceRequester, TelegramGuestResponder, TelegramResponder } from "./reply.js";
+import {
+  isTelegramTopicLifecycleMessage,
+  normalizeTelegramMessage,
+  type TelegramFileReference,
+} from "./message.js";
+import {
+  type ChoiceRequester,
+  TelegramGuestResponder,
+  TelegramResponder,
+  telegramSendParameters,
+} from "./reply.js";
+import { matchTelegramCommand, routeTelegramMessage, type TelegramReplyRoute } from "./route.js";
+
+type PendingChoiceMessage =
+  | { readonly kind: "normal"; readonly messageId: number }
+  | {
+      readonly kind: "ephemeral";
+      readonly receiverUserId: number;
+      readonly ephemeralMessageId: number;
+    };
 
 interface PendingChoice {
   readonly userId: number;
@@ -22,7 +41,7 @@ interface PendingChoice {
   readonly result: Deferred<string>;
   readonly timer: NodeJS.Timeout;
   readonly chatId: number;
-  readonly messageId: number;
+  readonly message: PendingChoiceMessage;
 }
 
 interface GuestUpdateWithReferences extends Update {
@@ -32,6 +51,18 @@ interface GuestUpdateWithReferences extends Update {
 interface GuestMessageWithReferences extends Message {
   readonly reference_messages?: readonly Message[];
 }
+
+export const telegramBotCommands = [
+  { command: "start", description: "Set up Telex" },
+  { command: "new", description: "Start a new Codex task" },
+  { command: "stop", description: "Stop the running turn" },
+  { command: "status", description: "Show Codex status" },
+  { command: "login", description: "Sign in to Codex" },
+  { command: "logout", description: "Sign out of Codex" },
+  { command: "config", description: "Open Codex settings" },
+  { command: "update", description: "Update Telex" },
+  { command: "help", description: "Show commands" },
+] as const satisfies readonly BotCommand[];
 
 export class TelegramChannel implements MessagingChannel {
   public readonly name = "telegram";
@@ -94,20 +125,9 @@ export class TelegramChannel implements MessagingChannel {
       username: bot.username,
       guestMode: bot.supports_guest_queries ?? false,
     });
-    await this.#bot.api
-      .setMyCommands([
-        { command: "new", description: "Start a new Codex task", is_ephemeral: true },
-        { command: "stop", description: "Stop the running turn", is_ephemeral: true },
-        { command: "status", description: "Show Codex status", is_ephemeral: true },
-        { command: "login", description: "Sign in to Codex", is_ephemeral: true },
-        { command: "logout", description: "Sign out of Codex", is_ephemeral: true },
-        { command: "config", description: "Open Codex settings", is_ephemeral: true },
-        { command: "update", description: "Update Telex", is_ephemeral: true },
-        { command: "help", description: "Show commands", is_ephemeral: true },
-      ])
-      .catch((error: unknown) => {
-        this.#logger.warn("Could not register Telegram commands", { error: errorMessage(error) });
-      });
+    await this.#bot.api.setMyCommands(telegramBotCommands).catch((error: unknown) => {
+      this.#logger.warn("Could not register Telegram commands", { error: errorMessage(error) });
+    });
 
     this.#runner = run(this.#bot, {
       runner: {
@@ -143,10 +163,24 @@ export class TelegramChannel implements MessagingChannel {
       this.#logger.warn("Ignored Telegram message from unauthorized user", { userId: sender.id });
       return;
     }
+    if (isTelegramTopicLifecycleMessage(message)) return;
 
     const guestQueryId = message.guest_query_id;
     if (guest && guestQueryId === undefined) return;
-    const normalized = normalizeTelegramMessage(message, referenceMessages);
+    const incomingRoute = guest ? undefined : routeTelegramMessage(message, sender.id);
+    if (!guest && incomingRoute === undefined) {
+      this.#logger.warn("Ignored unroutable Telegram direct message", {
+        chatId: message.chat.id,
+        messageId: message.message_id,
+      });
+      return;
+    }
+    const commandMatch = matchTelegramCommand(message, this.#botUsername);
+    if (commandMatch.kind === "otherBot") return;
+    const normalized =
+      commandMatch.kind === "command"
+        ? { text: message.text?.trim() ?? "", files: [] }
+        : normalizeTelegramMessage(message, referenceMessages);
     const directory = join(this.#attachmentDirectory, crypto.randomUUID());
     const attachments: InboundAttachment[] = [];
     const failures: string[] = [];
@@ -181,17 +215,24 @@ export class TelegramChannel implements MessagingChannel {
     const text = [normalized.text, ...failures].filter((part) => part.length > 0).join("\n\n");
     const normalizedText = guest ? this.stripGuestMention(text) : text;
     if (normalizedText.length === 0) return;
-    const threadId = message.message_thread_id;
-    const responder = guest
-      ? new TelegramGuestResponder(api, guestQueryId as string)
-      : new TelegramResponder(
-          api,
-          message.chat,
-          threadId,
-          sender.id,
-          this.requestChoice,
-          this.#logger,
-        );
+    let responder: MessageResponder;
+    let conversationKey: string;
+    if (guest) {
+      if (guestQueryId === undefined) return;
+      responder = new TelegramGuestResponder(api, guestQueryId);
+      conversationKey = `telegram:guest:${guestQueryId}`;
+    } else {
+      if (incomingRoute === undefined) return;
+      responder = new TelegramResponder(
+        api,
+        message.chat,
+        incomingRoute.reply,
+        sender.id,
+        this.requestChoice,
+        this.#logger,
+      );
+      conversationKey = `telegram:${message.chat.id}:${incomingRoute.conversationSuffix}`;
+    }
     const inbound: InboundMessage = {
       id: guest
         ? `guest:${guestQueryId}`
@@ -200,9 +241,7 @@ export class TelegramChannel implements MessagingChannel {
           : `ephemeral:${message.ephemeral_message_id}`,
       address: {
         channel: this.name,
-        key: guest
-          ? `telegram:guest:${guestQueryId}`
-          : `telegram:${message.chat.id}:${threadId ?? 0}`,
+        key: conversationKey,
         isPrivate: message.chat.type === "private",
         isGuest: guest,
       },
@@ -211,6 +250,7 @@ export class TelegramChannel implements MessagingChannel {
         displayName: [sender.first_name, sender.last_name].filter(Boolean).join(" "),
       },
       text: normalizedText,
+      ...(commandMatch.kind === "command" ? { command: commandMatch.command } : {}),
       attachments,
       responder,
     };
@@ -224,7 +264,7 @@ export class TelegramChannel implements MessagingChannel {
 
   private readonly requestChoice: ChoiceRequester = async (
     chat: Chat,
-    threadId: number | undefined,
+    route: TelegramReplyRoute,
     userId: number,
     prompt: string,
     options: readonly ChoiceOption[],
@@ -240,7 +280,7 @@ export class TelegramChannel implements MessagingChannel {
       chat.id,
       body.length <= 4_096 ? body : `${body.slice(0, 4_095)}…`,
       {
-        ...(threadId === undefined ? {} : { message_thread_id: threadId }),
+        ...telegramSendParameters(route),
         reply_markup: {
           inline_keyboard: options.map((option, index) => [
             {
@@ -251,6 +291,7 @@ export class TelegramChannel implements MessagingChannel {
         },
       },
     );
+    const sentMessage = pendingChoiceMessage(route, sent);
     const result = deferred<string>();
     const timer = setTimeout(
       () => {
@@ -266,7 +307,7 @@ export class TelegramChannel implements MessagingChannel {
       result,
       timer,
       chatId: chat.id,
-      messageId: sent.message_id,
+      message: sentMessage,
     });
     return await result.promise;
   };
@@ -288,11 +329,20 @@ export class TelegramChannel implements MessagingChannel {
     clearTimeout(pending.timer);
     this.#pendingChoices.delete(token);
     pending.result.resolve(selected.id);
+    const clearKeyboard =
+      pending.message.kind === "normal"
+        ? api.editMessageReplyMarkup(pending.chatId, pending.message.messageId, {
+            reply_markup: { inline_keyboard: [] },
+          })
+        : api.editEphemeralMessageReplyMarkup(
+            pending.chatId,
+            pending.message.receiverUserId,
+            pending.message.ephemeralMessageId,
+            { reply_markup: { inline_keyboard: [] } },
+          );
     await Promise.allSettled([
       api.answerCallbackQuery(query.id, { text: selected.label.slice(0, 200) }),
-      api.editMessageReplyMarkup(pending.chatId, pending.messageId, {
-        reply_markup: { inline_keyboard: [] },
-      }),
+      clearKeyboard,
     ]);
   }
 
@@ -301,6 +351,21 @@ export class TelegramChannel implements MessagingChannel {
     if (username === undefined) return text;
     return text.replace(new RegExp(`@${username}\\b`, "gi"), "").trim();
   }
+}
+
+function pendingChoiceMessage(route: TelegramReplyRoute, sent: Message): PendingChoiceMessage {
+  if (route.visibility.kind === "normal") {
+    return { kind: "normal", messageId: sent.message_id };
+  }
+  const ephemeralMessageId = sent.ephemeral_message_id;
+  if (ephemeralMessageId === undefined) {
+    throw new Error("Telegram did not return an ephemeral message identifier");
+  }
+  return {
+    kind: "ephemeral",
+    receiverUserId: route.visibility.receiverUserId,
+    ephemeralMessageId,
+  };
 }
 
 function describeTelegramFile(file: TelegramFileReference): string {

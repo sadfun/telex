@@ -67,6 +67,8 @@ describe("CodexService outbound files", () => {
       generatedImages,
       outbound,
       new Logger("error"),
+      undefined,
+      () => false,
     );
 
     await service.runTurn("telegram:42", "telegram", "make a report", responder, true);
@@ -79,6 +81,7 @@ describe("CodexService outbound files", () => {
       { filename: "image.png", contents: "image" },
       { filename: "report.pdf", contents: "report" },
     ]);
+    expect(rpc.turnStartRequest).not.toHaveProperty("params.additionalContext");
   });
 
   it("shows transcription progress and forwards the transcript with the original voice file", async () => {

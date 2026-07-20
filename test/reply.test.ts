@@ -7,6 +7,7 @@ import {
   TelegramGuestResponder,
   TelegramResponder,
 } from "../src/channels/telegram/reply.js";
+import type { TelegramReplyRoute } from "../src/channels/telegram/route.js";
 import { Logger } from "../src/shared/logger.js";
 
 afterEach(() => {
@@ -80,6 +81,104 @@ The event stream now carries structured progress.
     const result = formatThinkingBlock({ summary: "x".repeat(1_000), actions: [], plan: [] }, 80);
     expect(result).toHaveLength(80);
     expect(result.endsWith("…")).toBe(true);
+  });
+});
+
+describe("Telegram reply routing", () => {
+  it.each([
+    ["forum topic", topicRoute(17), { message_thread_id: 17 }],
+    ["channel direct-message topic", directRoute(91), { direct_messages_topic_id: 91 }],
+    ["generic thread", genericThreadRoute(55), { reply_parameters: { message_id: 55 } }],
+  ] as const)("sends text to the correct %s destination", async (_name, route, expected) => {
+    const sendMessage = vi.fn(async () => ({ message_id: 1 }));
+    const { responder } = createResponder({ sendMessage }, route);
+
+    await responder.sendText("hello");
+
+    expect(sendMessage).toHaveBeenCalledWith(42, "hello", expected);
+  });
+
+  it("answers a cached ephemeral command privately, then edits the private response", async () => {
+    const sendMessage = vi.fn(async () => ({ message_id: 0, ephemeral_message_id: 701 }));
+    const editEphemeralMessageText = vi.fn(async () => true);
+    const { responder } = createResponder(
+      { sendMessage, editEphemeralMessageText },
+      ephemeralTopicRoute(17, 42, 700),
+    );
+
+    await responder.sendText("Checking…");
+    await responder.sendText("Done.");
+
+    expect(sendMessage).toHaveBeenCalledWith(42, "Checking…", {
+      message_thread_id: 17,
+      receiver_user_id: 42,
+      reply_parameters: { ephemeral_message_id: 700 },
+    });
+    expect(editEphemeralMessageText).toHaveBeenCalledWith(42, 42, 701, "Done.", {});
+  });
+
+  it("does not publish draft or activity calls for ephemeral streams", async () => {
+    const sendRichMessageDraft = vi.fn(async () => true);
+    const sendMessageDraft = vi.fn(async () => true);
+    const sendChatAction = vi.fn(async () => true);
+    const sendRichMessage = vi.fn(async () => ({ message_id: 1 }));
+    const sendMessage = vi.fn(async () => ({ message_id: 0, ephemeral_message_id: 701 }));
+    const sendDocument = uploadMock(2);
+    const route = ephemeralTopicRoute(17, 42, 700);
+    const { responder } = createResponder(
+      {
+        sendRichMessageDraft,
+        sendMessageDraft,
+        sendChatAction,
+        sendRichMessage,
+        sendMessage,
+        sendDocument,
+      },
+      route,
+    );
+    const stream = responder.createStream();
+
+    await stream.start();
+    await stream.complete("Done.", [attachment("/workspace/report.pdf")]);
+
+    expect(sendRichMessageDraft).not.toHaveBeenCalled();
+    expect(sendMessageDraft).not.toHaveBeenCalled();
+    expect(sendChatAction).not.toHaveBeenCalled();
+    expect(sendRichMessage).not.toHaveBeenCalled();
+    const expected = {
+      message_thread_id: 17,
+      receiver_user_id: 42,
+      reply_parameters: { ephemeral_message_id: 700 },
+    };
+    expect(sendMessage).toHaveBeenCalledWith(42, "Done.", expected);
+    expect(sendDocument.mock.calls[0]?.[2]).toEqual(expected);
+  });
+
+  it("uses the direct-message topic for final output without unsupported chat activity", async () => {
+    const sendChatAction = vi.fn(async () => true);
+    const sendRichMessage = vi.fn(async () => ({ message_id: 1 }));
+    const directChat = {
+      id: 42,
+      type: "supergroup",
+      title: "Channel messages",
+      is_direct_messages: true,
+    } satisfies Chat.SupergroupChat;
+    const { responder } = createResponder(
+      { sendChatAction, sendRichMessage },
+      directRoute(91),
+      directChat,
+    );
+    const stream = responder.createStream();
+
+    await stream.start();
+    await stream.complete("Done.");
+
+    expect(sendChatAction).not.toHaveBeenCalled();
+    expect(sendRichMessage).toHaveBeenCalledWith(
+      42,
+      { markdown: "Done." },
+      { direct_messages_topic_id: 91 },
+    );
   });
 });
 
@@ -161,7 +260,7 @@ describe("Telegram streaming", () => {
     const sendDocument = uploadMock(6);
     const stream = createStream(
       { sendRichMessage, sendPhoto, sendAnimation, sendVideo, sendAudio, sendDocument },
-      17,
+      topicRoute(17),
     );
 
     await stream.complete("Your files:", [
@@ -286,7 +385,15 @@ function uploadMock(messageId: number) {
 
 function createStream(
   apiOverrides: Readonly<Record<string, unknown>>,
-  threadId: number | undefined = undefined,
+  route: TelegramReplyRoute = chatRoute(),
+) {
+  return createResponder(apiOverrides, route).responder.createStream();
+}
+
+function createResponder(
+  apiOverrides: Readonly<Record<string, unknown>>,
+  route: TelegramReplyRoute = chatRoute(),
+  chat: Chat = { id: 42, type: "private", first_name: "Ada" },
 ) {
   const api = {
     sendRichMessageDraft: vi.fn(async () => true),
@@ -296,14 +403,49 @@ function createStream(
     sendMessage: vi.fn(async () => ({ message_id: 1 })),
     ...apiOverrides,
   } as unknown as Api;
-  const chat = { id: 42, type: "private", first_name: "Ada" } satisfies Chat.PrivateChat;
   const responder = new TelegramResponder(
     api,
     chat,
-    threadId,
+    route,
     42,
     async () => "decline",
     new Logger("error"),
   );
-  return responder.createStream();
+  return { api, responder };
+}
+
+function chatRoute(): TelegramReplyRoute {
+  return { destination: { kind: "chat" }, visibility: { kind: "normal" } };
+}
+
+function topicRoute(messageThreadId: number): TelegramReplyRoute {
+  return {
+    destination: { kind: "topic", messageThreadId },
+    visibility: { kind: "normal" },
+  };
+}
+
+function directRoute(directMessagesTopicId: number): TelegramReplyRoute {
+  return {
+    destination: { kind: "directMessagesTopic", directMessagesTopicId },
+    visibility: { kind: "normal" },
+  };
+}
+
+function genericThreadRoute(replyToMessageId: number): TelegramReplyRoute {
+  return {
+    destination: { kind: "genericThread", replyToMessageId },
+    visibility: { kind: "normal" },
+  };
+}
+
+function ephemeralTopicRoute(
+  messageThreadId: number,
+  receiverUserId: number,
+  incomingEphemeralMessageId: number,
+): TelegramReplyRoute {
+  return {
+    destination: { kind: "topic", messageThreadId },
+    visibility: { kind: "ephemeral", receiverUserId, incomingEphemeralMessageId },
+  };
 }

@@ -115,7 +115,24 @@ const HANDLED_MESSAGE_KEYS = new Set([
   "poll",
   "venue",
   "location",
+  "forum_topic_created",
+  "forum_topic_edited",
+  "forum_topic_closed",
+  "forum_topic_reopened",
+  "general_forum_topic_hidden",
+  "general_forum_topic_unhidden",
 ]);
+
+export function isTelegramTopicLifecycleMessage(message: Message): boolean {
+  return (
+    message.forum_topic_created !== undefined ||
+    message.forum_topic_edited !== undefined ||
+    message.forum_topic_closed !== undefined ||
+    message.forum_topic_reopened !== undefined ||
+    message.general_forum_topic_hidden !== undefined ||
+    message.general_forum_topic_unhidden !== undefined
+  );
+}
 
 export function normalizeTelegramMessage(
   message: Message,
@@ -128,6 +145,7 @@ export function normalizeTelegramMessage(
   };
   const lines: string[] = [];
   for (const reference of referenceMessages) {
+    if (isTelegramTopicLifecycleMessage(reference)) continue;
     lines.push(`Referenced message from ${messageActor(reference)}:`);
     lines.push(...indent(describeMessage(reference, state, "reference")));
   }
@@ -142,7 +160,10 @@ function describeMessage(message: Message, state: NormalizeState, context: Conte
   if (message.forward_origin !== undefined) {
     lines.push(`Forwarded from ${describeOrigin(message.forward_origin)}`);
   }
-  if (message.reply_to_message !== undefined) {
+  if (
+    message.reply_to_message !== undefined &&
+    !isTelegramTopicLifecycleMessage(message.reply_to_message)
+  ) {
     lines.push(`Replying to ${messageActor(message.reply_to_message)}:`);
     lines.push(...indent(describeMessage(message.reply_to_message, state, "reply")));
   }

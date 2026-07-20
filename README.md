@@ -145,6 +145,7 @@ Then restart the service. Rollback changes application code only; it does not re
 
 | Command | Effect |
 | --- | --- |
+| `/start` | Show setup guidance and start sign-in when required. |
 | `/new` | Interrupt the current turn, forget its thread, and start fresh on the next message. |
 | `/stop` | Interrupt the running Codex turn. |
 | `/status` | Check app-server connectivity and the current Codex account. |
@@ -164,7 +165,7 @@ Telegram's hosted Bot API only allows bots to download files up to 20 MB and upl
 
 ## Settings Mini App
 
-The Mini App uses [TelegramUI](https://github.com/telegram-mini-apps-dev/TelegramUI) and accepts only signed Telegram `initData` from allowlisted private users. It covers the everyday settings from Codex's [basic configuration guide](https://learn.chatgpt.com/docs/config-file/config-basic), including models, reasoning, approval policy, permission profiles, sandboxing, web search, shell environment, and supported feature flags.
+The Mini App uses [TelegramUI](https://github.com/telegram-mini-apps-dev/TelegramUI) and accepts only signed Telegram `initData` from allowlisted private users. It includes a default-on remote session context toggle and covers the everyday settings from Codex's [basic configuration guide](https://learn.chatgpt.com/docs/config-file/config-basic), including models, reasoning, approval policy, permission profiles, sandboxing, web search, shell environment, and supported feature flags. Turning remote session context off stops Telex from adding its connector-aware instructions to Codex turns.
 
 Choices come from the running app-server and active configuration layers instead of a handwritten catalog. Every edit is previewed by the same server-side validator used for saves. A save is a version-checked `config/batchWrite`, so all changes either pass Codex validation and land together or leave `config.toml` untouched. The app-server runs with `--strict-config`, so unknown configuration keys fail loudly.
 

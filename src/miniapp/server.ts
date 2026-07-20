@@ -2,13 +2,14 @@ import { access, readFile } from "node:fs/promises";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { ZodError } from "zod";
+import { ZodError, z } from "zod";
 import {
   type CodexConfigService,
   ConfigValidationError,
   type ConfigValidationIssue,
 } from "../codex/config-service.js";
 import { CodexRpcError } from "../codex/rpc.js";
+import type { TelexSettingsStore } from "../core/settings-store.js";
 import { BridgeError } from "../shared/errors.js";
 import type { Logger } from "../shared/logger.js";
 import { validateTelegramInitData } from "./auth.js";
@@ -17,12 +18,23 @@ const MAX_REQUEST_BYTES = 32 * 1_024;
 const DEFAULT_MAX_AUTH_AGE_SECONDS = 60 * 60;
 const JSON_CONTENT_TYPE = "application/json; charset=utf-8";
 
+const settingsUpdateSchema = z.strictObject({
+  expectedVersion: z.string().nullable(),
+  values: z.record(z.string(), z.unknown()),
+  telex: z
+    .strictObject({
+      remoteClientContext: z.boolean(),
+    })
+    .optional(),
+});
+
 export interface MiniAppServerOptions {
   readonly host: string;
   readonly port: number;
   readonly botToken: string;
   readonly allowedUserIds: ReadonlySet<number>;
   readonly configService: CodexConfigService;
+  readonly settings: TelexSettingsStore;
   readonly logger: Logger;
   readonly maxAuthAgeSeconds?: number;
   readonly assetDirectory?: string;
@@ -113,14 +125,25 @@ export class MiniAppServer {
     if (url.pathname === "/api/config") {
       this.authenticate(request);
       if (request.method === "GET") {
-        this.sendJson(response, 200, await this.options.configService.read());
+        const snapshot = await this.options.configService.read();
+        this.sendJson(response, 200, { ...snapshot, telex: this.options.settings.read() });
         return;
       }
       if (request.method === "PUT") {
-        const input = await this.readJson(request);
-        const writeOutcome = await this.options.configService.update(input);
+        const { expectedVersion, values, telex } = settingsUpdateSchema.parse(
+          await this.readJson(request),
+        );
+        const writeOutcome =
+          Object.keys(values).length === 0
+            ? undefined
+            : await this.options.configService.update({ expectedVersion, values });
+        if (telex !== undefined) await this.options.settings.update(telex);
         const snapshot = await this.options.configService.read();
-        this.sendJson(response, 200, { ...snapshot, writeOutcome });
+        this.sendJson(response, 200, {
+          ...snapshot,
+          ...(writeOutcome === undefined ? {} : { writeOutcome }),
+          telex: this.options.settings.read(),
+        });
         return;
       }
       response.setHeader("Allow", "GET, PUT");

@@ -143,7 +143,12 @@ interface LoadedSnapshot {
   readonly values: ClientEditableCodexConfig;
   readonly capabilities: ConfigCapabilities;
   readonly validation: ValidationResult;
+  readonly telex: TelexSettings;
   readonly writeOutcome: WriteOutcome | undefined;
+}
+
+interface TelexSettings {
+  readonly remoteClientContext: boolean;
 }
 
 interface WriteOutcome {
@@ -283,6 +288,7 @@ function SettingsApp(): ReactElement {
   const [loadAttempt, setLoadAttempt] = useState(0);
   const [snapshot, setSnapshot] = useState<LoadedSnapshot>();
   const [draft, setDraft] = useState<ConfigDraft>();
+  const [remoteClientContext, setRemoteClientContext] = useState(true);
   const [loadError, setLoadError] = useState<string>();
   const [saving, setSaving] = useState(false);
   const [validation, setValidation] = useState<ValidationResult>({ valid: true, issues: [] });
@@ -311,6 +317,7 @@ function SettingsApp(): ReactElement {
         if (!active || requestedAttempt !== loadAttempt) return;
         setSnapshot(loaded);
         setDraft(draftFromConfig(loaded.values));
+        setRemoteClientContext(loaded.telex.remoteClientContext);
         setValidation(loaded.validation);
         setNotice("Settings are up to date.");
       })
@@ -333,12 +340,16 @@ function SettingsApp(): ReactElement {
         : changedConfig(snapshot.values, normalizedValues),
     [normalizedValues, snapshot],
   );
-  const dirty = Object.keys(changes).length > 0;
+  const configDirty = Object.keys(changes).length > 0;
+  const remoteClientContextDirty =
+    snapshot !== undefined && remoteClientContext !== snapshot.telex.remoteClientContext;
+  const dirty = configDirty || remoteClientContextDirty;
 
   useEffect(() => {
-    if (!dirty || snapshot === undefined) {
+    if (!configDirty || snapshot === undefined) {
       setValidating(false);
       setValidation(snapshot?.validation ?? { valid: true, issues: [] });
+      setNotice(dirty ? "Ready to save." : "Settings are up to date.");
       return;
     }
     const controller = new AbortController();
@@ -369,7 +380,7 @@ function SettingsApp(): ReactElement {
       window.clearTimeout(timer);
       controller.abort();
     };
-  }, [changes, dirty, snapshot]);
+  }, [changes, configDirty, dirty, snapshot]);
 
   const updateScalar = (key: ScalarDraftKey, value: string): void => {
     setDraft((current) => (current === undefined ? current : { ...current, [key]: value }));
@@ -419,8 +430,14 @@ function SettingsApp(): ReactElement {
     setSaving(true);
     setNotice("Checking and saving…");
     try {
-      const body = { expectedVersion: snapshot.version, values: changes };
-      const result = await requestValidation(body);
+      const body = {
+        expectedVersion: snapshot.version,
+        values: changes,
+        ...(remoteClientContextDirty ? { telex: { remoteClientContext } } : {}),
+      };
+      const result = configDirty
+        ? await requestValidation({ expectedVersion: snapshot.version, values: changes })
+        : { valid: true, issues: [] };
       setValidation(result);
       if (!result.valid) {
         setNotice("Fix the highlighted settings before saving.");
@@ -430,13 +447,16 @@ function SettingsApp(): ReactElement {
       const loaded = await requestSnapshot("PUT", body);
       setSnapshot(loaded);
       setDraft(draftFromConfig(loaded.values));
+      setRemoteClientContext(loaded.telex.remoteClientContext);
       setValidation(loaded.validation);
       const overridden = loaded.writeOutcome?.status === "okOverridden";
       setNotice(
         overridden
           ? (loaded.writeOutcome?.overriddenMetadata?.message ??
               "Saved, but a higher-priority layer overrides this value.")
-          : "Saved. Codex reloaded the config.",
+          : configDirty
+            ? "Saved. Codex reloaded the config."
+            : "Saved.",
       );
       webApp?.HapticFeedback?.notificationOccurred(overridden ? "warning" : "success");
     } catch (error) {
@@ -457,6 +477,7 @@ function SettingsApp(): ReactElement {
       : renderForm({
           snapshot,
           draft,
+          remoteClientContext,
           issues: validation.issues,
           dirty,
           saving,
@@ -467,6 +488,7 @@ function SettingsApp(): ReactElement {
           updateModel,
           updateGranularApproval,
           updateFeature,
+          updateRemoteClientContext: setRemoteClientContext,
         });
 
   return h(AppRoot, { appearance, className: "appRoot" }, content);
@@ -475,6 +497,7 @@ function SettingsApp(): ReactElement {
 interface FormRenderOptions {
   readonly snapshot: LoadedSnapshot;
   readonly draft: ConfigDraft;
+  readonly remoteClientContext: boolean;
   readonly issues: readonly ValidationIssue[];
   readonly dirty: boolean;
   readonly saving: boolean;
@@ -485,6 +508,7 @@ interface FormRenderOptions {
   readonly updateModel: (value: string) => void;
   readonly updateGranularApproval: (key: keyof GranularApproval, value: boolean) => void;
   readonly updateFeature: (name: FeatureName, value: boolean) => void;
+  readonly updateRemoteClientContext: (value: boolean) => void;
 }
 
 function renderForm(options: FormRenderOptions): ReactElement {
@@ -504,6 +528,26 @@ function renderForm(options: FormRenderOptions): ReactElement {
   const allowedSearchModes = stringSet(requirements?.allowedWebSearchModes);
   const allowedWindowsSandboxes = stringSet(requirements?.allowedWindowsSandboxImplementations);
   const issueSummary = renderIssueSummary(issues);
+
+  const telexSection = h(
+    Section,
+    {
+      header: "Remote connection",
+      footer: "Enabled by default; Telex detects the current connector for each turn.",
+    },
+    toggleField({
+      draftKey: "telex.remoteClientContext",
+      configPath: "telex.remoteClientContext",
+      label: "Remote session context",
+      description:
+        "Tell Codex that you are connected remotely, so it avoids host-local UI and localhost handoffs.",
+      checked: options.remoteClientContext,
+      disabled: false,
+      issues: [],
+      fieldId: "telex-remote-client-context",
+      onChange: options.updateRemoteClientContext,
+    }),
+  );
 
   const modelField = selectField({
     draftKey: "model",
@@ -798,8 +842,8 @@ function renderForm(options: FormRenderOptions): ReactElement {
         h(
           "div",
           null,
-          h(Headline, { Component: "h1" }, "Codex settings"),
-          h(Caption, { className: "pageSubtitle" }, "Type-safe atomic config.toml edits"),
+          h(Headline, { Component: "h1" }, "Telex settings"),
+          h(Caption, { className: "pageSubtitle" }, "Bridge behavior and Codex configuration"),
         ),
         h(
           Caption,
@@ -814,6 +858,7 @@ function renderForm(options: FormRenderOptions): ReactElement {
       h(
         "div",
         { className: "sectionStack" },
+        telexSection,
         modelSection,
         accessSection,
         environmentSection,
@@ -1180,6 +1225,7 @@ async function requestSnapshot(
   body?: Readonly<{
     expectedVersion: string | null;
     values: Partial<ClientEditableCodexConfig>;
+    telex?: TelexSettings;
   }>,
 ): Promise<LoadedSnapshot> {
   const value = await requestJson("/api/config", {
@@ -1230,10 +1276,12 @@ async function requestJson(path: string, init: RequestInit): Promise<unknown> {
 function parseSnapshot(value: unknown): LoadedSnapshot {
   const outerRecord = recordValue(value);
   const record = recordValue(outerRecord?.snapshot) ?? outerRecord;
+  const telex = recordValue(record?.telex);
   if (
     record === undefined ||
     !(typeof record.version === "string" || record.version === null) ||
-    !isEditableConfig(record.values)
+    !isEditableConfig(record.values) ||
+    typeof telex?.remoteClientContext !== "boolean"
   ) {
     throw new Error("The bridge returned an invalid config response.");
   }
@@ -1245,6 +1293,7 @@ function parseSnapshot(value: unknown): LoadedSnapshot {
       valid: true,
       issues: [],
     },
+    telex: { remoteClientContext: telex.remoteClientContext },
     writeOutcome: parseWriteOutcome(outerRecord?.writeOutcome ?? record.writeOutcome),
   };
 }

@@ -16,6 +16,11 @@ export interface InboundAttachment {
   readonly description: string;
 }
 
+export interface InboundCommand {
+  readonly name: string;
+  readonly args: string;
+}
+
 export interface OutboundAttachment {
   readonly path: string;
   readonly filename: string;
@@ -72,6 +77,7 @@ export interface InboundMessage {
   readonly address: ConversationAddress;
   readonly sender: SenderIdentity;
   readonly text: string;
+  readonly command?: InboundCommand;
   readonly attachments: readonly InboundAttachment[];
   readonly responder: MessageResponder;
 }

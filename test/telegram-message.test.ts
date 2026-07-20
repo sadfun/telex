@@ -1,6 +1,9 @@
 import type { Message, PhotoSize, Sticker } from "grammy/types";
 import { describe, expect, it } from "vitest";
-import { normalizeTelegramMessage } from "../src/channels/telegram/message.js";
+import {
+  isTelegramTopicLifecycleMessage,
+  normalizeTelegramMessage,
+} from "../src/channels/telegram/message.js";
 
 const smallPhoto: PhotoSize = {
   file_id: "small-file",
@@ -88,6 +91,22 @@ describe("normalizeTelegramMessage", () => {
     expect(result.text).toContain("Original diagram");
     expect(result.text).toContain("Please use this");
     expect(result.files[0]?.description).toContain("Replied-to");
+  });
+
+  it("omits Telegram's implicit topic-root reply context from commands", () => {
+    const result = normalizeTelegramMessage(
+      message({
+        text: "/start",
+        message_thread_id: 17,
+        is_topic_message: true,
+        reply_to_message: message({
+          from: { id: 2, is_bot: false, first_name: "Ada" },
+          forum_topic_created: { name: "Work", icon_color: 7_322_096 },
+        }) as Message & { reply_to_message: undefined },
+      }),
+    );
+
+    expect(result).toEqual({ text: "/start", files: [] });
   });
 
   it("includes guest reference messages and their attachments", () => {
@@ -234,6 +253,32 @@ describe("normalizeTelegramMessage", () => {
     ["service", { group_chat_created: true }],
   ] as const)("never returns empty text for a %s message", (_name, content) => {
     expect(normalizeTelegramMessage(message(content as Partial<Message>)).text.trim()).not.toBe("");
+  });
+});
+
+describe("isTelegramTopicLifecycleMessage", () => {
+  it.each([
+    { forum_topic_created: { name: "Work", icon_color: 7_322_096 } },
+    { forum_topic_edited: { name: "Renamed" } },
+    { forum_topic_closed: {} },
+    { forum_topic_reopened: {} },
+    { general_forum_topic_hidden: {} },
+    { general_forum_topic_unhidden: {} },
+  ] as const)("recognizes topic lifecycle service messages", (content) => {
+    expect(isTelegramTopicLifecycleMessage(message(content as Partial<Message>))).toBe(true);
+  });
+
+  it("does not suppress an ordinary message replying to a lifecycle event", () => {
+    expect(
+      isTelegramTopicLifecycleMessage(
+        message({
+          text: "hello",
+          reply_to_message: message({
+            forum_topic_created: { name: "Work", icon_color: 7_322_096 },
+          }) as Message & { reply_to_message: undefined },
+        }),
+      ),
+    ).toBe(false);
   });
 });
 

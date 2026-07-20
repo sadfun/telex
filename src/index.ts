@@ -9,6 +9,7 @@ import { CodexToolchainManager, readPinnedCodexVersion } from "./codex/toolchain
 import { loadAppConfig } from "./config/env.js";
 import { CodexBridge } from "./core/bridge.js";
 import { ConversationStore } from "./core/conversation-store.js";
+import { TelexSettingsStore } from "./core/settings-store.js";
 import { ensureCloudflared } from "./miniapp/cloudflared.js";
 import { MiniAppServer } from "./miniapp/server.js";
 import { QuickTunnel } from "./miniapp/tunnel.js";
@@ -50,6 +51,7 @@ export async function runTelex(): Promise<TelexRunResult> {
   const outboundDirectory = join(config.dataDirectory, "outbound");
   const toolchainsDirectory = join(config.dataDirectory, "toolchains");
   const statePath = join(config.dataDirectory, "conversations.json");
+  const settingsPath = join(config.dataDirectory, "settings.json");
   const resources: Stoppable[] = [];
   const manuallyInstalledUpdate = deferred<string>();
   let updateMonitor: Promise<string | undefined> | undefined;
@@ -93,7 +95,11 @@ export async function runTelex(): Promise<TelexRunResult> {
       statePath,
       logger.child({ component: "conversation-store" }),
     );
-    await conversations.load();
+    const settings = new TelexSettingsStore(
+      settingsPath,
+      logger.child({ component: "settings-store" }),
+    );
+    await Promise.all([conversations.load(), settings.load()]);
     const transcriptionTransport = new CurlImpersonateTransport(
       toolchainsDirectory,
       logger.child({ component: "transcription-transport" }),
@@ -116,6 +122,7 @@ export async function runTelex(): Promise<TelexRunResult> {
       outboundDirectory,
       logger.child({ component: "codex" }),
       voiceTranscriber,
+      () => settings.read().remoteClientContext,
     );
     const configService = new CodexConfigService(rpc, config.workspace);
 
@@ -125,6 +132,7 @@ export async function runTelex(): Promise<TelexRunResult> {
       botToken: config.telegramToken,
       allowedUserIds: config.allowedUserIds,
       configService,
+      settings,
       logger: logger.child({ component: "miniapp" }),
     });
     resources.push(miniApp);

@@ -5,7 +5,12 @@ import {
   type TelexUpdateCommand,
   type TelexUpdateResult,
 } from "../src/core/bridge.js";
-import type { InboundAttachment, InboundMessage, SendOptions } from "../src/core/channel.js";
+import type {
+  InboundAttachment,
+  InboundCommand,
+  InboundMessage,
+  SendOptions,
+} from "../src/core/channel.js";
 import type { AccountLoginCompletedNotification } from "../src/generated/codex/v2/AccountLoginCompletedNotification.js";
 import type { GetAccountResponse } from "../src/generated/codex/v2/GetAccountResponse.js";
 import type { LoginAccountResponse } from "../src/generated/codex/v2/LoginAccountResponse.js";
@@ -26,6 +31,7 @@ function createMessage(
   responder: ReturnType<typeof createResponder>,
   address: Partial<InboundMessage["address"]> = {},
   attachments: readonly InboundAttachment[] = [],
+  command?: InboundCommand,
 ): InboundMessage {
   return {
     id: "1",
@@ -38,6 +44,7 @@ function createMessage(
     },
     sender: { id: "1", displayName: "Test" },
     text,
+    ...(command === undefined ? {} : { command }),
     attachments,
     responder,
   };
@@ -91,6 +98,39 @@ describe("CodexBridge onboarding", () => {
     const text = responder.sendText.mock.calls[0]?.[0];
     expect(text).toContain("signed in to ChatGPT (plus)");
     expect(text).toContain("ready to go");
+  });
+
+  it.each(["/start payload", "/start@telex_bot payload"])(
+    "accepts Telegram's start payload syntax: %s",
+    async (text) => {
+      const { codex, raw } = createCodex({ account: vi.fn(async () => signedInAccount) });
+      const bridge = new CodexBridge(codex, undefined, logger);
+      const responder = createResponder();
+
+      await bridge.handleMessage(createMessage(text, responder));
+
+      expect(raw.runTurn).not.toHaveBeenCalled();
+      expect(responder.sendText.mock.calls[0]?.[0]).toContain("ready to go");
+    },
+  );
+
+  it("prefers a transport command over normalized reply context and attachments", async () => {
+    const { codex, raw } = createCodex({ account: vi.fn(async () => signedInAccount) });
+    const bridge = new CodexBridge(codex, undefined, logger);
+    const responder = createResponder();
+
+    await bridge.handleMessage(
+      createMessage(
+        "Replying to Topic:\n  [Photo]\n/start",
+        responder,
+        {},
+        [{ kind: "image", path: "/workspace/topic.jpg", description: "Topic root" }],
+        { name: "start", args: "" },
+      ),
+    );
+
+    expect(raw.runTurn).not.toHaveBeenCalled();
+    expect(responder.sendText.mock.calls[0]?.[0]).toContain("ready to go");
   });
 
   it("starts the sign-in flow directly from /start in a private chat", async () => {

@@ -73,6 +73,7 @@ export class CodexService {
   readonly #outboundDirectory: string;
   readonly #logger: Logger;
   readonly #voiceTranscriber: VoiceTranscriber | undefined;
+  readonly #remoteClientContextEnabled: () => boolean;
 
   public constructor(
     rpc: CodexAppServer,
@@ -82,6 +83,7 @@ export class CodexService {
     outboundDirectory: string,
     logger: Logger,
     voiceTranscriber?: VoiceTranscriber,
+    remoteClientContextEnabled: () => boolean = () => true,
   ) {
     this.#rpc = rpc;
     this.#conversations = conversations;
@@ -90,6 +92,7 @@ export class CodexService {
     this.#outboundDirectory = outboundDirectory;
     this.#logger = logger;
     this.#voiceTranscriber = voiceTranscriber;
+    this.#remoteClientContextEnabled = remoteClientContextEnabled;
     rpc.onNotification((notification) => this.handleNotification(notification));
     rpc.setServerRequestHandler(async (request) => await this.handleServerRequest(request));
   }
@@ -146,7 +149,9 @@ export class CodexService {
             threadId,
             clientUserMessageId: crypto.randomUUID(),
             input: createTurnInput(prepared, connector, attachments),
-            additionalContext: createRemoteClientContext(connector),
+            ...(this.#remoteClientContextEnabled()
+              ? { additionalContext: createRemoteClientContext(connector) }
+              : {}),
           },
         });
         active.turnId = response.turn.id;
