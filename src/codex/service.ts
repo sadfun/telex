@@ -38,6 +38,7 @@ import type { UserInput } from "../generated/codex/v2/UserInput.js";
 import { type Deferred, deferred, KeyedSerialQueue, withTimeout } from "../shared/async.js";
 import { BridgeError, errorMessage } from "../shared/errors.js";
 import type { Logger } from "../shared/logger.js";
+import type { VoiceTranscriber } from "../transcription/service.js";
 import { generatedFilePaths, resolveOutboundAttachments } from "./output-files.js";
 import type { CodexAppServer } from "./rpc.js";
 
@@ -71,6 +72,7 @@ export class CodexService {
   readonly #generatedImagesDirectory: string;
   readonly #outboundDirectory: string;
   readonly #logger: Logger;
+  readonly #voiceTranscriber: VoiceTranscriber | undefined;
 
   public constructor(
     rpc: CodexAppServer,
@@ -79,6 +81,7 @@ export class CodexService {
     generatedImagesDirectory: string,
     outboundDirectory: string,
     logger: Logger,
+    voiceTranscriber?: VoiceTranscriber,
   ) {
     this.#rpc = rpc;
     this.#conversations = conversations;
@@ -86,6 +89,7 @@ export class CodexService {
     this.#generatedImagesDirectory = generatedImagesDirectory;
     this.#outboundDirectory = outboundDirectory;
     this.#logger = logger;
+    this.#voiceTranscriber = voiceTranscriber;
     rpc.onNotification((notification) => this.handleNotification(notification));
     rpc.setServerRequestHandler(async (request) => await this.handleServerRequest(request));
   }
@@ -97,12 +101,25 @@ export class CodexService {
     ephemeral = false,
     attachments: readonly InboundAttachment[] = [],
   ): Promise<void> {
+    const stream = responder.createStream();
+    const voiceAttachments = attachments.filter((attachment) => attachment.kind === "voice");
+    const shouldTranscribe = voiceAttachments.length > 0 && this.#voiceTranscriber !== undefined;
+    let preparedText: Promise<string> | undefined;
+    if (shouldTranscribe) {
+      await stream.start({ summary: "Transcribing…", actions: [], plan: [] });
+      preparedText = this.transcribeVoiceMessages(text, voiceAttachments).then((prepared) => {
+        stream.setProgress({ summary: "Thinking…", actions: [], plan: [] });
+        return prepared;
+      });
+      void preparedText.catch(() => undefined);
+    }
+
     await this.#queue.run(conversationKey, async () => {
-      const stream = responder.createStream();
-      await stream.start();
+      if (!shouldTranscribe) await stream.start();
       const stagingDirectory = join(this.#outboundDirectory, crypto.randomUUID());
       let active: ActiveTurn | undefined;
       try {
+        const prepared = preparedText === undefined ? text : await preparedText;
         const threadId = await this.ensureThread(conversationKey, ephemeral);
         active = {
           conversationKey,
@@ -127,7 +144,7 @@ export class CodexService {
           params: {
             threadId,
             clientUserMessageId: crypto.randomUUID(),
-            input: createTurnInput(text, attachments),
+            input: createTurnInput(prepared, attachments),
           },
         });
         active.turnId = response.turn.id;
@@ -168,6 +185,27 @@ export class CodexService {
         await rm(stagingDirectory, { recursive: true, force: true }).catch(() => undefined);
       }
     });
+  }
+
+  private async transcribeVoiceMessages(
+    text: string,
+    attachments: readonly InboundAttachment[],
+  ): Promise<string> {
+    const transcriber = this.#voiceTranscriber;
+    if (transcriber === undefined) return text;
+    const transcripts: string[] = [];
+    for (const attachment of attachments) {
+      transcripts.push(await transcriber.transcribe(attachment.path));
+    }
+    const base = text.trim() === "[Voice message]" ? "" : text.trim();
+    const blocks = transcripts.map((transcript, index) => {
+      const heading =
+        transcripts.length === 1
+          ? "Voice message transcript:"
+          : `Voice message transcript ${index + 1}:`;
+      return `${heading}\n${transcript}`;
+    });
+    return [base, ...blocks].filter((part) => part.length > 0).join("\n\n");
   }
 
   public async resetConversation(conversationKey: string): Promise<void> {
@@ -524,7 +562,7 @@ export function createTurnInput(
   text: string,
   attachments: readonly InboundAttachment[],
 ): UserInput[] {
-  const files = attachments.filter((attachment) => attachment.kind === "file");
+  const files = attachments.filter((attachment) => attachment.kind !== "image");
   const fileContext = files
     .map((file) => `- ${file.description}: ${JSON.stringify(file.path)}`)
     .join("\n");

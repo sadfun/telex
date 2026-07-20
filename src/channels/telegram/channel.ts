@@ -161,7 +161,7 @@ export class TelegramChannel implements MessagingChannel {
           index,
         });
         attachments.push({
-          kind: file.nativeImage ? "image" : "file",
+          kind: file.nativeImage ? "image" : file.voiceMessage === true ? "voice" : "file",
           path,
           description,
         });

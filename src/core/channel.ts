@@ -11,7 +11,7 @@ export interface SenderIdentity {
 }
 
 export interface InboundAttachment {
-  readonly kind: "image" | "file";
+  readonly kind: "image" | "file" | "voice";
   readonly path: string;
   readonly description: string;
 }
@@ -54,7 +54,7 @@ export interface ProgressSnapshot {
 }
 
 export interface OutboundStream {
-  start(): Promise<void>;
+  start(initialProgress?: ProgressSnapshot): Promise<void>;
   setProgress(progress: ProgressSnapshot): void;
   appendFinal(delta: string): void;
   complete(text: string, attachments?: readonly OutboundAttachment[]): Promise<void>;

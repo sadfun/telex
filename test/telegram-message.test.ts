@@ -36,6 +36,26 @@ describe("normalizeTelegramMessage", () => {
     });
   });
 
+  it("marks Telegram voice messages for transcription", () => {
+    const result = normalizeTelegramMessage(
+      message({
+        voice: {
+          file_id: "voice-file",
+          file_unique_id: "voice",
+          duration: 4,
+          mime_type: "audio/ogg",
+        },
+      }),
+    );
+
+    expect(result.text).toBe("[Voice message]");
+    expect(result.files[0]).toMatchObject({
+      suggestedName: "voice.ogg",
+      mimeType: "audio/ogg",
+      voiceMessage: true,
+    });
+  });
+
   it.each([
     ["static", false, false, ".webp", true],
     ["animated", true, false, ".tgs", false],

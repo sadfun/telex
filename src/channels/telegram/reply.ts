@@ -148,7 +148,7 @@ class TelegramGuestReplyStream implements OutboundStream {
     this.#responder = responder;
   }
 
-  public async start(): Promise<void> {}
+  public async start(_initialProgress?: ProgressSnapshot): Promise<void> {}
   public setProgress(_progress: ProgressSnapshot): void {}
   public appendFinal(_delta: string): void {}
 
@@ -196,7 +196,8 @@ class TelegramReplyStream implements OutboundStream {
     this.#draftMode = chat.type === "private" ? "rich" : "none";
   }
 
-  public async start(): Promise<void> {
+  public async start(initialProgress?: ProgressSnapshot): Promise<void> {
+    if (initialProgress !== undefined) this.#progress = initialProgress;
     if (this.#draftMode !== "none") await this.flushDraft();
     else this.startTyping();
   }

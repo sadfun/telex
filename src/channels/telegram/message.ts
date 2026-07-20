@@ -16,6 +16,7 @@ export interface TelegramFileReference {
   readonly mimeType?: string;
   readonly size?: number;
   readonly nativeImage: boolean;
+  readonly voiceMessage?: boolean;
 }
 
 export interface NormalizedTelegramMessage {
@@ -259,7 +260,7 @@ function describePayload(message: Message, state: NormalizeState, context: Conte
     mediaLabels.push("Video note");
   }
   if (message.voice !== undefined) {
-    addStandardFile(state, context, "voice message", message.voice, "voice.ogg");
+    addStandardFile(state, context, "voice message", message.voice, "voice.ogg", "audio/ogg", true);
     mediaLabels.push("Voice message");
   }
   if (message.contact !== undefined) lines.push(contactSummary(message.contact));
@@ -597,6 +598,7 @@ function addStandardFile(
   file: FileLike,
   fallbackName: string,
   fallbackMime?: string,
+  voiceMessage = false,
 ): void {
   const mimeType = file.mime_type ?? fallbackMime;
   const suggestedName = safeName(file.file_name, fallbackName);
@@ -608,6 +610,7 @@ function addStandardFile(
     mimeType,
     size: file.file_size,
     nativeImage: isNativeImage(mimeType, suggestedName),
+    voiceMessage,
   });
 }
 
@@ -621,6 +624,7 @@ function addFile(
     readonly mimeType?: string | undefined;
     readonly size?: number | undefined;
     readonly nativeImage: boolean;
+    readonly voiceMessage?: boolean | undefined;
   },
 ): void {
   if (state.fileIds.has(input.uniqueId)) return;
@@ -633,6 +637,7 @@ function addFile(
     ...(input.mimeType === undefined ? {} : { mimeType: input.mimeType }),
     ...(input.size === undefined ? {} : { size: input.size }),
     nativeImage: input.nativeImage,
+    ...(input.voiceMessage === true ? { voiceMessage: true } : {}),
   });
 }
 

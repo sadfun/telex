@@ -84,6 +84,22 @@ The event stream now carries structured progress.
 });
 
 describe("Telegram streaming", () => {
+  it("starts voice handling with a transcription thinking block", async () => {
+    const drafts: InputRichMessageWithoutUpload[] = [];
+    const stream = createStream({
+      sendRichMessageDraft: vi.fn(async (_chatId, _draftId, message) => {
+        drafts.push(message);
+        return true;
+      }),
+    });
+
+    await stream.start({ summary: "Transcribing…", actions: [], plan: [] });
+
+    expect(drafts[0]).toMatchObject({
+      blocks: [{ type: "thinking", text: "▌ Transcribing…" }],
+    });
+  });
+
   it("publishes the first response text immediately after the thinking placeholder", async () => {
     const drafts: InputRichMessageWithoutUpload[] = [];
     const stream = createStream({

@@ -80,6 +80,76 @@ describe("CodexService outbound files", () => {
       { filename: "report.pdf", contents: "report" },
     ]);
   });
+
+  it("shows transcription progress and forwards the transcript with the original voice file", async () => {
+    const dataDirectory = await temporaryDirectory();
+    const workspace = join(dataDirectory, "workspace");
+    const generatedImages = join(dataDirectory, "codex-home", "generated_images");
+    const outbound = join(dataDirectory, "outbound");
+    await mkdir(workspace);
+    await mkdir(generatedImages, { recursive: true });
+    await mkdir(outbound);
+    const voicePath = join(workspace, "voice.ogg");
+    await writeFile(voicePath, "voice");
+    const rpc = new FakeCodexRpc(completedTurn(), "Done.", join(workspace, "unused.png"));
+    const stream: OutboundStream = {
+      start: vi.fn(async () => undefined),
+      setProgress: vi.fn(),
+      appendFinal: vi.fn(),
+      complete: vi.fn(async () => undefined),
+      fail: vi.fn(async () => undefined),
+    };
+    const responder = {
+      createStream: () => stream,
+      sendText: vi.fn(async () => undefined),
+      askChoice: vi.fn(async () => "decline"),
+    } satisfies MessageResponder;
+    const transcribe = vi.fn(async () => "Hello Codex from Telegram.");
+    const service = new CodexService(
+      rpc as unknown as CodexAppServer,
+      new ConversationStore(join(dataDirectory, "conversations.json"), new Logger("error")),
+      workspace,
+      generatedImages,
+      outbound,
+      new Logger("error"),
+      { transcribe },
+    );
+
+    await service.runTurn("telegram:voice", "[Voice message]", responder, true, [
+      { kind: "voice", path: voicePath, description: "Telegram voice message" },
+    ]);
+
+    expect(stream.start).toHaveBeenCalledWith({
+      summary: "Transcribing…",
+      actions: [],
+      plan: [],
+    });
+    expect(stream.setProgress).toHaveBeenCalledWith({
+      summary: "Thinking…",
+      actions: [],
+      plan: [],
+    });
+    expect(transcribe).toHaveBeenCalledWith(voicePath);
+    expect(rpc.turnStartRequest).toMatchObject({
+      params: {
+        input: [
+          {
+            type: "text",
+            text: expect.stringContaining("Voice message transcript:\nHello Codex from Telegram."),
+          },
+        ],
+      },
+    });
+    expect(rpc.turnStartRequest).toMatchObject({
+      params: {
+        input: [
+          {
+            text: expect.stringContaining(voicePath),
+          },
+        ],
+      },
+    });
+  });
 });
 
 class FakeCodexRpc {
@@ -87,6 +157,7 @@ class FakeCodexRpc {
   readonly #finalText: string;
   readonly #image: string;
   #listener: NotificationListener | undefined;
+  public turnStartRequest: unknown;
 
   public constructor(turn: Turn, finalText: string, image: string) {
     this.#turn = turn;
@@ -101,11 +172,15 @@ class FakeCodexRpc {
 
   public setServerRequestHandler(): void {}
 
-  public async request<Result>(request: { readonly method: string }): Promise<Result> {
+  public async request<Result>(request: {
+    readonly method: string;
+    readonly params?: unknown;
+  }): Promise<Result> {
     if (request.method === "thread/start") {
       return { thread: { id: "thread-1" } } as Result;
     }
     if (request.method === "turn/start") {
+      this.turnStartRequest = request;
       queueMicrotask(() => {
         this.completeItem({
           type: "imageGeneration",

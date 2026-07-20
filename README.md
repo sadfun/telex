@@ -2,7 +2,7 @@
 
 Telex is a self-hosted Telegram bridge for OpenAI Codex. Telegram is only the transport: a dedicated [Codex app-server](https://github.com/openai/codex/blob/main/codex-rs/app-server/README.md) owns threads, turns, tools, approvals, authentication, and configuration.
 
-Telex supports private conversations, Telegram photos and files in both directions, forwarded and replied-to context, polls and other structured messages, streamed replies and thinking, interactive approvals, guest mentions, persistent Codex threads, and an authenticated settings Mini App. It installs a pinned Codex CLI into isolated application storage, so it never depends on a global Codex installation.
+Telex supports private conversations, automatic Telegram voice-message transcription, photos and files in both directions, forwarded and replied-to context, polls and other structured messages, streamed replies and thinking, interactive approvals, guest mentions, persistent Codex threads, and an authenticated settings Mini App. It installs a pinned Codex CLI into isolated application storage, so it never depends on a global Codex installation.
 
 ## Requirements
 
@@ -91,6 +91,8 @@ After Telex is running, open a private chat with the bot and send `/login`. Foll
 
 No OpenAI API key is required for the ChatGPT login flow.
 
+Voice messages use that same ChatGPT subscription. Telex briefly shows a **Transcribing…** thinking block, sends the OGG recording to ChatGPT's Codex dictation service with `originator: Telex`, and then starts the normal Codex turn with both the transcript and original attachment. Token renewal goes through Codex app-server's native managed-auth refresh flow; Telex does not create dummy turns. On first use, Telex downloads a pinned, checksum-verified browser-compatible HTTP transport into its toolchains directory so this works without Chrome, Python, or a local speech model.
+
 ## Application updates
 
 Installer-based setups default to:
@@ -152,7 +154,7 @@ Then restart the service. Rollback changes application code only; it does not re
 | `/update` | Check for and install the latest Telex release, then restart the service. |
 | `/help` | Show the command list. |
 
-Messages that are not commands become `turn/start` requests. Photos and supported image files use Codex's native image input. Videos, audio, documents, animated stickers, and other binary files are downloaded under `.telex/attachments` in the Codex workspace and passed as local paths; captions, replies, forwards, polls, contacts, locations, checklists, and Telegram-only structures are preserved as concise text context. Codex commentary drives Telegram's thinking indicator, final-answer deltas drive the draft, and approval or user-input requests become inline choices.
+Messages that are not commands become `turn/start` requests. Telegram voice messages are transcribed before the turn starts, while their original OGG files remain available to Codex. Photos and supported image files use Codex's native image input. Videos, other audio, documents, animated stickers, and other binary files are downloaded under `.telex/attachments` in the Codex workspace and passed as local paths; captions, replies, forwards, polls, contacts, locations, checklists, and Telegram-only structures are preserved as concise text context. Codex commentary drives Telegram's thinking indicator, final-answer deltas drive the draft, and approval or user-input requests become inline choices.
 
 In the other direction, Telex uploads completed Codex image-generation results and regular workspace files explicitly linked in the final answer. JPEG and PNG images, GIF animations, MP4 videos, and MP3 or M4A audio use Telegram's native media methods; everything else is sent as a document. Native-media failures retry as documents, individual upload failures remain visible, and Telex snapshots canonically validated files before upload. Markdown links are limited to the configured workspace; structured image-generation outputs are also accepted from Codex's dedicated generated-image directory. Ordinary source edits, code examples, arbitrary paths, and unlinked files are never uploaded automatically.
 

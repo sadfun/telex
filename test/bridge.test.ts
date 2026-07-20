@@ -204,6 +204,24 @@ describe("CodexBridge onboarding", () => {
     );
   });
 
+  it("does not treat a voice-message caption as a command", async () => {
+    const { codex, raw } = createCodex({ account: vi.fn(async () => signedInAccount) });
+    const bridge = new CodexBridge(codex, undefined, logger);
+    const responder = createResponder();
+    const attachments: readonly InboundAttachment[] = [
+      {
+        kind: "voice",
+        path: "/workspace/voice.ogg",
+        description: "Telegram voice message",
+      },
+    ];
+
+    await bridge.handleMessage(createMessage("/new", responder, {}, attachments));
+
+    expect(raw.resetConversation).not.toHaveBeenCalled();
+    expect(raw.runTurn).toHaveBeenCalledWith("telegram:1:0", "/new", responder, false, attachments);
+  });
+
   it("tells an already signed-in user how to switch accounts on /login", async () => {
     const { codex, raw } = createCodex({ account: vi.fn(async () => signedInAccount) });
     const bridge = new CodexBridge(codex, undefined, logger);

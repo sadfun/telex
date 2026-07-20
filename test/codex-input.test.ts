@@ -39,4 +39,26 @@ Telegram files available in the local workspace:
       { type: "localImage", path: "/workspace/cover.jpg" },
     ]);
   });
+
+  it("keeps the original voice attachment alongside its transcript", () => {
+    expect(
+      createTurnInput("Voice message transcript:\nHello Telex.", [
+        {
+          kind: "voice",
+          path: "/workspace/voice.ogg",
+          description: "Telegram voice message",
+        },
+      ]),
+    ).toEqual([
+      {
+        type: "text",
+        text: `Voice message transcript:
+Hello Telex.
+
+Telegram files available in the local workspace:
+- Telegram voice message: "/workspace/voice.ogg"`,
+        text_elements: [],
+      },
+    ]);
+  });
 });

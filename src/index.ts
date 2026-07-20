@@ -17,6 +17,8 @@ import { errorMessage } from "./shared/errors.js";
 import { atomicWriteFile, ensureDirectory } from "./shared/fs.js";
 import { Logger } from "./shared/logger.js";
 import { readTelexVersion } from "./shared/version.js";
+import { ChatGptVoiceTranscriber } from "./transcription/service.js";
+import { CurlImpersonateTransport } from "./transcription/transport.js";
 import { monitorUpdates } from "./update/monitor.js";
 import { ReleaseUpdater } from "./update/release.js";
 
@@ -24,6 +26,7 @@ const defaultConfig = `# Managed by Telex. You can edit this file or use the Tel
 approval_policy = "on-request"
 sandbox_mode = "workspace-write"
 web_search = "live"
+cli_auth_credentials_store = "file"
 project_root_markers = []
 `;
 
@@ -91,6 +94,20 @@ export async function runTelex(): Promise<TelexRunResult> {
       logger.child({ component: "conversation-store" }),
     );
     await conversations.load();
+    const transcriptionTransport = new CurlImpersonateTransport(
+      toolchainsDirectory,
+      logger.child({ component: "transcription-transport" }),
+    );
+    const voiceTranscriber = new ChatGptVoiceTranscriber(
+      codexHome,
+      transcriptionTransport,
+      async () => {
+        await rpc.request<unknown>({
+          method: "account/read",
+          params: { refreshToken: true },
+        });
+      },
+    );
     const codex = new CodexService(
       rpc,
       conversations,
@@ -98,6 +115,7 @@ export async function runTelex(): Promise<TelexRunResult> {
       join(codexHome, "generated_images"),
       outboundDirectory,
       logger.child({ component: "codex" }),
+      voiceTranscriber,
     );
     const configService = new CodexConfigService(rpc, config.workspace);
 
@@ -218,6 +236,7 @@ async function ensureDefaultCodexConfig(path: string): Promise<void> {
   try {
     await access(path);
     const contents = await readFile(path, "utf8");
+    const hasCredentialStore = /^\s*cli_auth_credentials_store\s*=/mu.test(contents);
     const withoutProjectRootMarkers = contents.replace(
       /^\s*project_root_markers\s*=.*(?:\r?\n|$)/gmu,
       "",
@@ -226,7 +245,8 @@ async function ensureDefaultCodexConfig(path: string): Promise<void> {
     const root =
       firstTable < 0 ? withoutProjectRootMarkers : withoutProjectRootMarkers.slice(0, firstTable);
     const tables = firstTable < 0 ? "" : withoutProjectRootMarkers.slice(firstTable);
-    const isolated = `${root.trimEnd()}\nproject_root_markers = []\n${tables.length === 0 ? "" : `\n${tables.trimStart()}`}`;
+    const credentialStore = hasCredentialStore ? "" : '\ncli_auth_credentials_store = "file"';
+    const isolated = `${root.trimEnd()}${credentialStore}\nproject_root_markers = []\n${tables.length === 0 ? "" : `\n${tables.trimStart()}`}`;
     if (isolated !== contents) {
       await atomicWriteFile(path, isolated);
     }

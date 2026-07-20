@@ -64,7 +64,7 @@ export class CodexBridge {
 
   public readonly handleMessage: MessageHandler = async (message) => {
     try {
-      const command = parseCommand(message.text);
+      const command = message.attachments.length === 0 ? parseCommand(message.text) : undefined;
       if (command === undefined) {
         if (!(await this.ensureSignedIn(message))) return;
         await this.#codex.runTurn(
