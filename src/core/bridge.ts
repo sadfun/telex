@@ -69,6 +69,7 @@ export class CodexBridge {
         if (!(await this.ensureSignedIn(message))) return;
         await this.#codex.runTurn(
           message.address.key,
+          message.address.channel,
           message.text,
           message.responder,
           message.address.isGuest,
@@ -275,6 +276,7 @@ export class CodexBridge {
             const resume = pending.resume;
             await this.#codex.runTurn(
               resume.address.key,
+              resume.address.channel,
               resume.text,
               resume.responder,
               resume.address.isGuest,

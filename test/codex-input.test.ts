@@ -1,16 +1,16 @@
 import { describe, expect, it } from "vitest";
-import { createTurnInput } from "../src/codex/service.js";
+import { createRemoteClientContext, createTurnInput } from "../src/codex/service.js";
 
 describe("createTurnInput", () => {
   it("keeps the existing text-only protocol shape", () => {
-    expect(createTurnInput("hello", [])).toEqual([
+    expect(createTurnInput("hello", "telegram", [])).toEqual([
       { type: "text", text: "hello", text_elements: [] },
     ]);
   });
 
   it("uses native localImage inputs for supported Telegram images", () => {
     expect(
-      createTurnInput("What is in this?", [
+      createTurnInput("What is in this?", "telegram", [
         { kind: "image", path: "/workspace/photo.jpg", description: "Telegram photo" },
         { kind: "image", path: "/workspace/sticker.webp", description: "Telegram sticker" },
       ]),
@@ -23,7 +23,7 @@ describe("createTurnInput", () => {
 
   it("references generic files in text instead of inventing a protocol input type", () => {
     expect(
-      createTurnInput("Summarize these", [
+      createTurnInput("Summarize these", "telegram", [
         { kind: "file", path: "/workspace/clip.mp4", description: "Telegram video" },
         { kind: "image", path: "/workspace/cover.jpg", description: "Video thumbnail" },
       ]),
@@ -42,7 +42,7 @@ Telegram files available in the local workspace:
 
   it("keeps the original voice attachment alongside its transcript", () => {
     expect(
-      createTurnInput("Voice message transcript:\nHello Telex.", [
+      createTurnInput("Voice message transcript:\nHello Telex.", "telegram", [
         {
           kind: "voice",
           path: "/workspace/voice.ogg",
@@ -60,5 +60,39 @@ Telegram files available in the local workspace:
         text_elements: [],
       },
     ]);
+  });
+
+  it("uses the current connector in file context", () => {
+    expect(
+      createTurnInput("Summarize this", "discord", [
+        { kind: "file", path: "/workspace/report.pdf", description: "Discord document" },
+      ]),
+    ).toEqual([
+      {
+        type: "text",
+        text: `Summarize this
+
+Discord files available in the local workspace:
+- Discord document: "/workspace/report.pdf"`,
+        text_elements: [],
+      },
+    ]);
+  });
+});
+
+describe("createRemoteClientContext", () => {
+  it("describes the current connector as application context", () => {
+    const telegram = createRemoteClientContext("telegram");
+    const discord = createRemoteClientContext("discord");
+
+    expect(telegram["telex.remote-client"]).toMatchObject({
+      kind: "application",
+      value: expect.stringContaining("reads and replies through Telegram"),
+    });
+    expect(discord["telex.remote-client"]).toMatchObject({
+      kind: "application",
+      value: expect.stringContaining("reads and replies through Discord"),
+    });
+    expect(discord["telex.remote-client"]?.value).not.toContain("Telegram");
   });
 });

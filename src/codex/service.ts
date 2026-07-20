@@ -40,7 +40,7 @@ import { BridgeError, errorMessage } from "../shared/errors.js";
 import type { Logger } from "../shared/logger.js";
 import type { VoiceTranscriber } from "../transcription/service.js";
 import { generatedFilePaths, resolveOutboundAttachments } from "./output-files.js";
-import type { CodexAppServer } from "./rpc.js";
+import type { ApplicationContext, CodexAppServer } from "./rpc.js";
 
 interface ActiveTurn {
   readonly conversationKey: string;
@@ -96,6 +96,7 @@ export class CodexService {
 
   public async runTurn(
     conversationKey: string,
+    connector: string,
     text: string,
     responder: MessageResponder,
     ephemeral = false,
@@ -144,7 +145,8 @@ export class CodexService {
           params: {
             threadId,
             clientUserMessageId: crypto.randomUUID(),
-            input: createTurnInput(prepared, attachments),
+            input: createTurnInput(prepared, connector, attachments),
+            additionalContext: createRemoteClientContext(connector),
           },
         });
         active.turnId = response.turn.id;
@@ -560,8 +562,10 @@ function appendAttachmentWarning(text: string, unavailable: readonly string[]): 
 
 export function createTurnInput(
   text: string,
+  connector: string,
   attachments: readonly InboundAttachment[],
 ): UserInput[] {
+  const connectorName = connectorDisplayName(connector);
   const files = attachments.filter((attachment) => attachment.kind !== "image");
   const fileContext = files
     .map((file) => `- ${file.description}: ${JSON.stringify(file.path)}`)
@@ -569,13 +573,44 @@ export function createTurnInput(
   const prompt =
     fileContext.length === 0
       ? text
-      : `${text}\n\nTelegram files available in the local workspace:\n${fileContext}`;
+      : `${text}\n\n${connectorName} files available in the local workspace:\n${fileContext}`;
   return [
     { type: "text", text: prompt, text_elements: [] },
     ...attachments
       .filter((attachment) => attachment.kind === "image")
       .map((attachment): UserInput => ({ type: "localImage", path: attachment.path })),
   ];
+}
+
+export function createRemoteClientContext(connector: string): ApplicationContext {
+  const connectorName = connectorDisplayName(connector);
+  return {
+    "telex.remote-client": {
+      kind: "application",
+      value: `This Codex session is operated through Telex, a remote messaging bridge. The user reads and replies through ${connectorName} and is not present at the machine where Codex and its commands run.
+
+Host-local UI is not visible or accessible to the user:
+- Do not open browsers, GUI applications, editors, file managers, or OAuth pages as a way of handing work to the user.
+- Never ask the user to visit localhost, 127.0.0.1, a file:// URL, or another host-local address. Those addresses refer to the Codex host, not the user's device.
+- You may run and access local services yourself for development and testing. Only present a URL to the user when it is reachable from their device.
+- For authentication, prefer a device-code flow or a publicly reachable HTTPS flow and send the URL and code through chat. If only a local callback exists, explain the constraint and offer a remote-safe alternative such as a device flow, tunnel, or SSH port forwarding.
+- Do not assume the user can see the host screen, clipboard, notifications, or spawned windows.
+- Explicitly link files intended for the user in the final response so Telex can deliver them.
+
+All normal Codex filesystem, shell, network, approval, and project behavior remains unchanged. Telex changes only how the user communicates with Codex.`,
+    },
+  };
+}
+
+function connectorDisplayName(connector: string): string {
+  const words = connector
+    .trim()
+    .split(/[-_\s]+/u)
+    .filter((word) => word.length > 0);
+  if (words.length === 0) return "a remote messaging connector";
+  return words
+    .map((word) => `${word.slice(0, 1).toUpperCase()}${word.slice(1).toLowerCase()}`)
+    .join(" ");
 }
 
 function progressActions(item: ThreadItem): readonly ProgressAction[] {

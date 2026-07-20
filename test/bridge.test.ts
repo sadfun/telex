@@ -134,6 +134,7 @@ describe("CodexBridge onboarding", () => {
     await vi.waitFor(() => {
       expect(raw.runTurn).toHaveBeenCalledWith(
         "telegram:1:0",
+        "telegram",
         "fix the tests",
         responder,
         false,
@@ -184,6 +185,28 @@ describe("CodexBridge onboarding", () => {
     expect(raw.account).toHaveBeenCalledTimes(1);
   });
 
+  it("passes the current connector to Codex", async () => {
+    const { codex, raw } = createCodex({ account: vi.fn(async () => signedInAccount) });
+    const bridge = new CodexBridge(codex, undefined, logger);
+    const responder = createResponder();
+
+    await bridge.handleMessage(
+      createMessage("summarize this", responder, {
+        channel: "discord",
+        key: "discord:1",
+      }),
+    );
+
+    expect(raw.runTurn).toHaveBeenCalledWith(
+      "discord:1",
+      "discord",
+      "summarize this",
+      responder,
+      false,
+      [],
+    );
+  });
+
   it("does not treat a media caption that starts with a command as a command", async () => {
     const { codex, raw } = createCodex({ account: vi.fn(async () => signedInAccount) });
     const bridge = new CodexBridge(codex, undefined, logger);
@@ -197,6 +220,7 @@ describe("CodexBridge onboarding", () => {
     expect(raw.resetConversation).not.toHaveBeenCalled();
     expect(raw.runTurn).toHaveBeenCalledWith(
       "telegram:1:0",
+      "telegram",
       "/new\n[Photo]",
       responder,
       false,
@@ -219,7 +243,14 @@ describe("CodexBridge onboarding", () => {
     await bridge.handleMessage(createMessage("/new", responder, {}, attachments));
 
     expect(raw.resetConversation).not.toHaveBeenCalled();
-    expect(raw.runTurn).toHaveBeenCalledWith("telegram:1:0", "/new", responder, false, attachments);
+    expect(raw.runTurn).toHaveBeenCalledWith(
+      "telegram:1:0",
+      "telegram",
+      "/new",
+      responder,
+      false,
+      attachments,
+    );
   });
 
   it("tells an already signed-in user how to switch accounts on /login", async () => {

@@ -69,7 +69,7 @@ describe("CodexService outbound files", () => {
       new Logger("error"),
     );
 
-    await service.runTurn("telegram:42", "make a report", responder, true);
+    await service.runTurn("telegram:42", "telegram", "make a report", responder, true);
 
     expect(complete).toHaveBeenCalledWith(
       `Could not attach missing.zip.\n\n${finalText}`,
@@ -115,7 +115,7 @@ describe("CodexService outbound files", () => {
       { transcribe },
     );
 
-    await service.runTurn("telegram:voice", "[Voice message]", responder, true, [
+    await service.runTurn("telegram:voice", "telegram", "[Voice message]", responder, true, [
       { kind: "voice", path: voicePath, description: "Telegram voice message" },
     ]);
 
@@ -130,6 +130,16 @@ describe("CodexService outbound files", () => {
       plan: [],
     });
     expect(transcribe).toHaveBeenCalledWith(voicePath);
+    expect(rpc.turnStartRequest).toMatchObject({
+      params: {
+        additionalContext: {
+          "telex.remote-client": {
+            kind: "application",
+            value: expect.stringContaining("reads and replies through Telegram"),
+          },
+        },
+      },
+    });
     expect(rpc.turnStartRequest).toMatchObject({
       params: {
         input: [

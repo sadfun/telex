@@ -99,6 +99,7 @@ export async function checkCodexProtocol(
   );
   const bindingsDirectory = join(stageRoot, "bindings");
   const schemasDirectory = join(stageRoot, "schemas");
+  const experimentalBindingsDirectory = join(stageRoot, "experimental-bindings");
 
   await ensureDirectory(stageRoot);
   try {
@@ -111,6 +112,12 @@ export async function checkCodexProtocol(
       join(stageRoot, "codex-home"),
       bindingsDirectory,
       schemasDirectory,
+    );
+    await validateAdditionalContextProtocol(
+      codexBinary,
+      projectRoot,
+      join(stageRoot, "codex-home"),
+      experimentalBindingsDirectory,
     );
 
     await validateJsonSchemas(schemasDirectory);
@@ -204,6 +211,36 @@ async function generateProtocol(
     cwd: projectRoot,
     env: externalProcessEnvironment({ CODEX_HOME: codexHome }),
   });
+}
+
+async function validateAdditionalContextProtocol(
+  codexBinary: string,
+  projectRoot: string,
+  codexHome: string,
+  bindingsDirectory: string,
+): Promise<void> {
+  await ensureDirectory(bindingsDirectory);
+  await runCommand(
+    codexBinary,
+    ["app-server", "generate-ts", "--experimental", "--out", bindingsDirectory],
+    {
+      cwd: projectRoot,
+      env: externalProcessEnvironment({ CODEX_HOME: codexHome }),
+    },
+  );
+  const turnStart = await readFile(join(bindingsDirectory, "v2", "TurnStartParams.ts"), "utf8");
+  const entry = await readFile(join(bindingsDirectory, "v2", "AdditionalContextEntry.ts"), "utf8");
+  const kind = await readFile(join(bindingsDirectory, "v2", "AdditionalContextKind.ts"), "utf8");
+  if (!turnStart.includes("additionalContext") || !turnStart.includes("AdditionalContextEntry")) {
+    throw new Error("Codex no longer exposes turn/start.additionalContext");
+  }
+  if (
+    !entry.includes("value: string") ||
+    !entry.includes("AdditionalContextKind") ||
+    !kind.includes('"application"')
+  ) {
+    throw new Error("Codex additional-context entry shape is incompatible with Telex");
+  }
 }
 
 async function validateJsonSchemas(schemasDirectory: string): Promise<void> {

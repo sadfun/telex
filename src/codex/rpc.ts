@@ -8,16 +8,33 @@ import type { InitializeResponse } from "../generated/codex/InitializeResponse.j
 import type { RequestId } from "../generated/codex/RequestId.js";
 import type { ServerNotification } from "../generated/codex/ServerNotification.js";
 import type { ServerRequest } from "../generated/codex/ServerRequest.js";
+import type { TurnStartParams } from "../generated/codex/v2/TurnStartParams.js";
 import { type Deferred, deferred, delay, withTimeout } from "../shared/async.js";
 import { externalProcessEnvironment } from "../shared/environment.js";
 import { BridgeError, errorMessage } from "../shared/errors.js";
 import type { Logger } from "../shared/logger.js";
 
-type ClientRequestInput = ClientRequest extends infer Request
+type StableClientRequestInput = ClientRequest extends infer Request
   ? Request extends { id: RequestId }
     ? Omit<Request, "id">
     : never
   : never;
+
+export interface ApplicationContextEntry {
+  readonly value: string;
+  readonly kind: "application";
+}
+
+export type ApplicationContext = Readonly<Record<string, ApplicationContextEntry>>;
+
+interface TurnStartWithAdditionalContext {
+  readonly method: "turn/start";
+  readonly params: TurnStartParams & {
+    readonly additionalContext: ApplicationContext;
+  };
+}
+
+type ClientRequestInput = StableClientRequestInput | TurnStartWithAdditionalContext;
 
 const wireMessageSchema = z
   .object({
@@ -117,7 +134,10 @@ export class CodexAppServer {
           title: "Telex",
           version: this.#clientVersion,
         },
-        capabilities: null,
+        capabilities: {
+          experimentalApi: true,
+          requestAttestation: false,
+        },
       },
     });
     const notification: ClientNotification = { method: "initialized" };
@@ -179,7 +199,7 @@ export class CodexAppServer {
     const pending = deferred<unknown>();
     this.#pending.set(id, { deferred: pending });
     try {
-      await this.write({ ...request, id } as ClientRequest);
+      await this.write({ ...request, id });
       return await withTimeout(pending.promise, 60_000, `Codex RPC ${request.method} timed out`);
     } finally {
       this.#pending.delete(id);
