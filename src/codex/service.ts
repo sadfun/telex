@@ -4,17 +4,23 @@ import type {
   ChoiceOption,
   InboundAttachment,
   MessageResponder,
+  OutboundAttachment,
   OutboundStream,
   ProgressAction,
   ProgressPlanStep,
   ProgressSnapshot,
+  ProviderReference,
 } from "../core/channel.js";
 import type { ConversationStore } from "../core/conversation-store.js";
 import type { ServerNotification } from "../generated/codex/ServerNotification.js";
 import type { ServerRequest } from "../generated/codex/ServerRequest.js";
+import type { JsonValue } from "../generated/codex/serde_json/JsonValue.js";
 import type { AccountLoginCompletedNotification } from "../generated/codex/v2/AccountLoginCompletedNotification.js";
 import type { AgentMessageDeltaNotification } from "../generated/codex/v2/AgentMessageDeltaNotification.js";
 import type { CommandExecutionRequestApprovalResponse } from "../generated/codex/v2/CommandExecutionRequestApprovalResponse.js";
+import type { DynamicToolCallParams } from "../generated/codex/v2/DynamicToolCallParams.js";
+import type { DynamicToolCallResponse } from "../generated/codex/v2/DynamicToolCallResponse.js";
+import type { DynamicToolSpec } from "../generated/codex/v2/DynamicToolSpec.js";
 import type { FileChangePatchUpdatedNotification } from "../generated/codex/v2/FileChangePatchUpdatedNotification.js";
 import type { FileChangeRequestApprovalResponse } from "../generated/codex/v2/FileChangeRequestApprovalResponse.js";
 import type { FileUpdateChange } from "../generated/codex/v2/FileUpdateChange.js";
@@ -34,6 +40,7 @@ import type { Turn } from "../generated/codex/v2/Turn.js";
 import type { TurnCompletedNotification } from "../generated/codex/v2/TurnCompletedNotification.js";
 import type { TurnInterruptResponse } from "../generated/codex/v2/TurnInterruptResponse.js";
 import type { TurnPlanUpdatedNotification } from "../generated/codex/v2/TurnPlanUpdatedNotification.js";
+import type { TurnStartedNotification } from "../generated/codex/v2/TurnStartedNotification.js";
 import type { TurnStartParams } from "../generated/codex/v2/TurnStartParams.js";
 import type { TurnStartResponse } from "../generated/codex/v2/TurnStartResponse.js";
 import type { UserInput } from "../generated/codex/v2/UserInput.js";
@@ -46,9 +53,11 @@ import type { ApplicationContext, CodexAppServer } from "./rpc.js";
 
 interface ActiveTurn {
   readonly conversationKey: string;
+  readonly connector: string;
   readonly threadId: string;
-  readonly responder: MessageResponder;
+  readonly responder: MessageResponder | undefined;
   readonly stream: OutboundStream;
+  readonly invocation: CodexInvocationContext;
   readonly completion: Deferred<Turn>;
   readonly phases: Map<string, "commentary" | "final_answer" | null>;
   readonly actions: Map<string, readonly ProgressAction[]>;
@@ -58,6 +67,67 @@ interface ActiveTurn {
   plan: readonly ProgressPlanStep[];
   finalText: string;
   turnId: string | undefined;
+}
+
+export interface CodexInvocationContext {
+  readonly owner?: ProviderReference;
+  readonly deliveryTarget?: ProviderReference;
+  readonly additionalContext?: ApplicationContext;
+  readonly automationId?: string;
+}
+
+export interface CodexDynamicToolContext extends CodexInvocationContext {
+  readonly conversationKey: string;
+  readonly connector: string;
+  readonly threadId: string;
+  readonly turnId: string;
+  readonly callId: string;
+}
+
+export interface CodexDynamicTool {
+  readonly spec: DynamicToolSpec & { readonly type: "function" };
+  execute(argumentsValue: JsonValue, context: CodexDynamicToolContext): Promise<unknown>;
+}
+
+export interface ScheduledTurnRequest {
+  readonly conversationKey: string;
+  readonly connector: string;
+  readonly prompt: string;
+  readonly thread:
+    | { readonly mode: "new"; readonly developerInstructions?: string }
+    | { readonly mode: "existing"; readonly threadId: string };
+  readonly invocation: CodexInvocationContext;
+  readonly model?: string;
+  readonly reasoningEffort?: CodexTurnSettings["effort"];
+  readonly outputSchema?: JsonValue;
+}
+
+export interface CodexTurnResult {
+  readonly threadId: string;
+  readonly turnId: string;
+  /** Unmodified final assistant text, before delivery-specific warnings. */
+  readonly rawText: string;
+  readonly text: string;
+  readonly attachments: readonly OutboundAttachment[];
+  readonly unavailableAttachments: readonly string[];
+  dispose(): Promise<void>;
+}
+
+export type BackgroundLeaseDecision =
+  | { readonly acquired: true; readonly release: () => void }
+  | { readonly acquired: false; readonly reason: string; readonly retryAt: Date };
+
+interface ExecuteTurnRequest {
+  readonly conversationKey: string;
+  readonly connector: string;
+  readonly threadId: string;
+  readonly input: readonly UserInput[];
+  readonly turnSettings: CodexTurnSettings;
+  readonly invocation: CodexInvocationContext;
+  readonly responder?: MessageResponder;
+  readonly stream: OutboundStream;
+  readonly outputSchema?: JsonValue;
+  readonly failIfInterrupted?: boolean;
 }
 
 export type LoginCompletedListener = (notification: AccountLoginCompletedNotification) => void;
@@ -111,9 +181,13 @@ export interface CodexServiceProviders {
 }
 
 export class CodexService {
+  static readonly #backgroundQuietPeriodMs = 30_000;
   readonly #queue = new KeyedSerialQueue();
   readonly #activeByThread = new Map<string, ActiveTurn>();
   readonly #activeByConversation = new Map<string, ActiveTurn>();
+  readonly #dynamicTools = new Map<string, CodexDynamicTool>();
+  readonly #foregroundWaiting = new Map<string, number>();
+  readonly #lastForegroundAt = new Map<string, number>();
   readonly #loadedThreads = new Set<string>();
   readonly #loginListeners = new Set<LoginCompletedListener>();
   readonly #rpc: CodexAppServer;
@@ -128,6 +202,7 @@ export class CodexService {
   readonly #explicitSkillInputs: ExplicitSkillInputProvider;
   #pauseGate: Deferred<void> | undefined;
   #idleGate: Deferred<void> | undefined;
+  #interruptingScheduledTurns = false;
   #runningJobs = 0;
 
   public constructor(
@@ -173,6 +248,37 @@ export class CodexService {
     gate.resolve();
   }
 
+  public registerDynamicTool(tool: CodexDynamicTool): void {
+    if (this.#dynamicTools.has(tool.spec.name)) {
+      throw new Error(`Dynamic tool ${tool.spec.name} is already registered`);
+    }
+    this.#dynamicTools.set(tool.spec.name, tool);
+  }
+
+  public tryAcquireBackground(conversationKey: string): BackgroundLeaseDecision {
+    const now = Date.now();
+    const retryAt = new Date(now + CodexService.#backgroundQuietPeriodMs);
+    if ((this.#foregroundWaiting.get(conversationKey) ?? 0) > 0) {
+      return { acquired: false, reason: "A user message is waiting.", retryAt };
+    }
+    const lastForegroundAt = this.#lastForegroundAt.get(conversationKey);
+    if (
+      lastForegroundAt !== undefined &&
+      now - lastForegroundAt < CodexService.#backgroundQuietPeriodMs
+    ) {
+      return {
+        acquired: false,
+        reason: "The conversation was used recently.",
+        retryAt: new Date(lastForegroundAt + CodexService.#backgroundQuietPeriodMs),
+      };
+    }
+    const lease = this.#queue.tryAcquire(conversationKey);
+    if (lease === undefined) {
+      return { acquired: false, reason: "The conversation is busy.", retryAt };
+    }
+    return { acquired: true, release: lease.release };
+  }
+
   public async runTurn(
     conversationKey: string,
     connector: string,
@@ -180,27 +286,40 @@ export class CodexService {
     responder: MessageResponder,
     ephemeral = false,
     attachments: readonly InboundAttachment[] = [],
+    invocation: CodexInvocationContext = {},
   ): Promise<void> {
     const stream = responder.createStream();
     const voiceAttachments = attachments.filter((attachment) => attachment.kind === "voice");
     const shouldTranscribe = voiceAttachments.length > 0 && this.#voiceTranscriber !== undefined;
-    let preparedText: Promise<string> | undefined;
-    if (shouldTranscribe) {
-      await stream.start({ summary: "Transcribing…", actions: [], plan: [] });
-      preparedText = this.transcribeVoiceMessages(text, voiceAttachments).then((prepared) => {
-        stream.setProgress({ summary: "Thinking…", actions: [], plan: [] });
-        return prepared;
-      });
-      void preparedText.catch(() => undefined);
-    }
+    this.incrementForegroundWaiting(conversationKey);
+    let dequeued = false;
+    try {
+      const startsQueued = this.#queue.isBusy(conversationKey);
+      let preparedText: Promise<string> | undefined;
+      if (shouldTranscribe) {
+        await stream.start({ summary: "Transcribing…", actions: [], plan: [] });
+        preparedText = this.transcribeVoiceMessages(text, voiceAttachments).then((prepared) => {
+          stream.setProgress({ summary: "Thinking…", actions: [], plan: [] });
+          return prepared;
+        });
+        void preparedText.catch(() => undefined);
+      } else if (startsQueued) {
+        await stream.start({ summary: "Queued behind earlier work…", actions: [], plan: [] });
+      }
 
-    await this.#queue.run(conversationKey, async () => {
-      await this.enterJob();
-      try {
-        const stagingDirectory = join(this.#outboundDirectory, crypto.randomUUID());
-        let active: ActiveTurn | undefined;
+      await this.#queue.run(conversationKey, async () => {
+        dequeued = true;
+        this.decrementForegroundWaiting(conversationKey);
+        await this.enterJob();
+        let result: CodexTurnResult | undefined;
         try {
-          if (!shouldTranscribe) await stream.start();
+          if (!shouldTranscribe) {
+            if (startsQueued) {
+              stream.setProgress({ summary: "Thinking…", actions: [], plan: [] });
+            } else {
+              await stream.start();
+            }
+          }
           const prepared = preparedText === undefined ? text : await preparedText;
           const [settings, skillInputs] = await Promise.all([
             this.#effectiveSettings(),
@@ -211,78 +330,194 @@ export class CodexService {
             ephemeral,
             settings.thread ?? {},
           );
-          active = {
+          result = await this.executeTurn({
             conversationKey,
+            connector,
             threadId,
+            input: [...createTurnInput(prepared, connector, attachments), ...skillInputs],
+            turnSettings: settings.turn ?? {},
+            invocation,
             responder,
             stream,
-            completion: deferred<Turn>(),
-            phases: new Map(),
-            actions: new Map(),
-            reasoning: new Map(),
-            generatedPaths: [],
-            progressMessage: "",
-            plan: [],
-            finalText: "",
-            turnId: undefined,
-          };
-          void active.completion.promise.catch(() => undefined);
-          this.#activeByThread.set(threadId, active);
-          this.#activeByConversation.set(conversationKey, active);
-
-          const response = await this.#rpc.request<TurnStartResponse>({
-            method: "turn/start",
-            params: {
-              ...(settings.turn ?? {}),
-              threadId,
-              clientUserMessageId: crypto.randomUUID(),
-              input: [...createTurnInput(prepared, connector, attachments), ...skillInputs],
-              ...(this.#remoteClientContextEnabled()
-                ? { additionalContext: createRemoteClientContext(connector) }
-                : {}),
-            },
           });
-          active.turnId = response.turn.id;
-          const turn = await withTimeout(
-            active.completion.promise,
-            30 * 60 * 1_000,
-            "Codex turn did not complete within 30 minutes",
+          await stream.complete(
+            result.text || (result.attachments.length === 0 ? "Done." : ""),
+            result.attachments,
           );
-          if (turn.status === "failed") {
-            throw new BridgeError(turn.error?.message ?? "Codex turn failed", "CODEX_TURN_FAILED");
-          }
-
-          const finalText = this.finalTextFromTurn(turn) || active.finalText;
-          const resolution = await resolveOutboundAttachments(
-            this.#workspace,
-            this.#generatedImagesDirectory,
-            stagingDirectory,
-            finalText,
-            [...active.generatedPaths, ...generatedFilePaths(turn.items)],
-          );
-          const responseText = appendAttachmentWarning(finalText, resolution.unavailable);
-          if (turn.status === "interrupted" && responseText.length === 0) {
-            await stream.complete("Stopped.", resolution.attachments);
-          } else {
-            await stream.complete(
-              responseText || (resolution.attachments.length === 0 ? "Done." : ""),
-              resolution.attachments,
-            );
-          }
         } catch (error) {
           this.#logger.error("Codex turn failed", error, { conversationKey });
           await stream.fail(errorMessage(error));
         } finally {
-          if (active !== undefined) {
-            this.#activeByThread.delete(active.threadId);
-            this.#activeByConversation.delete(conversationKey);
-          }
-          await rm(stagingDirectory, { recursive: true, force: true }).catch(() => undefined);
+          await result?.dispose();
+          this.#lastForegroundAt.set(conversationKey, Date.now());
+          this.leaveJob();
         }
-      } finally {
-        this.leaveJob();
+      });
+    } finally {
+      if (!dequeued) this.decrementForegroundWaiting(conversationKey);
+    }
+  }
+
+  public async runScheduledTurn(request: ScheduledTurnRequest): Promise<CodexTurnResult> {
+    await this.enterJob();
+    try {
+      const [settings, skillInputs] = await Promise.all([
+        this.#effectiveSettings(),
+        this.#explicitSkillInputs(request.prompt),
+      ]);
+      const threadId =
+        request.thread.mode === "new"
+          ? await this.startThread(
+              {
+                ...(settings.thread ?? {}),
+                ...(request.model === undefined ? {} : { model: request.model }),
+                ...(request.thread.developerInstructions === undefined
+                  ? {}
+                  : { developerInstructions: request.thread.developerInstructions }),
+              },
+              "automation",
+            )
+          : await this.resumeThreadStrict(request.thread.threadId, settings.thread ?? {});
+      return await this.executeTurn({
+        conversationKey: request.conversationKey,
+        connector: request.connector,
+        threadId,
+        input: [...createTurnInput(request.prompt, request.connector, []), ...skillInputs],
+        turnSettings: {
+          ...(settings.turn ?? {}),
+          approvalPolicy: "never",
+          ...(request.model === undefined ? {} : { model: request.model }),
+          ...(request.reasoningEffort === undefined ? {} : { effort: request.reasoningEffort }),
+        },
+        invocation: request.invocation,
+        stream: silentStream,
+        failIfInterrupted: true,
+        ...(request.outputSchema === undefined ? {} : { outputSchema: request.outputSchema }),
+      });
+    } finally {
+      this.leaveJob();
+    }
+  }
+
+  private async executeTurn(request: ExecuteTurnRequest): Promise<CodexTurnResult> {
+    const stagingDirectory = join(this.#outboundDirectory, crypto.randomUUID());
+    const active: ActiveTurn = {
+      conversationKey: request.conversationKey,
+      connector: request.connector,
+      threadId: request.threadId,
+      responder: request.responder,
+      stream: request.stream,
+      invocation: request.invocation,
+      completion: deferred<Turn>(),
+      phases: new Map(),
+      actions: new Map(),
+      reasoning: new Map(),
+      generatedPaths: [],
+      progressMessage: "",
+      plan: [],
+      finalText: "",
+      turnId: undefined,
+    };
+    void active.completion.promise.catch(() => undefined);
+    this.#activeByThread.set(request.threadId, active);
+    this.#activeByConversation.set(request.conversationKey, active);
+
+    try {
+      const additionalContext = this.additionalContext(request.connector, request.invocation);
+      const response = await this.#rpc.request<TurnStartResponse>({
+        method: "turn/start",
+        params: {
+          ...request.turnSettings,
+          threadId: request.threadId,
+          clientUserMessageId: crypto.randomUUID(),
+          input: [...request.input],
+          ...(Object.keys(additionalContext).length === 0 ? {} : { additionalContext }),
+          ...(request.outputSchema === undefined ? {} : { outputSchema: request.outputSchema }),
+        },
+      });
+      if (active.turnId !== undefined && active.turnId !== response.turn.id) {
+        throw new BridgeError(
+          "Codex returned inconsistent turn identifiers",
+          "CODEX_TURN_MISMATCH",
+        );
       }
-    });
+      active.turnId = response.turn.id;
+      if (this.#interruptingScheduledTurns && request.invocation.automationId !== undefined) {
+        await this.#rpc.request<TurnInterruptResponse>({
+          method: "turn/interrupt",
+          params: { threadId: active.threadId, turnId: active.turnId },
+        });
+      }
+      let turn: Turn;
+      try {
+        turn = await withTimeout(
+          active.completion.promise,
+          30 * 60 * 1_000,
+          "Codex turn did not complete within 30 minutes",
+        );
+      } catch (error) {
+        if (
+          error instanceof BridgeError &&
+          error.code === "TIMEOUT" &&
+          active.turnId !== undefined
+        ) {
+          await this.#rpc
+            .request<TurnInterruptResponse>({
+              method: "turn/interrupt",
+              params: { threadId: active.threadId, turnId: active.turnId },
+            })
+            .catch((interruptError: unknown) => {
+              this.#logger.warn("Could not interrupt timed-out Codex turn", {
+                error: errorMessage(interruptError),
+              });
+            });
+        }
+        throw error;
+      }
+      if (turn.status === "failed") {
+        throw new BridgeError(turn.error?.message ?? "Codex turn failed", "CODEX_TURN_FAILED");
+      }
+      if (turn.status === "interrupted" && request.failIfInterrupted === true) {
+        throw new BridgeError("Scheduled Codex turn was interrupted", "CODEX_TURN_INTERRUPTED");
+      }
+
+      const finalText = this.finalTextFromTurn(turn) || active.finalText;
+      const resolution = await resolveOutboundAttachments(
+        this.#workspace,
+        this.#generatedImagesDirectory,
+        stagingDirectory,
+        finalText,
+        [...active.generatedPaths, ...generatedFilePaths(turn.items)],
+      );
+      const responseText =
+        turn.status === "interrupted" && finalText.length === 0
+          ? "Stopped."
+          : appendAttachmentWarning(finalText, resolution.unavailable);
+      let disposed = false;
+      return {
+        threadId: request.threadId,
+        turnId: turn.id,
+        rawText: finalText,
+        text: responseText,
+        attachments: resolution.attachments,
+        unavailableAttachments: resolution.unavailable,
+        dispose: async () => {
+          if (disposed) return;
+          disposed = true;
+          await rm(stagingDirectory, { recursive: true, force: true }).catch(() => undefined);
+        },
+      };
+    } catch (error) {
+      await rm(stagingDirectory, { recursive: true, force: true }).catch(() => undefined);
+      throw error;
+    } finally {
+      if (this.#activeByThread.get(request.threadId) === active) {
+        this.#activeByThread.delete(request.threadId);
+      }
+      if (this.#activeByConversation.get(request.conversationKey) === active) {
+        this.#activeByConversation.delete(request.conversationKey);
+      }
+    }
   }
 
   private async transcribeVoiceMessages(
@@ -311,6 +546,44 @@ export class CodexService {
     await this.#conversations.delete(conversationKey);
   }
 
+  public async activateConversationThread(
+    conversationKey: string,
+    threadId: string,
+  ): Promise<boolean> {
+    if (
+      this.#activeByConversation.has(conversationKey) ||
+      (this.#foregroundWaiting.get(conversationKey) ?? 0) > 0
+    ) {
+      throw new BridgeError(
+        "The conversation is busy. Stop or wait for the current turn first.",
+        "CONVERSATION_BUSY",
+      );
+    }
+    const lease = this.#queue.tryAcquire(conversationKey);
+    if (lease === undefined) {
+      throw new BridgeError(
+        "The conversation is busy. Stop or wait for the current turn first.",
+        "CONVERSATION_BUSY",
+      );
+    }
+    try {
+      const settings = await this.#effectiveSettings();
+      const resumedThreadId = await this.resumeThreadStrict(threadId, settings.thread ?? {});
+      return await this.#conversations.switchTo(conversationKey, resumedThreadId);
+    } finally {
+      lease.release();
+    }
+  }
+
+  public async activatePreviousConversationThread(
+    conversationKey: string,
+  ): Promise<string | undefined> {
+    const previous = this.#conversations.previous(conversationKey);
+    if (previous === undefined) return undefined;
+    await this.activateConversationThread(conversationKey, previous);
+    return previous;
+  }
+
   public async interrupt(conversationKey: string): Promise<boolean> {
     const active = this.#activeByConversation.get(conversationKey);
     if (active?.turnId === undefined) return false;
@@ -319,6 +592,24 @@ export class CodexService {
       params: { threadId: active.threadId, turnId: active.turnId },
     });
     return true;
+  }
+
+  public async interruptScheduledTurns(): Promise<void> {
+    this.#interruptingScheduledTurns = true;
+    const activeTurns = new Set(
+      [...this.#activeByThread.values()].filter(
+        (active) => active.invocation.automationId !== undefined && active.turnId !== undefined,
+      ),
+    );
+    await Promise.allSettled(
+      [...activeTurns].map(async (active) => {
+        if (active.turnId === undefined) return;
+        await this.#rpc.request<TurnInterruptResponse>({
+          method: "turn/interrupt",
+          params: { threadId: active.threadId, turnId: active.turnId },
+        });
+      }),
+    );
   }
 
   public async account(): Promise<GetAccountResponse> {
@@ -353,12 +644,7 @@ export class CodexService {
       if (stored !== undefined) {
         if (!this.#loadedThreads.has(stored)) {
           try {
-            const resumed = await this.#rpc.request<ThreadResumeResponse>({
-              method: "thread/resume",
-              params: { ...settings, threadId: stored, cwd: this.#workspace },
-            });
-            this.#loadedThreads.add(resumed.thread.id);
-            return resumed.thread.id;
+            return await this.resumeThreadStrict(stored, settings);
           } catch (error) {
             if (
               error instanceof BridgeError &&
@@ -378,6 +664,16 @@ export class CodexService {
       }
     }
 
+    const threadId = await this.startThread(settings, "telex", ephemeral);
+    if (!ephemeral) await this.#conversations.set(conversationKey, threadId);
+    return threadId;
+  }
+
+  private async startThread(
+    settings: CodexThreadSettings,
+    threadSource: string,
+    ephemeral = false,
+  ): Promise<string> {
     const started = await this.#rpc.request<ThreadStartResponse>({
       method: "thread/start",
       params: {
@@ -385,12 +681,48 @@ export class CodexService {
         cwd: this.#workspace,
         ephemeral,
         serviceName: "telex",
-        threadSource: "telex",
+        threadSource,
+        dynamicTools: [...this.#dynamicTools.values()].map((tool) => tool.spec),
       },
     });
     this.#loadedThreads.add(started.thread.id);
-    if (!ephemeral) await this.#conversations.set(conversationKey, started.thread.id);
     return started.thread.id;
+  }
+
+  private async resumeThreadStrict(
+    threadId: string,
+    settings: CodexThreadSettings,
+  ): Promise<string> {
+    if (this.#loadedThreads.has(threadId)) return threadId;
+    const resumed = await this.#rpc.request<ThreadResumeResponse>({
+      method: "thread/resume",
+      params: { ...settings, threadId, cwd: this.#workspace },
+    });
+    this.#loadedThreads.add(resumed.thread.id);
+    return resumed.thread.id;
+  }
+
+  private additionalContext(
+    connector: string,
+    invocation: CodexInvocationContext,
+  ): ApplicationContext {
+    return {
+      ...(this.#remoteClientContextEnabled() ? createRemoteClientContext(connector) : {}),
+      ...(invocation.additionalContext ?? {}),
+    };
+  }
+
+  private incrementForegroundWaiting(conversationKey: string): void {
+    this.#foregroundWaiting.set(
+      conversationKey,
+      (this.#foregroundWaiting.get(conversationKey) ?? 0) + 1,
+    );
+  }
+
+  private decrementForegroundWaiting(conversationKey: string): void {
+    const waiting = (this.#foregroundWaiting.get(conversationKey) ?? 1) - 1;
+    if (waiting <= 0) this.#foregroundWaiting.delete(conversationKey);
+    else this.#foregroundWaiting.set(conversationKey, waiting);
   }
 
   private async enterJob(): Promise<void> {
@@ -413,6 +745,9 @@ export class CodexService {
 
   private handleNotification(notification: ServerNotification): void {
     switch (notification.method) {
+      case "turn/started":
+        this.handleTurnStarted(notification.params);
+        break;
       case "item/started":
         this.handleItemStarted(notification.params);
         break;
@@ -447,9 +782,16 @@ export class CodexService {
     }
   }
 
-  private handleItemStarted(notification: ItemStartedNotification): void {
+  private handleTurnStarted(notification: TurnStartedNotification): void {
     const active = this.#activeByThread.get(notification.threadId);
     if (active === undefined) return;
+    if (active.turnId !== undefined && active.turnId !== notification.turn.id) return;
+    active.turnId = notification.turn.id;
+  }
+
+  private handleItemStarted(notification: ItemStartedNotification): void {
+    const active = this.#activeByThread.get(notification.threadId);
+    if (active === undefined || !matchesTurn(active, notification.turnId)) return;
     if (notification.item.type === "agentMessage") {
       active.phases.set(notification.item.id, notification.item.phase);
       if (notification.item.phase === "commentary") {
@@ -471,7 +813,7 @@ export class CodexService {
 
   private handleItemCompleted(notification: ItemCompletedNotification): void {
     const active = this.#activeByThread.get(notification.threadId);
-    if (active === undefined) return;
+    if (active === undefined || !matchesTurn(active, notification.turnId)) return;
     if (notification.item.type === "agentMessage") {
       active.phases.set(notification.item.id, notification.item.phase);
       if (notification.item.phase === "commentary") {
@@ -495,7 +837,7 @@ export class CodexService {
 
   private handleAgentDelta(notification: AgentMessageDeltaNotification): void {
     const active = this.#activeByThread.get(notification.threadId);
-    if (active === undefined) return;
+    if (active === undefined || !matchesTurn(active, notification.turnId)) return;
     if (active.phases.get(notification.itemId) === "commentary") {
       active.progressMessage += notification.delta;
       this.publishProgress(active);
@@ -507,7 +849,7 @@ export class CodexService {
 
   private handleReasoningDelta(notification: ReasoningSummaryTextDeltaNotification): void {
     const active = this.#activeByThread.get(notification.threadId);
-    if (active === undefined) return;
+    if (active === undefined || !matchesTurn(active, notification.turnId)) return;
     const summaries = [...(active.reasoning.get(notification.itemId) ?? [])];
     summaries[notification.summaryIndex] =
       `${summaries[notification.summaryIndex] ?? ""}${notification.delta}`;
@@ -517,14 +859,14 @@ export class CodexService {
 
   private handleFileChangeUpdated(notification: FileChangePatchUpdatedNotification): void {
     const active = this.#activeByThread.get(notification.threadId);
-    if (active === undefined) return;
+    if (active === undefined || !matchesTurn(active, notification.turnId)) return;
     active.actions.set(notification.itemId, fileChangeActions(notification.changes, false));
     this.publishProgress(active);
   }
 
   private handlePlanUpdated(notification: TurnPlanUpdatedNotification): void {
     const active = this.#activeByThread.get(notification.threadId);
-    if (active === undefined) return;
+    if (active === undefined || !matchesTurn(active, notification.turnId)) return;
     active.plan = notification.plan;
     this.publishProgress(active);
   }
@@ -551,8 +893,7 @@ export class CodexService {
 
   private handleTurnCompleted(notification: TurnCompletedNotification): void {
     const active = this.#activeByThread.get(notification.threadId);
-    if (active === undefined) return;
-    if (active.turnId !== undefined && active.turnId !== notification.turn.id) return;
+    if (active === undefined || !matchesTurn(active, notification.turn.id)) return;
     active.completion.resolve(notification.turn);
   }
 
@@ -573,7 +914,11 @@ export class CodexService {
   private async handleServerRequest(request: ServerRequest): Promise<void> {
     switch (request.method) {
       case "item/commandExecution/requestApproval": {
-        const active = this.#activeByThread.get(request.params.threadId);
+        const candidate = this.#activeByThread.get(request.params.threadId);
+        const active =
+          candidate !== undefined && matchesTurn(candidate, request.params.turnId)
+            ? candidate
+            : undefined;
         const choice = await this.askApproval(
           active,
           `Codex wants to run:\n\n${request.params.command ?? "(unknown command)"}${
@@ -590,7 +935,11 @@ export class CodexService {
         break;
       }
       case "item/fileChange/requestApproval": {
-        const active = this.#activeByThread.get(request.params.threadId);
+        const candidate = this.#activeByThread.get(request.params.threadId);
+        const active =
+          candidate !== undefined && matchesTurn(candidate, request.params.turnId)
+            ? candidate
+            : undefined;
         const choice = await this.askApproval(
           active,
           `Codex wants permission to change files${
@@ -607,7 +956,11 @@ export class CodexService {
         break;
       }
       case "item/tool/requestUserInput": {
-        const active = this.#activeByThread.get(request.params.threadId);
+        const candidate = this.#activeByThread.get(request.params.threadId);
+        const active =
+          candidate !== undefined && matchesTurn(candidate, request.params.turnId)
+            ? candidate
+            : undefined;
         const answers: Record<string, ToolRequestUserInputAnswer> = {};
         for (const question of request.params.questions) {
           if (active === undefined || question.options === null || question.options.length === 0) {
@@ -619,7 +972,7 @@ export class CodexService {
             label: option.label,
             description: option.description,
           }));
-          const answer = await active.responder.askChoice(question.question, options);
+          const answer = await active.responder?.askChoice(question.question, options);
           const selected = question.options[Number(answer)];
           answers[question.id] = { answers: selected === undefined ? [] : [selected.label] };
         }
@@ -627,8 +980,15 @@ export class CodexService {
         await this.#rpc.reply(request.id, response);
         break;
       }
+      case "item/tool/call":
+        await this.handleDynamicToolCall(request.params, request.id);
+        break;
       case "item/permissions/requestApproval": {
-        const active = this.#activeByThread.get(request.params.threadId);
+        const candidate = this.#activeByThread.get(request.params.threadId);
+        const active =
+          candidate !== undefined && matchesTurn(candidate, request.params.turnId)
+            ? candidate
+            : undefined;
         const choice = await this.askApproval(
           active,
           request.params.reason ?? "Codex is requesting additional permissions.",
@@ -655,11 +1015,56 @@ export class CodexService {
     }
   }
 
+  private async handleDynamicToolCall(
+    params: DynamicToolCallParams,
+    requestId: ServerRequest["id"],
+  ): Promise<void> {
+    const active = this.#activeByThread.get(params.threadId);
+    if (active === undefined || !matchesTurn(active, params.turnId) || params.namespace !== null) {
+      await this.replyDynamicTool(requestId, false, "This tool call has no active Telex turn.");
+      return;
+    }
+    const tool = this.#dynamicTools.get(params.tool);
+    if (tool === undefined) {
+      await this.replyDynamicTool(requestId, false, `Unknown dynamic tool: ${params.tool}`);
+      return;
+    }
+    try {
+      const result = await tool.execute(params.arguments, {
+        ...active.invocation,
+        conversationKey: active.conversationKey,
+        connector: active.connector,
+        threadId: active.threadId,
+        turnId: params.turnId,
+        callId: params.callId,
+      });
+      await this.replyDynamicTool(requestId, true, JSON.stringify(result));
+    } catch (error) {
+      this.#logger.warn("Dynamic tool call failed", {
+        tool: params.tool,
+        error: errorMessage(error),
+      });
+      await this.replyDynamicTool(requestId, false, errorMessage(error));
+    }
+  }
+
+  private async replyDynamicTool(
+    requestId: ServerRequest["id"],
+    success: boolean,
+    text: string,
+  ): Promise<void> {
+    const response: DynamicToolCallResponse = {
+      success,
+      contentItems: [{ type: "inputText", text }],
+    };
+    await this.#rpc.reply(requestId, response);
+  }
+
   private async askApproval(
     active: ActiveTurn | undefined,
     prompt: string,
   ): Promise<"once" | "session" | "decline"> {
-    if (active === undefined) return "decline";
+    if (active?.responder === undefined) return "decline";
     const answer = await active.responder.askChoice(prompt, [
       { id: "once", label: "Allow once" },
       { id: "session", label: "Allow for session" },
@@ -677,6 +1082,18 @@ export class CodexService {
       .filter(Boolean)
       .join("\n\n");
   }
+}
+
+const silentStream: OutboundStream = {
+  start: async () => undefined,
+  setProgress: () => undefined,
+  appendFinal: () => undefined,
+  complete: async () => undefined,
+  fail: async () => undefined,
+};
+
+function matchesTurn(active: ActiveTurn, turnId: string): boolean {
+  return active.turnId === turnId;
 }
 
 function appendAttachmentWarning(text: string, unavailable: readonly string[]): string {

@@ -113,7 +113,7 @@ export async function checkCodexProtocol(
       bindingsDirectory,
       schemasDirectory,
     );
-    await validateAdditionalContextProtocol(
+    await validateExperimentalProtocol(
       codexBinary,
       projectRoot,
       join(stageRoot, "codex-home"),
@@ -213,7 +213,7 @@ async function generateProtocol(
   });
 }
 
-async function validateAdditionalContextProtocol(
+async function validateExperimentalProtocol(
   codexBinary: string,
   projectRoot: string,
   codexHome: string,
@@ -240,6 +240,17 @@ async function validateAdditionalContextProtocol(
     !kind.includes('"application"')
   ) {
     throw new Error("Codex additional-context entry shape is incompatible with Telex");
+  }
+  const threadStart = await readFile(join(bindingsDirectory, "v2", "ThreadStartParams.ts"), "utf8");
+  const dynamicTool = await readFile(join(bindingsDirectory, "v2", "DynamicToolSpec.ts"), "utf8");
+  if (!threadStart.includes("dynamicTools") || !threadStart.includes("DynamicToolSpec")) {
+    throw new Error("Codex no longer exposes thread/start.dynamicTools");
+  }
+  if (
+    !dynamicTool.includes('"type": "function"') ||
+    !dynamicTool.includes("DynamicToolFunctionSpec")
+  ) {
+    throw new Error("Codex dynamic-tool specification shape is incompatible with Telex");
   }
 }
 

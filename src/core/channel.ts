@@ -3,6 +3,20 @@ export interface ConversationAddress {
   readonly key: string;
   readonly isPrivate: boolean;
   readonly isGuest: boolean;
+  /** Provider-owned destination for messages sent without an inbound request. */
+  readonly deliveryTarget?: ProviderReference;
+}
+
+/**
+ * Opaque reference owned by a messaging provider.
+ *
+ * Core services persist and compare these values, but only the provider that
+ * created a reference may interpret its `id`.
+ */
+export interface ProviderReference {
+  readonly provider: string;
+  readonly resource: "conversation" | "destination" | "message" | "user";
+  readonly id: string;
 }
 
 export interface SenderIdentity {
@@ -34,6 +48,21 @@ export interface ActionButton {
 
 export interface SendOptions {
   readonly button?: ActionButton;
+}
+
+export interface MessageCommandAction {
+  readonly label: string;
+  readonly command: InboundCommand;
+}
+
+export interface OutboundMessage {
+  readonly text: string;
+  readonly attachments?: readonly OutboundAttachment[];
+  readonly actions?: readonly MessageCommandAction[];
+}
+
+export interface DeliveryReceipt {
+  readonly publishedMessages: readonly ProviderReference[];
 }
 
 export interface ChoiceOption {
@@ -75,6 +104,8 @@ export interface MessageResponder {
 export interface InboundMessage {
   readonly id: string;
   readonly address: ConversationAddress;
+  readonly reference?: ProviderReference;
+  readonly replyTo?: ProviderReference;
   readonly sender: SenderIdentity;
   readonly text: string;
   readonly command?: InboundCommand;
@@ -86,6 +117,9 @@ export type MessageHandler = (message: InboundMessage) => Promise<void>;
 
 export interface MessagingChannel {
   readonly name: string;
+  /** Re-check a persisted provider principal before unattended work executes. */
+  isAuthorized(principal: ProviderReference): boolean | Promise<boolean>;
   start(handler: MessageHandler): Promise<void>;
+  publish(target: ProviderReference, message: OutboundMessage): Promise<DeliveryReceipt>;
   stop(): Promise<void>;
 }

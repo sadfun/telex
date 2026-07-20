@@ -1,6 +1,7 @@
 import { access, readFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { AutomationStore, ScheduledRunsEngine } from "./automations/index.js";
 import { TelegramChannel } from "./channels/telegram/channel.js";
 import { CodexConfigService } from "./codex/config-service.js";
 import { CodexAppServer } from "./codex/rpc.js";
@@ -53,6 +54,7 @@ export async function runTelex(): Promise<TelexRunResult> {
   const toolchainsDirectory = join(config.dataDirectory, "toolchains");
   const statePath = join(config.dataDirectory, "conversations.json");
   const settingsPath = join(config.dataDirectory, "settings.json");
+  const automationsPath = join(config.dataDirectory, "automations.json");
   const resources: Stoppable[] = [];
   const manuallyInstalledUpdate = deferred<string>();
   let updateMonitor: Promise<string | undefined> | undefined;
@@ -100,7 +102,11 @@ export async function runTelex(): Promise<TelexRunResult> {
       settingsPath,
       logger.child({ component: "settings-store" }),
     );
-    await Promise.all([conversations.load(), settings.load()]);
+    const automations = new AutomationStore(
+      automationsPath,
+      logger.child({ component: "automation-store" }),
+    );
+    await Promise.all([conversations.load(), settings.load(), automations.load()]);
     const transcriptionTransport = new CurlImpersonateTransport(
       toolchainsDirectory,
       logger.child({ component: "transcription-transport" }),
@@ -189,6 +195,21 @@ export async function runTelex(): Promise<TelexRunResult> {
         : { installDirectory: config.installDirectory }),
       logger: logger.child({ component: "updater" }),
     });
+    const telegram = new TelegramChannel(
+      config.telegramToken,
+      config.telegramApiBase,
+      config.allowedUserIds,
+      config.telegramPollTimeout,
+      join(config.workspace, ".telex", "attachments"),
+      logger.child({ component: "telegram" }),
+    );
+    const scheduledRuns = new ScheduledRunsEngine({
+      store: automations,
+      codex,
+      channels: [telegram],
+      workspace: config.workspace,
+      logger: logger.child({ component: "scheduled-runs" }),
+    });
     const bridge = new CodexBridge(
       codex,
       publicUrl,
@@ -210,17 +231,12 @@ export async function runTelex(): Promise<TelexRunResult> {
         onInstalled: manuallyInstalledUpdate.resolve,
       },
       runtime,
-    );
-    const telegram = new TelegramChannel(
-      config.telegramToken,
-      config.telegramApiBase,
-      config.allowedUserIds,
-      config.telegramPollTimeout,
-      join(config.workspace, ".telex", "attachments"),
-      logger.child({ component: "telegram" }),
+      scheduledRuns,
     );
     resources.push(telegram);
     await telegram.start(bridge.handleMessage);
+    resources.push(scheduledRuns);
+    await scheduledRuns.start();
 
     logger.info("Telex is ready", {
       version: bridgeVersion,

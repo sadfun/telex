@@ -2,7 +2,7 @@
 
 Telex is a self-hosted Telegram bridge for OpenAI Codex. Telegram is only the transport: a dedicated [Codex app-server](https://github.com/openai/codex/blob/main/codex-rs/app-server/README.md) owns threads, turns, tools, approvals, authentication, and configuration.
 
-Telex supports private conversations, automatic Telegram voice-message transcription, photos and files in both directions, forwarded and replied-to context, polls and other structured messages, streamed replies and thinking, interactive approvals, guest mentions, persistent Codex threads, and an authenticated settings Mini App. It installs a pinned Codex CLI into isolated application storage, so it never depends on a global Codex installation.
+Telex supports private conversations, scheduled runs, automatic Telegram voice-message transcription, photos and files in both directions, forwarded and replied-to context, polls and other structured messages, streamed replies and thinking, interactive approvals, guest mentions, persistent Codex threads, and an authenticated settings Mini App. It installs a pinned Codex CLI into isolated application storage, so it never depends on a global Codex installation.
 
 ## Requirements
 
@@ -44,7 +44,8 @@ The default layout is:
     ├── codex-home/                    # Codex login and config.toml
     ├── toolchains/                    # isolated pinned Codex CLIs
     ├── workspace/                     # Codex working directory
-    └── conversations.json
+    ├── conversations.json
+    └── automations.json               # schedules, runs, and notifications
 ```
 
 Use `--install-dir`, `--config-dir`, `--bin-dir`, `--version`, or `--no-service` to customize the installation. Run the installer with `--help` for details. Re-running it is safe and preserves existing configuration and data.
@@ -112,7 +113,7 @@ Telex checks GitHub's latest stable Release on startup and at that interval. Whe
 4. atomically switches the `current` symlink; and
 5. shuts down cleanly so systemd or launchd restarts the new version.
 
-Configuration, conversations, Codex authentication, Codex configuration, and the workspace live outside release directories and are preserved. A failed download, checksum, extraction, or validation leaves the active release unchanged.
+Configuration, conversations, scheduled runs, Codex authentication, Codex configuration, and the workspace live outside release directories and are preserved. A failed download, checksum, extraction, or validation leaves the active release unchanged.
 
 Set `TELEX_UPDATE_MODE=notify` to log available releases without installing them, or `off` to disable checks. `TELEX_UPDATE_REPOSITORY=owner/repository` makes a fork its update source.
 
@@ -149,7 +150,9 @@ Then restart the service. Rollback changes application code only; it does not re
 | --- | --- |
 | `/start` | Show setup guidance and start sign-in when required. |
 | `/new` | Interrupt the current turn, forget its thread, and start fresh on the next message. |
+| `/back` | Return to the previously active Codex task. |
 | `/stop` | Interrupt the running Codex turn. |
+| `/schedules` | List your scheduled runs and their next execution times. |
 | `/status` | Check app-server connectivity and the current Codex account. |
 | `/login` | Start Codex's ChatGPT device-code login in a private chat. |
 | `/logout` | Sign out through Codex in a private chat. |
@@ -166,6 +169,31 @@ Every turn also carries connector-derived application context separately from th
 In the other direction, Telex uploads completed Codex image-generation results and regular workspace files explicitly linked in the final answer. JPEG and PNG images, GIF animations, MP4 videos, and MP3 or M4A audio use Telegram's native media methods; everything else is sent as a document. Native-media failures retry as documents, individual upload failures remain visible, and Telex snapshots canonically validated files before upload. Markdown links are limited to the configured workspace; structured image-generation outputs are also accepted from Codex's dedicated generated-image directory. Ordinary source edits, code examples, arbitrary paths, and unlinked files are never uploaded automatically.
 
 Telegram's hosted Bot API only allows bots to download files up to 20 MB and upload general files up to 50 MB. Telex still forwards the file metadata and a clear limitation notice when a download or upload is unavailable. Set `TELEGRAM_API_BASE` to a [local Bot API server](https://core.telegram.org/bots/api#using-a-local-bot-api-server) to remove the download limit and support larger uploads.
+
+## Scheduled runs
+
+Ask Codex naturally, for example, “Every weekday at 9, check this project for failed CI runs” or “Revisit this task every hour and notify me only if something changed.” Telex exposes a host-managed `automation_update` tool to new Codex tasks and stores each schedule with an explicit time zone. A task created before upgrading does not have that tool in its persisted definition; send `/new` once before asking it to create or edit schedules. `/schedules` remains available for viewing them.
+
+The initial recurrence engine accepts a bounded RRULE subset covering minutely, hourly, daily, and weekly schedules. It rejects multi-line, unusually dense, or computationally expensive rules instead of allowing schedule evaluation to stall the bridge.
+
+Scheduled runs follow the [Codex Desktop scheduled-task model](https://developers.openai.com/codex/app/automations):
+
+- A cron run starts a fresh persistent Codex task for each occurrence. A heartbeat revisits the Codex task in which it was created.
+- When the scheduler claims work, an active or waiting user message makes it defer and retry. If an unattended run has already started, a later message shows a queued status and begins as soon as that run finishes.
+- Heartbeats can suppress unimportant results. Cron results notify by default, and delivery failures are recorded without rerunning already completed work.
+- Each schedule gets a small durable memory file under the workspace's `.telex/automations` directory, which the run reads and may update.
+
+Notifications deliberately do not change the active task, including in a Telegram chat without topics. Your next ordinary message still goes to the task you were already using. Replying to a scheduled notification also stays in that task, but Telex supplies the complete stored result as additional context even when Telegram split or truncated the visible message. **Continue this run** explicitly switches to the notification's source task when the conversation is idle; `/back` returns to the previous task.
+
+Scheduling and delivery state use opaque provider references rather than Telegram message or chat fields. Telegram is the first adapter; future messaging providers can define their own destination and message identifier formats without changing the scheduler.
+
+Telex retains the latest 100 run and notification records for each schedule so local state stays bounded. Older provider messages remain in the provider, but Telex may no longer have enough retained context to resume or expand them.
+
+### The one custom-harness exception
+
+Telex's design rule is to use Codex's native app-server behavior instead of building a custom agent harness. The scheduled-runs engine is the one exception because Codex Desktop already implements scheduling in its host application rather than in Codex CLI. Telex mirrors that approach nearly 1:1: the host claims due work, applies foreground priority, persists run and notification state, and asks Codex to execute normal turns. As soon as Codex CLI or app-server provides native cron ownership, Telex will switch to it immediately and retire this engine.
+
+The service must be running when work becomes due; this is not a cloud scheduler and it does not wake a powered-off machine. The initial implementation runs only against Telex's configured local workspace.
 
 ## Settings Mini App
 

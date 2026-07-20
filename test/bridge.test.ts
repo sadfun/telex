@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import type { ScheduledRunsEngine } from "../src/automations/engine.js";
 import type { CodexService } from "../src/codex/service.js";
 import {
   CodexBridge,
@@ -10,6 +11,7 @@ import type {
   InboundAttachment,
   InboundCommand,
   InboundMessage,
+  ProviderReference,
   SendOptions,
 } from "../src/core/channel.js";
 import type { AccountLoginCompletedNotification } from "../src/generated/codex/v2/AccountLoginCompletedNotification.js";
@@ -56,6 +58,7 @@ function createCodex(overrides: Record<string, unknown> = {}) {
   const raw = {
     runTurn: vi.fn(async () => undefined),
     resetConversation: vi.fn(async () => undefined),
+    activatePreviousConversationThread: vi.fn(async () => undefined),
     interrupt: vi.fn(async () => false),
     account: vi.fn(
       async (): Promise<GetAccountResponse> => ({ account: null, requiresOpenaiAuth: true }),
@@ -417,3 +420,65 @@ describe("CodexBridge runtime controls", () => {
     expect(responder.sendText.mock.calls[0]?.[0]).toContain("/restart");
   });
 });
+
+describe("CodexBridge scheduled-run routing", () => {
+  it("adds a replied-to notification as context without switching the active task", async () => {
+    const { codex, raw } = createCodex({ account: vi.fn(async () => signedInAccount) });
+    const replyTo = providerReference("message", "reply-1");
+    const deliveryTarget = providerReference("destination", "target-1");
+    const applicationContext = {
+      "telex.scheduled-result": { kind: "application" as const, value: "Complete result" },
+    };
+    const scheduledRuns = {
+      contextForReply: vi.fn(async () => applicationContext),
+    } as unknown as ScheduledRunsEngine;
+    const bridge = new CodexBridge(codex, undefined, logger, undefined, undefined, scheduledRuns);
+    const responder = createResponder();
+    const base = createMessage("What does this mean?", responder, { deliveryTarget });
+
+    await bridge.handleMessage({ ...base, replyTo });
+
+    const conversation = providerReference("conversation", "telegram:1:0");
+    const owner = providerReference("user", "1");
+    expect(scheduledRuns.contextForReply).toHaveBeenCalledWith(replyTo, owner, conversation);
+    expect(raw.runTurn).toHaveBeenCalledWith(
+      "telegram:1:0",
+      "telegram",
+      "What does this mean?",
+      responder,
+      false,
+      [],
+      { owner, deliveryTarget, additionalContext: applicationContext },
+    );
+  });
+
+  it("switches only through an explicit continue action and supports back", async () => {
+    const { codex, raw } = createCodex({
+      activatePreviousConversationThread: vi.fn(async () => "thread-previous"),
+    });
+    const scheduledRuns = {
+      continueRun: vi.fn(async () => ({ automationName: "Build monitor", changed: true })),
+    } as unknown as ScheduledRunsEngine;
+    const bridge = new CodexBridge(codex, undefined, logger, undefined, undefined, scheduledRuns);
+    const responder = createResponder();
+
+    await bridge.handleMessage(
+      createMessage("/continue run-1", responder, {}, [], {
+        name: "continue",
+        args: "run-1",
+      }),
+    );
+    await bridge.handleMessage(createMessage("/back", responder));
+
+    expect(scheduledRuns.continueRun).toHaveBeenCalledWith(
+      providerReference("user", "1"),
+      providerReference("conversation", "telegram:1:0"),
+      "run-1",
+    );
+    expect(raw.activatePreviousConversationThread).toHaveBeenCalledWith("telegram:1:0");
+  });
+});
+
+function providerReference(resource: ProviderReference["resource"], id: string): ProviderReference {
+  return { provider: "telegram", resource, id };
+}

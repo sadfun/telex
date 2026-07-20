@@ -41,7 +41,11 @@ describe("CodexService lifecycle", () => {
     await service.waitForIdle();
 
     expect(rpc.requests.filter((request) => request.method === "turn/start")).toHaveLength(1);
-    expect(second.stream.start).not.toHaveBeenCalled();
+    expect(second.stream.start).toHaveBeenCalledWith({
+      summary: "Queued behind earlier work…",
+      actions: [],
+      plan: [],
+    });
 
     service.resume();
     await rpc.waitForRequests("turn/start", 2);

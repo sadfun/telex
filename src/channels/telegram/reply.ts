@@ -5,6 +5,7 @@ import type {
   ChoiceOption,
   MessageResponder,
   OutboundAttachment,
+  OutboundMessage,
   OutboundStream,
   ProgressSnapshot,
   SendOptions,
@@ -89,6 +90,75 @@ function keyboard(options: SendOptions | undefined): InlineKeyboardMarkup | unde
       ],
     ],
   };
+}
+
+function commandKeyboard(message: OutboundMessage): InlineKeyboardMarkup | undefined {
+  const actions = message.actions;
+  if (actions === undefined || actions.length === 0) return undefined;
+  return {
+    inline_keyboard: actions.map((action) => [
+      {
+        text: action.label.slice(0, 64),
+        callback_data: encodeCommandCallback(action.command.name, action.command.args),
+      },
+    ]),
+  };
+}
+
+export function decodeCommandCallback(
+  value: string,
+): Readonly<{ name: string; args: string }> | undefined {
+  const match = /^tx:([a-z][a-z0-9_]*):(.*)$/u.exec(value);
+  const name = match?.[1];
+  const args = match?.[2];
+  return name === undefined || args === undefined ? undefined : { name, args };
+}
+
+function encodeCommandCallback(name: string, args: string): string {
+  if (
+    !/^[a-z][a-z0-9_]*$/u.test(name) ||
+    [...args].some((character) => character === ":" || character.charCodeAt(0) < 32)
+  ) {
+    throw new Error("Provider command action is not safe for Telegram callback data");
+  }
+  const value = `tx:${name}:${args}`;
+  if (Buffer.byteLength(value, "utf8") > 64) {
+    throw new Error("Provider command action exceeds Telegram's callback-data limit");
+  }
+  return value;
+}
+
+export async function publishTelegramMessage(
+  api: Api,
+  chatId: number,
+  route: TelegramReplyRoute,
+  message: OutboundMessage,
+  logger: Logger,
+): Promise<readonly number[]> {
+  if (route.visibility.kind !== "normal") {
+    throw new Error("Scheduled messages cannot use an ephemeral Telegram route");
+  }
+  const messageIds: number[] = [];
+  const chunks = splitTelegramText(message.text);
+  const replyMarkup = commandKeyboard(message);
+  for (const [index, chunk] of chunks.entries()) {
+    const sent = await api.sendMessage(chatId, chunk, {
+      ...normalMessageParameters(route),
+      ...(index === chunks.length - 1 && replyMarkup !== undefined
+        ? { reply_markup: replyMarkup }
+        : {}),
+    });
+    messageIds.push(sent.message_id);
+  }
+  const attachmentIds = await sendTelegramAttachments(
+    api,
+    chatId,
+    route,
+    message.attachments ?? [],
+    logger,
+  );
+  messageIds.push(...attachmentIds);
+  return messageIds;
 }
 
 export class TelegramResponder implements MessageResponder {
@@ -452,69 +522,7 @@ class TelegramReplyStream implements OutboundStream {
   }
 
   private async sendAttachments(attachments: readonly OutboundAttachment[]): Promise<void> {
-    const failed: string[] = [];
-    for (const attachment of attachments) {
-      if (!(await this.sendAttachment(attachment)))
-        failed.push(safeAttachmentName(attachment.filename));
-    }
-    if (failed.length === 0) return;
-
-    const message = `Could not send ${failed.join(", ")} as ${failed.length === 1 ? "an attachment" : "attachments"}.`;
-    try {
-      for (const chunk of splitTelegramText(message)) {
-        await this.#api.sendMessage(this.#chat.id, chunk, telegramSendParameters(this.#route));
-      }
-    } catch (error) {
-      this.#logger.warn("Telegram attachment failure notice could not be sent", {
-        error: error instanceof Error ? error.message : String(error),
-      });
-    }
-  }
-
-  private async sendAttachment(attachment: OutboundAttachment): Promise<boolean> {
-    const filename = safeAttachmentName(attachment.filename);
-    const input = (): InputFile => new InputFile(attachment.path, filename);
-    const params = telegramSendParameters(this.#route);
-    const kind = telegramAttachmentKind(attachment.path);
-
-    try {
-      switch (kind) {
-        case "photo":
-          await this.#api.sendPhoto(this.#chat.id, input(), params);
-          return true;
-        case "animation":
-          await this.#api.sendAnimation(this.#chat.id, input(), params);
-          return true;
-        case "video":
-          await this.#api.sendVideo(this.#chat.id, input(), params);
-          return true;
-        case "audio":
-          await this.#api.sendAudio(this.#chat.id, input(), params);
-          return true;
-        case "document":
-          await this.#api.sendDocument(this.#chat.id, input(), params);
-          return true;
-      }
-    } catch (error) {
-      let uploadError = error;
-      if (kind !== "document") {
-        this.#logger.debug("Native Telegram attachment failed; using document", {
-          filename,
-          error: error instanceof Error ? error.message : String(error),
-        });
-        try {
-          await this.#api.sendDocument(this.#chat.id, input(), params);
-          return true;
-        } catch (fallbackError) {
-          uploadError = fallbackError;
-        }
-      }
-      this.#logger.warn("Telegram attachment upload failed", {
-        filename,
-        error: uploadError instanceof Error ? uploadError.message : String(uploadError),
-      });
-    }
-    return false;
+    await sendTelegramAttachments(this.#api, this.#chat.id, this.#route, attachments, this.#logger);
   }
 
   private clearTimers(): void {
@@ -523,6 +531,82 @@ class TelegramReplyStream implements OutboundStream {
     this.#draftTimer = undefined;
     this.#typingTimer = undefined;
   }
+}
+
+async function sendTelegramAttachments(
+  api: Api,
+  chatId: number,
+  route: TelegramReplyRoute,
+  attachments: readonly OutboundAttachment[],
+  logger: Logger,
+): Promise<readonly number[]> {
+  const messageIds: number[] = [];
+  const failed: string[] = [];
+  for (const attachment of attachments) {
+    const messageId = await sendTelegramAttachment(api, chatId, route, attachment, logger);
+    if (messageId === undefined) failed.push(safeAttachmentName(attachment.filename));
+    else messageIds.push(messageId);
+  }
+  if (failed.length === 0) return messageIds;
+
+  const message = `Could not send ${failed.join(", ")} as ${failed.length === 1 ? "an attachment" : "attachments"}.`;
+  try {
+    for (const chunk of splitTelegramText(message)) {
+      const sent = await api.sendMessage(chatId, chunk, telegramSendParameters(route));
+      messageIds.push(sent.message_id);
+    }
+  } catch (error) {
+    logger.warn("Telegram attachment failure notice could not be sent", {
+      error: error instanceof Error ? error.message : String(error),
+    });
+  }
+  return messageIds;
+}
+
+async function sendTelegramAttachment(
+  api: Api,
+  chatId: number,
+  route: TelegramReplyRoute,
+  attachment: OutboundAttachment,
+  logger: Logger,
+): Promise<number | undefined> {
+  const filename = safeAttachmentName(attachment.filename);
+  const input = (): InputFile => new InputFile(attachment.path, filename);
+  const params = telegramSendParameters(route);
+  const kind = telegramAttachmentKind(attachment.path);
+
+  try {
+    switch (kind) {
+      case "photo":
+        return (await api.sendPhoto(chatId, input(), params)).message_id;
+      case "animation":
+        return (await api.sendAnimation(chatId, input(), params)).message_id;
+      case "video":
+        return (await api.sendVideo(chatId, input(), params)).message_id;
+      case "audio":
+        return (await api.sendAudio(chatId, input(), params)).message_id;
+      case "document":
+        return (await api.sendDocument(chatId, input(), params)).message_id;
+    }
+  } catch (error) {
+    let uploadError = error;
+    if (kind !== "document") {
+      logger.debug("Native Telegram attachment failed; using document", {
+        filename,
+        error: error instanceof Error ? error.message : String(error),
+      });
+      try {
+        return (await api.sendDocument(chatId, input(), params)).message_id;
+      } catch (fallbackError) {
+        uploadError = fallbackError;
+      }
+    }
+    logger.warn("Telegram attachment upload failed", {
+      filename,
+      error: uploadError instanceof Error ? uploadError.message : String(uploadError),
+    });
+  }
+  return undefined;
 }
 
 type TelegramAttachmentKind = "photo" | "animation" | "video" | "audio" | "document";

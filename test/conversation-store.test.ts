@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -25,6 +25,26 @@ describe("ConversationStore", () => {
     await reloaded.load();
     expect(reloaded.get("telegram:1")).toBe("thread-a");
     expect(reloaded.get("telegram:2")).toBe("thread-b");
-    expect(JSON.parse(await readFile(path, "utf8"))).toMatchObject({ version: 1 });
+    expect(JSON.parse(await readFile(path, "utf8"))).toMatchObject({ version: 2 });
+  });
+
+  it("migrates legacy mappings and keeps explicit thread-switch history", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "telex-store-"));
+    directories.push(directory);
+    const path = join(directory, "conversations.json");
+    await writeFile(
+      path,
+      `${JSON.stringify({ version: 1, conversations: { "telegram:1": "thread-a" } })}\n`,
+    );
+    const store = new ConversationStore(path, new Logger("error"));
+    await store.load();
+
+    await store.switchTo("telegram:1", "thread-b");
+
+    expect(store.get("telegram:1")).toBe("thread-b");
+    expect(store.previous("telegram:1")).toBe("thread-a");
+    await store.switchTo("telegram:1", store.previous("telegram:1") as string);
+    expect(store.get("telegram:1")).toBe("thread-a");
+    expect(store.previous("telegram:1")).toBe("thread-b");
   });
 });

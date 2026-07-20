@@ -1,3 +1,4 @@
+import type { ScheduledRunsEngine } from "../automations/engine.js";
 import type { CodexService } from "../codex/service.js";
 import type { Account } from "../generated/codex/v2/Account.js";
 import type { AccountLoginCompletedNotification } from "../generated/codex/v2/AccountLoginCompletedNotification.js";
@@ -10,6 +11,7 @@ import type {
   InboundMessage,
   MessageHandler,
   MessageResponder,
+  ProviderReference,
 } from "./channel.js";
 
 const introText =
@@ -20,7 +22,9 @@ const helpText = [
   "",
   "/start — show setup and sign-in help",
   "/new — start a fresh Codex task",
+  "/back — return to the previous Codex task",
   "/stop — stop the current turn",
+  "/schedules — list scheduled runs",
   "/status — check Codex and sign-in status",
   "/login — sign in to ChatGPT",
   "/logout — sign out",
@@ -69,6 +73,7 @@ export class CodexBridge {
   readonly #logger: Logger;
   readonly #updateCommand: TelexUpdateCommand | undefined;
   readonly #runtimeCommand: CodexRuntimeCommand | undefined;
+  readonly #scheduledRuns: ScheduledRunsEngine | undefined;
   readonly #pendingLogins = new Map<string, PendingLogin>();
   #signedInConfirmed = false;
   #updateInProgress = false;
@@ -80,14 +85,7 @@ export class CodexBridge {
         (message.attachments.length === 0 ? parseCommand(message.text) : undefined);
       if (command === undefined) {
         if (!(await this.ensureSignedIn(message))) return;
-        await this.#codex.runTurn(
-          message.address.key,
-          message.address.channel,
-          message.text,
-          message.responder,
-          message.address.isGuest,
-          message.attachments,
-        );
+        await this.runUserTurn(message);
         return;
       }
       await this.handleCommand(message, command);
@@ -106,15 +104,53 @@ export class CodexBridge {
     logger: Logger,
     updateCommand?: TelexUpdateCommand,
     runtimeCommand?: CodexRuntimeCommand,
+    scheduledRuns?: ScheduledRunsEngine,
   ) {
     this.#codex = codex;
     this.#publicUrl = publicUrl;
     this.#logger = logger;
     this.#updateCommand = updateCommand;
     this.#runtimeCommand = runtimeCommand;
+    this.#scheduledRuns = scheduledRuns;
     codex.onLoginCompleted((notification) => {
       void this.handleLoginCompleted(notification);
     });
+  }
+
+  private async runUserTurn(message: InboundMessage): Promise<void> {
+    if (this.#scheduledRuns === undefined || message.address.isGuest) {
+      await this.#codex.runTurn(
+        message.address.key,
+        message.address.channel,
+        message.text,
+        message.responder,
+        message.address.isGuest,
+        message.attachments,
+      );
+      return;
+    }
+    const owner = messageOwner(message);
+    const conversation = messageConversation(message);
+    const additionalContext = await this.#scheduledRuns.contextForReply(
+      message.replyTo,
+      owner,
+      conversation,
+    );
+    await this.#codex.runTurn(
+      message.address.key,
+      message.address.channel,
+      message.text,
+      message.responder,
+      false,
+      message.attachments,
+      {
+        owner,
+        ...(message.address.deliveryTarget === undefined
+          ? {}
+          : { deliveryTarget: message.address.deliveryTarget }),
+        ...(additionalContext === undefined ? {} : { additionalContext }),
+      },
+    );
   }
 
   private async handleCommand(message: InboundMessage, command: InboundCommand): Promise<void> {
@@ -129,6 +165,15 @@ export class CodexBridge {
         await this.#codex.resetConversation(message.address.key);
         await message.responder.sendText("Started a fresh Codex task. What should we work on?");
         return;
+      case "back": {
+        const threadId = await this.#codex.activatePreviousConversationThread(message.address.key);
+        await message.responder.sendText(
+          threadId === undefined
+            ? "There is no previous Codex task in this conversation."
+            : "Returned to the previous Codex task.",
+        );
+        return;
+      }
       case "stop": {
         const stopped = await this.#codex.interrupt(message.address.key);
         await message.responder.sendText(
@@ -138,6 +183,12 @@ export class CodexBridge {
       }
       case "status":
         await message.responder.sendText(await this.statusText());
+        return;
+      case "schedules":
+        await this.handleSchedules(message);
+        return;
+      case "continue":
+        await this.handleContinueRun(message, command.args);
         return;
       case "login": {
         if (!(await this.requirePrivateChat(message))) return;
@@ -189,6 +240,54 @@ export class CodexBridge {
       default:
         await message.responder.sendText(`Unknown command /${command.name}.\n\n${helpText}`);
     }
+  }
+
+  private async handleSchedules(message: InboundMessage): Promise<void> {
+    const scheduledRuns = this.#scheduledRuns;
+    if (scheduledRuns === undefined) {
+      await message.responder.sendText("Scheduled runs are unavailable in this Telex build.");
+      return;
+    }
+    const automations = scheduledRuns.listForConversation(
+      messageOwner(message),
+      messageConversation(message),
+    );
+    if (automations.length === 0) {
+      await message.responder.sendText(
+        "No scheduled runs yet. Ask Codex something like “check the build every weekday at 9”.",
+      );
+      return;
+    }
+    await message.responder.sendText(
+      automations
+        .map(
+          (automation) =>
+            `${automation.status === "active" ? "▶️" : "⏸"} ${automation.name}\n${automation.kind} · ${automation.schedule.rrule}\nNext: ${automation.nextRunAt ?? "not scheduled"}${automation.deferralReason === null ? "" : `\nReason: ${automation.deferralReason}`}\nID: ${automation.id}`,
+        )
+        .join("\n\n"),
+    );
+  }
+
+  private async handleContinueRun(message: InboundMessage, runId: string): Promise<void> {
+    const scheduledRuns = this.#scheduledRuns;
+    if (scheduledRuns === undefined) {
+      await message.responder.sendText("Scheduled runs are unavailable in this Telex build.");
+      return;
+    }
+    if (runId.trim().length === 0) {
+      await message.responder.sendText("This scheduled-run link is incomplete.");
+      return;
+    }
+    const result = await scheduledRuns.continueRun(
+      messageOwner(message),
+      messageConversation(message),
+      runId.trim(),
+    );
+    await message.responder.sendText(
+      result.changed
+        ? `Continuing “${result.automationName}”. Subsequent messages will use that Codex thread. Send /back to return.`
+        : `“${result.automationName}” is already the active Codex thread.`,
+    );
   }
 
   private async handleRuntimeCommand(
@@ -324,15 +423,7 @@ export class CodexBridge {
               : "All set — starting on your message now.";
           await pending.responder.sendText(`✅ You're ${summary}. ${next}`);
           if (pending.resume !== undefined) {
-            const resume = pending.resume;
-            await this.#codex.runTurn(
-              resume.address.key,
-              resume.address.channel,
-              resume.text,
-              resume.responder,
-              resume.address.isGuest,
-              resume.attachments,
-            );
+            await this.runUserTurn(pending.resume);
           }
         } else {
           await pending.responder.sendText(
@@ -477,6 +568,22 @@ function needsLogin(status: GetAccountResponse): boolean {
 
 function isPrivate(message: InboundMessage): boolean {
   return message.address.isPrivate && !message.address.isGuest;
+}
+
+function messageOwner(message: InboundMessage): ProviderReference {
+  return {
+    provider: message.address.channel,
+    resource: "user",
+    id: message.sender.id,
+  };
+}
+
+function messageConversation(message: InboundMessage): ProviderReference {
+  return {
+    provider: message.address.channel,
+    resource: "conversation",
+    id: message.address.key,
+  };
 }
 
 function parseCommand(text: string): InboundCommand | undefined {

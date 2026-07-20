@@ -8,6 +8,8 @@ import type { InitializeResponse } from "../generated/codex/InitializeResponse.j
 import type { RequestId } from "../generated/codex/RequestId.js";
 import type { ServerNotification } from "../generated/codex/ServerNotification.js";
 import type { ServerRequest } from "../generated/codex/ServerRequest.js";
+import type { DynamicToolSpec } from "../generated/codex/v2/DynamicToolSpec.js";
+import type { ThreadStartParams } from "../generated/codex/v2/ThreadStartParams.js";
 import type { TurnStartParams } from "../generated/codex/v2/TurnStartParams.js";
 import { type Deferred, deferred, delay, withTimeout } from "../shared/async.js";
 import { externalProcessEnvironment } from "../shared/environment.js";
@@ -34,7 +36,17 @@ interface TurnStartWithAdditionalContext {
   };
 }
 
-type ClientRequestInput = StableClientRequestInput | TurnStartWithAdditionalContext;
+interface ThreadStartWithDynamicTools {
+  readonly method: "thread/start";
+  readonly params: ThreadStartParams & {
+    readonly dynamicTools: readonly DynamicToolSpec[];
+  };
+}
+
+type ClientRequestInput =
+  | StableClientRequestInput
+  | TurnStartWithAdditionalContext
+  | ThreadStartWithDynamicTools;
 
 const wireMessageSchema = z
   .object({

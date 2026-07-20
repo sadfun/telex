@@ -41,6 +41,32 @@ export async function withTimeout<T>(
 export class KeyedSerialQueue {
   readonly #tails = new Map<string, Promise<void>>();
 
+  public isBusy(key: string): boolean {
+    return this.#tails.has(key);
+  }
+
+  /**
+   * Reserve an idle key without waiting. Work submitted through `run` after
+   * this succeeds waits until the returned lease is released.
+   */
+  public tryAcquire(key: string): Readonly<{ release: () => void }> | undefined {
+    if (this.#tails.has(key)) return undefined;
+    let releasePromise: (() => void) | undefined;
+    const current = new Promise<void>((resolve) => {
+      releasePromise = resolve;
+    });
+    this.#tails.set(key, current);
+    let released = false;
+    return {
+      release: () => {
+        if (released) return;
+        released = true;
+        releasePromise?.();
+        if (this.#tails.get(key) === current) this.#tails.delete(key);
+      },
+    };
+  }
+
   public async run<T>(key: string, task: () => Promise<T>): Promise<T> {
     const previous = this.#tails.get(key) ?? Promise.resolve();
     let release: (() => void) | undefined;

@@ -4,11 +4,14 @@ import { type Api, Bot } from "grammy";
 import type { BotCommand, CallbackQuery, Chat, Message, Update } from "grammy/types";
 import type {
   ChoiceOption,
+  DeliveryReceipt,
   InboundAttachment,
   InboundMessage,
   MessageHandler,
   MessageResponder,
   MessagingChannel,
+  OutboundMessage,
+  ProviderReference,
 } from "../../core/channel.js";
 import { type Deferred, deferred } from "../../shared/async.js";
 import { errorMessage } from "../../shared/errors.js";
@@ -20,7 +23,14 @@ import {
   type TelegramFileReference,
 } from "./message.js";
 import {
+  parseTelegramDeliveryTarget,
+  telegramDeliveryTarget,
+  telegramMessageReference,
+} from "./references.js";
+import {
   type ChoiceRequester,
+  decodeCommandCallback,
+  publishTelegramMessage,
   TelegramGuestResponder,
   TelegramResponder,
   telegramSendParameters,
@@ -55,7 +65,9 @@ interface GuestMessageWithReferences extends Message {
 export const telegramBotCommands = [
   { command: "start", description: "Set up Telex" },
   { command: "new", description: "Start a new Codex task" },
+  { command: "back", description: "Return to the previous Codex task" },
   { command: "stop", description: "Stop the running turn" },
+  { command: "schedules", description: "List scheduled runs" },
   { command: "status", description: "Show Codex status" },
   { command: "login", description: "Sign in to Codex" },
   { command: "logout", description: "Sign out of Codex" },
@@ -143,6 +155,13 @@ export class TelegramChannel implements MessagingChannel {
     });
   }
 
+  public isAuthorized(principal: ProviderReference): boolean {
+    if (principal.provider !== this.name || principal.resource !== "user") return false;
+    if (!/^\d+$/u.test(principal.id)) return false;
+    const userId = Number(principal.id);
+    return Number.isSafeInteger(userId) && this.#allowedUserIds.has(userId);
+  }
+
   public async stop(): Promise<void> {
     await this.#runner?.stop();
     for (const choice of this.#pendingChoices.values()) {
@@ -150,6 +169,29 @@ export class TelegramChannel implements MessagingChannel {
       choice.result.resolve("decline");
     }
     this.#pendingChoices.clear();
+  }
+
+  public async publish(
+    targetReference: ProviderReference,
+    message: OutboundMessage,
+  ): Promise<DeliveryReceipt> {
+    const target = parseTelegramDeliveryTarget(targetReference);
+    const route: TelegramReplyRoute = {
+      destination: target.destination,
+      visibility: { kind: "normal" },
+    };
+    const messageIds = await publishTelegramMessage(
+      this.#bot.api,
+      target.chatId,
+      route,
+      message,
+      this.#logger,
+    );
+    return {
+      publishedMessages: messageIds.map((messageId) =>
+        telegramMessageReference(target.chatId, messageId),
+      ),
+    };
   }
 
   private async handleMessage(
@@ -246,7 +288,29 @@ export class TelegramChannel implements MessagingChannel {
         key: conversationKey,
         isPrivate: message.chat.type === "private",
         isGuest: guest,
+        ...(guest || incomingRoute === undefined || incomingRoute.reply.visibility.kind !== "normal"
+          ? {}
+          : {
+              deliveryTarget: telegramDeliveryTarget(
+                message.chat.id,
+                message.chat.type,
+                incomingRoute.reply,
+              ),
+            }),
       },
+      ...(guest
+        ? {}
+        : {
+            reference: telegramMessageReference(message.chat.id, message.message_id),
+            ...(message.reply_to_message === undefined
+              ? {}
+              : {
+                  replyTo: telegramMessageReference(
+                    message.chat.id,
+                    message.reply_to_message.message_id,
+                  ),
+                }),
+          }),
       sender: {
         id: String(sender.id),
         displayName: [sender.first_name, sender.last_name].filter(Boolean).join(" "),
@@ -316,6 +380,11 @@ export class TelegramChannel implements MessagingChannel {
 
   private async handleCallback(query: CallbackQuery, api: Api): Promise<void> {
     if (!this.#allowedUserIds.has(query.from.id) || query.data === undefined) return;
+    const command = decodeCommandCallback(query.data);
+    if (command !== undefined) {
+      await this.handleCommandCallback(query, command, api);
+      return;
+    }
     const match = /^cb:([0-9a-f]{16}):(\d+)$/.exec(query.data);
     if (match === null) return;
     const token = match[1];
@@ -346,6 +415,62 @@ export class TelegramChannel implements MessagingChannel {
       api.answerCallbackQuery(query.id, { text: selected.label.slice(0, 200) }),
       clearKeyboard,
     ]);
+  }
+
+  private async handleCommandCallback(
+    query: CallbackQuery,
+    command: Readonly<{ name: string; args: string }>,
+    api: Api,
+  ): Promise<void> {
+    const handler = this.#handler;
+    const message = query.message;
+    if (handler === undefined || message === undefined || !("date" in message)) {
+      await api.answerCallbackQuery(query.id, { text: "This action is unavailable." });
+      return;
+    }
+    const incomingRoute = routeTelegramMessage(message, query.from.id);
+    if (incomingRoute === undefined) {
+      await api.answerCallbackQuery(query.id, { text: "This action is unavailable." });
+      return;
+    }
+    const responder = new TelegramResponder(
+      api,
+      message.chat,
+      incomingRoute.reply,
+      query.from.id,
+      this.requestChoice,
+      this.#logger,
+    );
+    const inbound: InboundMessage = {
+      id: `callback:${query.id}`,
+      address: {
+        channel: this.name,
+        key: `telegram:${message.chat.id}:${incomingRoute.conversationSuffix}`,
+        isPrivate: message.chat.type === "private",
+        isGuest: false,
+        deliveryTarget: telegramDeliveryTarget(
+          message.chat.id,
+          message.chat.type,
+          incomingRoute.reply,
+        ),
+      },
+      reference: telegramMessageReference(message.chat.id, message.message_id),
+      sender: {
+        id: String(query.from.id),
+        displayName: [query.from.first_name, query.from.last_name].filter(Boolean).join(" "),
+      },
+      text: `/${command.name}${command.args.length === 0 ? "" : ` ${command.args}`}`,
+      command,
+      attachments: [],
+      responder,
+    };
+    await api.answerCallbackQuery(query.id, { text: "Opening scheduled run…" });
+    try {
+      await handler(inbound);
+    } catch (error) {
+      this.#logger.error("Telegram command action failed", error, { command: command.name });
+      await responder.sendText(`Bridge error: ${errorMessage(error)}`).catch(() => undefined);
+    }
   }
 
   private stripGuestMention(text: string): string {

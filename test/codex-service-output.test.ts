@@ -199,6 +199,13 @@ class FakeCodexRpc {
     if (request.method === "turn/start") {
       this.turnStartRequest = request;
       queueMicrotask(() => {
+        this.#listener?.({
+          method: "turn/started",
+          params: {
+            threadId: "thread-1",
+            turn: { ...this.#turn, status: "inProgress" },
+          },
+        } as ServerNotification);
         this.completeItem({
           type: "imageGeneration",
           id: "image-1",
