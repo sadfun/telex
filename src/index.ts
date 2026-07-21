@@ -202,6 +202,7 @@ export async function runTelex(): Promise<TelexRunResult> {
       config.telegramPollTimeout,
       join(config.workspace, ".telex", "attachments"),
       logger.child({ component: "telegram" }),
+      publicUrl === undefined ? undefined : `${publicUrl}/miniapp`,
     );
     const scheduledRuns = new ScheduledRunsEngine({
       store: automations,

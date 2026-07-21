@@ -1,7 +1,7 @@
 import { join } from "node:path";
 import { type RunnerHandle, run } from "@grammyjs/runner";
 import { type Api, Bot } from "grammy";
-import type { BotCommand, CallbackQuery, Chat, Message, Update } from "grammy/types";
+import type { BotCommand, CallbackQuery, Chat, MenuButton, Message, Update } from "grammy/types";
 import type {
   ChoiceOption,
   DeliveryReceipt,
@@ -78,6 +78,17 @@ export const telegramBotCommands = [
   { command: "help", description: "Show commands" },
 ] as const satisfies readonly BotCommand[];
 
+export function telegramMenuButton(miniAppUrl: string | undefined): MenuButton {
+  if (miniAppUrl === undefined) {
+    return { type: "commands" };
+  }
+  return {
+    type: "web_app",
+    text: "Settings",
+    web_app: { url: miniAppUrl },
+  };
+}
+
 export class TelegramChannel implements MessagingChannel {
   public readonly name = "telegram";
   readonly #bot: Bot;
@@ -87,6 +98,7 @@ export class TelegramChannel implements MessagingChannel {
   readonly #token: string;
   readonly #attachmentDirectory: string;
   readonly #logger: Logger;
+  readonly #miniAppUrl: string | undefined;
   readonly #pendingChoices = new Map<string, PendingChoice>();
   #handler: MessageHandler | undefined;
   #runner: RunnerHandle | undefined;
@@ -99,6 +111,7 @@ export class TelegramChannel implements MessagingChannel {
     pollTimeout: number,
     attachmentDirectory: string,
     logger: Logger,
+    miniAppUrl?: string,
   ) {
     this.#token = token;
     this.#apiRoot = apiRoot;
@@ -106,6 +119,7 @@ export class TelegramChannel implements MessagingChannel {
     this.#pollTimeout = pollTimeout;
     this.#attachmentDirectory = attachmentDirectory;
     this.#logger = logger;
+    this.#miniAppUrl = miniAppUrl;
     this.#bot = new Bot(token, { client: { apiRoot } });
     this.#bot.on("message", async (context) => {
       await this.handleMessage(context.message, false, context.api);
@@ -142,6 +156,13 @@ export class TelegramChannel implements MessagingChannel {
     await this.#bot.api.setMyCommands(telegramBotCommands).catch((error: unknown) => {
       this.#logger.warn("Could not register Telegram commands", { error: errorMessage(error) });
     });
+    await this.#bot.api
+      .setChatMenuButton({ menu_button: telegramMenuButton(this.#miniAppUrl) })
+      .catch((error: unknown) => {
+        this.#logger.warn("Could not register the Telegram Mini App menu button", {
+          error: errorMessage(error),
+        });
+      });
 
     this.#runner = run(this.#bot, {
       runner: {

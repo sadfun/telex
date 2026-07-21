@@ -1,6 +1,6 @@
 import type { Api } from "grammy";
 import { describe, expect, it, vi } from "vitest";
-import { TelegramChannel } from "../src/channels/telegram/channel.js";
+import { TelegramChannel, telegramMenuButton } from "../src/channels/telegram/channel.js";
 import {
   parseTelegramDeliveryTarget,
   parseTelegramMessageReference,
@@ -12,6 +12,18 @@ import type { TelegramReplyRoute } from "../src/channels/telegram/route.js";
 import { Logger } from "../src/shared/logger.js";
 
 describe("Telegram scheduled delivery", () => {
+  it("pins the settings Mini App to the bot menu", () => {
+    expect(telegramMenuButton("https://telex.example/miniapp")).toEqual({
+      type: "web_app",
+      text: "Settings",
+      web_app: { url: "https://telex.example/miniapp" },
+    });
+  });
+
+  it("restores the commands menu when the Mini App is unavailable", () => {
+    expect(telegramMenuButton(undefined)).toEqual({ type: "commands" });
+  });
+
   it("keeps provider routing details inside opaque versioned references", () => {
     const route = topicRoute(19);
     const target = telegramDeliveryTarget(42, "supergroup", route);
