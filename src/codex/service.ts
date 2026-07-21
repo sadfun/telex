@@ -44,7 +44,7 @@ import type { TurnStartedNotification } from "../generated/codex/v2/TurnStartedN
 import type { TurnStartParams } from "../generated/codex/v2/TurnStartParams.js";
 import type { TurnStartResponse } from "../generated/codex/v2/TurnStartResponse.js";
 import type { UserInput } from "../generated/codex/v2/UserInput.js";
-import { type Deferred, deferred, KeyedSerialQueue, withTimeout } from "../shared/async.js";
+import { type Deferred, deferred, KeyedSerialQueue } from "../shared/async.js";
 import { BridgeError, errorMessage } from "../shared/errors.js";
 import type { Logger } from "../shared/logger.js";
 import type { VoiceTranscriber } from "../transcription/service.js";
@@ -448,32 +448,7 @@ export class CodexService {
           params: { threadId: active.threadId, turnId: active.turnId },
         });
       }
-      let turn: Turn;
-      try {
-        turn = await withTimeout(
-          active.completion.promise,
-          30 * 60 * 1_000,
-          "Codex turn did not complete within 30 minutes",
-        );
-      } catch (error) {
-        if (
-          error instanceof BridgeError &&
-          error.code === "TIMEOUT" &&
-          active.turnId !== undefined
-        ) {
-          await this.#rpc
-            .request<TurnInterruptResponse>({
-              method: "turn/interrupt",
-              params: { threadId: active.threadId, turnId: active.turnId },
-            })
-            .catch((interruptError: unknown) => {
-              this.#logger.warn("Could not interrupt timed-out Codex turn", {
-                error: errorMessage(interruptError),
-              });
-            });
-        }
-        throw error;
-      }
+      const turn = await active.completion.promise;
       if (turn.status === "failed") {
         throw new BridgeError(turn.error?.message ?? "Codex turn failed", "CODEX_TURN_FAILED");
       }

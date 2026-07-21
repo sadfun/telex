@@ -28,6 +28,26 @@ afterEach(async () => {
 });
 
 describe("CodexService lifecycle", () => {
+  it("allows active turns to run for hours", async () => {
+    vi.useFakeTimers();
+    try {
+      const { rpc, service } = await testService();
+      const output = responder();
+      const run = service.runTurn("telegram:long", "telegram", "work", output.responder, true);
+      await rpc.waitForRequests("turn/start", 1);
+
+      await vi.advanceTimersByTimeAsync(4 * 60 * 60 * 1_000);
+
+      expect(rpc.requests.filter((request) => request.method === "turn/interrupt")).toHaveLength(0);
+      expect(output.stream.fail).not.toHaveBeenCalled();
+      rpc.completeNextTurn();
+      await run;
+      expect(output.stream.complete).toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("gates queued jobs while paused and drains only jobs that passed the gate", async () => {
     const { rpc, service } = await testService();
     const first = responder();

@@ -2,6 +2,12 @@
 
 All notable changes to Telex are documented in this file.
 
+## [0.0.12] - 2026-07-21
+
+### Fixed
+
+- Removed the 30-minute wall-clock deadline for Codex turns so healthy long-running agents can continue until they complete or are explicitly interrupted.
+
 ## [0.0.8] - 2026-07-21
 
 ### Added
@@ -37,5 +43,6 @@ All notable changes to Telex are documented in this file.
 - Fixed cached ephemeral command replies so they remain private and removed unsupported ephemeral command declarations.
 - Fixed commands addressed to another bot being handled by Telex.
 
+[0.0.12]: https://github.com/sadfun/telex/compare/v0.0.11...v0.0.12
 [0.0.8]: https://github.com/sadfun/telex/compare/v0.0.7...v0.0.8
 [0.0.7]: https://github.com/sadfun/telex/compare/v0.0.6...v0.0.7
