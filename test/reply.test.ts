@@ -251,6 +251,147 @@ describe("Telegram streaming", () => {
     });
   });
 
+  it("answers a guest query immediately with initial progress", async () => {
+    const { answerGuestQuery, editMessageTextInline, stream } = createGuestStream();
+
+    await stream.start({ summary: "Transcribing…", actions: [], plan: [] });
+
+    expect(answerGuestQuery).toHaveBeenCalledOnce();
+    expect(answerGuestQuery.mock.calls[0]?.[1]).toMatchObject({
+      input_message_content: {
+        rich_message: { markdown: "▌ Transcribing…\n\n▌" },
+      },
+    });
+    expect(editMessageTextInline).not.toHaveBeenCalled();
+  });
+
+  it("coalesces guest progress and response deltas into the latest inline edit", async () => {
+    vi.useFakeTimers();
+    let releaseUpdate: (() => void) | undefined;
+    const edits: unknown[] = [];
+    const editMessageTextInline = vi.fn(async (_inlineMessageId: string, content: unknown) => {
+      edits.push(content);
+      if (edits.length === 1) {
+        await new Promise<void>((resolve) => {
+          releaseUpdate = resolve;
+        });
+      }
+      return true;
+    });
+    const { answerGuestQuery, stream } = createGuestStream(
+      guestAnswerMock(),
+      editMessageTextInline,
+    );
+
+    await stream.start();
+    stream.setProgress({ summary: "Inspecting the guest stream", actions: [], plan: [] });
+    await vi.advanceTimersByTimeAsync(1_000);
+    stream.appendFinal("H");
+    stream.appendFinal("e");
+    stream.appendFinal("l");
+    stream.appendFinal("l");
+    stream.appendFinal("o");
+    expect(editMessageTextInline).toHaveBeenCalledOnce();
+
+    expect(releaseUpdate).toBeDefined();
+    releaseUpdate?.();
+    await vi.advanceTimersByTimeAsync(999);
+    expect(editMessageTextInline).toHaveBeenCalledOnce();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(editMessageTextInline).toHaveBeenCalledTimes(2);
+    expect(editMessageTextInline).toHaveBeenLastCalledWith("guest-inline", {
+      markdown: "▌ Inspecting the guest stream\n\nHello▌",
+    });
+    expect(answerGuestQuery).toHaveBeenCalledOnce();
+  });
+
+  it("keeps the final guest answer after an in-flight progress edit", async () => {
+    vi.useFakeTimers();
+    let releaseUpdate: (() => void) | undefined;
+    const editMessageTextInline = vi.fn(async (_inlineMessageId: string, _content: unknown) => {
+      if (editMessageTextInline.mock.calls.length === 1) {
+        await new Promise<void>((resolve) => {
+          releaseUpdate = resolve;
+        });
+      }
+      return true;
+    });
+    const { answerGuestQuery, stream } = createGuestStream(
+      guestAnswerMock(),
+      editMessageTextInline,
+    );
+
+    await stream.start();
+    stream.setProgress({ summary: "Working", actions: [], plan: [] });
+    await vi.advanceTimersByTimeAsync(1_000);
+    const completion = stream.complete("Done.");
+    expect(editMessageTextInline).toHaveBeenCalledOnce();
+
+    expect(releaseUpdate).toBeDefined();
+    releaseUpdate?.();
+    await completion;
+
+    expect(answerGuestQuery).toHaveBeenCalledOnce();
+    expect(editMessageTextInline).toHaveBeenCalledTimes(2);
+    expect(editMessageTextInline).toHaveBeenLastCalledWith("guest-inline", {
+      markdown: "Done.",
+    });
+  });
+
+  it("replaces a guest placeholder with an error", async () => {
+    const { answerGuestQuery, editMessageTextInline, stream } = createGuestStream();
+
+    await stream.start();
+    await stream.fail("boom");
+
+    expect(answerGuestQuery).toHaveBeenCalledOnce();
+    expect(editMessageTextInline).toHaveBeenCalledWith("guest-inline", {
+      markdown: "Codex error: boom",
+    });
+  });
+
+  it("keeps streaming after a rich guest answer falls back to plain text", async () => {
+    const answerGuestQuery = guestAnswerMock()
+      .mockRejectedValueOnce(new Error("rich guest messages unavailable"))
+      .mockResolvedValueOnce({ inline_message_id: "plain-guest-inline" });
+    const editMessageTextInline = vi.fn(
+      async (_inlineMessageId: string, _content: unknown) => true,
+    );
+    const { stream } = createGuestStream(answerGuestQuery, editMessageTextInline);
+
+    await stream.start();
+    await stream.complete("Done.");
+
+    expect(answerGuestQuery).toHaveBeenCalledTimes(2);
+    expect(answerGuestQuery.mock.calls[1]?.[1]).toMatchObject({
+      input_message_content: { message_text: "▌ Thinking…\n\n▌" },
+    });
+    expect(editMessageTextInline).toHaveBeenCalledWith("plain-guest-inline", {
+      markdown: "Done.",
+    });
+  });
+
+  it("can replace a guest placeholder after a final edit fails", async () => {
+    const editMessageTextInline = vi
+      .fn(async (_inlineMessageId: string, _content: unknown) => true)
+      .mockRejectedValueOnce(new Error("rich edit failed"))
+      .mockRejectedValueOnce(new Error("plain edit failed"));
+    const { answerGuestQuery, stream } = createGuestStream(
+      guestAnswerMock(),
+      editMessageTextInline,
+    );
+
+    await stream.start();
+    await expect(stream.complete("Done.")).rejects.toThrow("plain edit failed");
+    await stream.fail("plain edit failed");
+
+    expect(answerGuestQuery).toHaveBeenCalledOnce();
+    expect(editMessageTextInline).toHaveBeenCalledTimes(3);
+    expect(editMessageTextInline).toHaveBeenLastCalledWith("guest-inline", {
+      markdown: "Codex error: plain edit failed",
+    });
+  });
+
   it("sends final text before routing files through native Telegram methods", async () => {
     const sendRichMessage = uploadMock(1);
     const sendPhoto = uploadMock(2);
@@ -317,7 +458,7 @@ describe("Telegram streaming", () => {
   });
 
   it("explains the guest-mode attachment limitation instead of silently omitting files", async () => {
-    const answerGuestQuery = vi.fn(async (_queryId: string, _result: unknown) => true);
+    const answerGuestQuery = guestAnswerMock();
     const responder = new TelegramGuestResponder(
       { answerGuestQuery } as unknown as Api,
       "guest-query",
@@ -340,7 +481,7 @@ describe("Telegram streaming", () => {
   });
 
   it("preserves a missing-file warning in a long guest response", async () => {
-    const answerGuestQuery = vi.fn(async (_queryId: string, _result: unknown) => true);
+    const answerGuestQuery = guestAnswerMock();
     const responder = new TelegramGuestResponder(
       { answerGuestQuery } as unknown as Api,
       "guest-query",
@@ -381,6 +522,28 @@ function uploadMock(messageId: number) {
   return vi.fn(async (_chatId: number, _file: unknown, _params: unknown) => ({
     message_id: messageId,
   }));
+}
+
+function guestAnswerMock() {
+  return vi.fn(async (_queryId: string, _result: unknown) => ({
+    inline_message_id: "guest-inline",
+  }));
+}
+
+function createGuestStream(
+  answerGuestQuery = guestAnswerMock(),
+  editMessageTextInline = vi.fn(async (_inlineMessageId: string, _content: unknown) => true),
+) {
+  const api = {
+    answerGuestQuery,
+    editMessageTextInline,
+  } as unknown as Api;
+  const responder = new TelegramGuestResponder(api, "guest-query");
+  return {
+    answerGuestQuery,
+    editMessageTextInline,
+    stream: responder.createStream(),
+  };
 }
 
 function createStream(

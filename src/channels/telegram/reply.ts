@@ -233,9 +233,14 @@ export class TelegramResponder implements MessageResponder {
   }
 }
 
+interface TelegramGuestMessage {
+  readonly inlineMessageId: string;
+  readonly text: string;
+}
+
 export class TelegramGuestResponder implements MessageResponder {
-  #answered = false;
-  #answering: Promise<void> | undefined;
+  #answer: TelegramGuestMessage | undefined;
+  #answering: Promise<TelegramGuestMessage> | undefined;
   readonly #api: Api;
   readonly #guestQueryId: string;
 
@@ -256,66 +261,212 @@ export class TelegramGuestResponder implements MessageResponder {
     return "decline";
   }
 
-  public async answer(text: string): Promise<void> {
-    if (this.#answered) return;
+  public async answer(text: string): Promise<TelegramGuestMessage> {
+    if (this.#answer !== undefined) return this.#answer;
     if (this.#answering !== undefined) return await this.#answering;
-    this.#answering = this.sendAnswer(text).then(() => {
-      this.#answered = true;
+    this.#answering = this.sendAnswer(text).then((answer) => {
+      this.#answer = answer;
+      return answer;
     });
     try {
-      await this.#answering;
+      return await this.#answering;
     } finally {
       this.#answering = undefined;
     }
   }
 
-  private async sendAnswer(text: string): Promise<void> {
+  public async edit(inlineMessageId: string, text: string): Promise<string> {
+    const richText = text.slice(0, 8_000);
+    try {
+      await this.#api.editMessageTextInline(inlineMessageId, {
+        markdown: richText,
+      });
+      return richText;
+    } catch {
+      const plainText = truncateTelegramText(text);
+      await this.#api.editMessageTextInline(inlineMessageId, plainText);
+      return plainText;
+    }
+  }
+
+  private async sendAnswer(text: string): Promise<TelegramGuestMessage> {
     const id = crypto.randomUUID().replaceAll("-", "").slice(0, 32);
+    const richText = text.slice(0, 8_000);
     const result = {
       type: "article" as const,
       id,
       title: "Codex",
-      input_message_content: { rich_message: { markdown: text.slice(0, 8_000) } },
+      input_message_content: { rich_message: { markdown: richText } },
     };
     try {
-      await this.#api.answerGuestQuery(this.#guestQueryId, result);
+      const sent = await this.#api.answerGuestQuery(this.#guestQueryId, result);
+      return {
+        inlineMessageId: sent.inline_message_id,
+        text: richText,
+      };
     } catch {
-      await this.#api.answerGuestQuery(this.#guestQueryId, {
+      const plainText = truncateTelegramText(text);
+      const sent = await this.#api.answerGuestQuery(this.#guestQueryId, {
         type: "article",
         id,
         title: "Codex",
-        input_message_content: { message_text: truncateTelegramText(text) },
+        input_message_content: { message_text: plainText },
       });
+      return {
+        inlineMessageId: sent.inline_message_id,
+        text: plainText,
+      };
     }
   }
 }
 
 class TelegramGuestReplyStream implements OutboundStream {
+  static readonly #draftIntervalMs = 1_000;
+  #progress: ProgressSnapshot = { actions: [], plan: [] };
+  #finalText = "";
+  #inlineMessageId: string | undefined;
+  #lastDraftAt = 0;
+  #lastPublishedText = "";
+  #draftDirty = false;
+  #draftTimer: NodeJS.Timeout | undefined;
+  #draftInFlight: Promise<void> | undefined;
+  #closing = false;
+  #completing: Promise<void> | undefined;
+  #completed = false;
   readonly #responder: TelegramGuestResponder;
 
   public constructor(responder: TelegramGuestResponder) {
     this.#responder = responder;
   }
 
-  public async start(_initialProgress?: ProgressSnapshot): Promise<void> {}
-  public setProgress(_progress: ProgressSnapshot): void {}
-  public appendFinal(_delta: string): void {}
+  public async start(initialProgress?: ProgressSnapshot): Promise<void> {
+    if (this.#closing || this.#completed || this.#inlineMessageId !== undefined) return;
+    if (initialProgress !== undefined) this.#progress = initialProgress;
+    const preview = this.preview();
+    const answer = await this.#responder.answer(preview);
+    this.#inlineMessageId = answer.inlineMessageId;
+    this.#lastDraftAt = Date.now();
+    this.#lastPublishedText = answer.text;
+    if (this.#draftDirty) this.scheduleDraft(true);
+  }
+
+  public setProgress(progress: ProgressSnapshot): void {
+    if (this.#closing || this.#completed) return;
+    this.#progress = progress;
+    this.scheduleDraft();
+  }
+
+  public appendFinal(delta: string): void {
+    if (this.#closing || this.#completed) return;
+    this.#finalText += delta;
+    this.scheduleDraft();
+  }
 
   public async complete(
     text: string,
     attachments: readonly OutboundAttachment[] = [],
   ): Promise<void> {
+    if (this.#completed) return;
+    if (this.#completing !== undefined) return await this.#completing;
+
+    this.#closing = true;
+    const completion = this.finish(text, attachments);
+    this.#completing = completion;
+    try {
+      await completion;
+      this.#completed = true;
+    } finally {
+      if (this.#completing === completion) this.#completing = undefined;
+      if (!this.#completed) this.#closing = false;
+    }
+  }
+
+  public async fail(message: string): Promise<void> {
+    await this.complete(`Codex error: ${message}`);
+  }
+
+  private async finish(text: string, attachments: readonly OutboundAttachment[]): Promise<void> {
+    this.clearTimer();
+    await this.#draftInFlight?.catch(() => undefined);
     const attachmentNote =
       attachments.length === 0
         ? ""
         : `Generated files can only be attached in a direct chat with this bot: ${attachments
             .map((attachment) => safeAttachmentName(attachment.filename))
             .join(", ")}${text.length === 0 ? "" : "\n\n"}`;
-    await this.#responder.answer(attachmentNote + text);
+    const finalText = attachmentNote + text;
+    if (this.#inlineMessageId === undefined) {
+      const answer = await this.#responder.answer(finalText);
+      this.#inlineMessageId = answer.inlineMessageId;
+      this.#lastPublishedText = answer.text;
+      return;
+    }
+    if (finalText !== this.#lastPublishedText) {
+      this.#lastPublishedText = await this.#responder.edit(this.#inlineMessageId, finalText);
+    }
   }
 
-  public async fail(message: string): Promise<void> {
-    await this.#responder.answer(`Codex error: ${message}`);
+  private scheduleDraft(immediate = false): void {
+    if (this.#closing || this.#completed) return;
+    this.#draftDirty = true;
+    if (this.#inlineMessageId === undefined || this.#draftInFlight !== undefined) return;
+
+    const wait = immediate
+      ? 0
+      : Math.max(0, TelegramGuestReplyStream.#draftIntervalMs - (Date.now() - this.#lastDraftAt));
+    if (wait === 0) {
+      this.startDraftUpdate();
+      return;
+    }
+    if (this.#draftTimer !== undefined) return;
+    this.#draftTimer = setTimeout(() => {
+      this.#draftTimer = undefined;
+      this.startDraftUpdate();
+    }, wait);
+    this.#draftTimer.unref();
+  }
+
+  private startDraftUpdate(): void {
+    if (
+      this.#closing ||
+      this.#completed ||
+      this.#inlineMessageId === undefined ||
+      this.#draftInFlight !== undefined ||
+      !this.#draftDirty
+    ) {
+      return;
+    }
+
+    this.#draftDirty = false;
+    const update = this.flushDraft().catch(() => undefined);
+    this.#draftInFlight = update;
+    void update.finally(() => {
+      if (this.#draftInFlight === update) this.#draftInFlight = undefined;
+      if (this.#draftDirty) this.scheduleDraft();
+    });
+  }
+
+  private async flushDraft(): Promise<void> {
+    const inlineMessageId = this.#inlineMessageId;
+    if (this.#closing || this.#completed || inlineMessageId === undefined) return;
+    const preview = this.preview();
+    if (preview === this.#lastPublishedText) return;
+    this.#lastDraftAt = Date.now();
+    this.#lastPublishedText = await this.#responder.edit(inlineMessageId, preview);
+  }
+
+  private preview(): string {
+    const progress = formatThinkingBlock(this.#progress);
+    if (this.#finalText.length === 0) return `${progress}\n\n▌`;
+    const available = Math.max(0, 8_000 - progress.length - 3);
+    const finalText = available === 0 ? "" : this.#finalText.slice(-available);
+    return `${progress}\n\n${finalText}▌`;
+  }
+
+  private clearTimer(): void {
+    if (this.#draftTimer !== undefined) clearTimeout(this.#draftTimer);
+    this.#draftTimer = undefined;
+    this.#draftDirty = false;
   }
 }
 
