@@ -3,6 +3,7 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import { describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 import { type CodexConfigService, ConfigValidationError } from "../src/codex/config-service.js";
+import type { SkillResource } from "../src/codex/skill-browser.js";
 import type { TelexSettings, TelexSettingsStore } from "../src/core/settings-store.js";
 import type { ConfigWriteResponse } from "../src/generated/codex/v2/ConfigWriteResponse.js";
 import type { MiniAppRuntimeController } from "../src/miniapp/server.js";
@@ -123,6 +124,40 @@ describe("MiniAppServer config API", () => {
     expect(runtime[method]).toHaveBeenCalledOnce();
   });
 
+  it("lists Codex skills and serves an authenticated skill resource", async () => {
+    const runtime = testRuntime();
+    const server = testServer(
+      { update: vi.fn(), read: vi.fn(), validate: vi.fn() },
+      testSettingsStore(),
+      runtime,
+    );
+
+    const skillsResponse = await dispatch(server, request("GET", "/api/skills", undefined));
+    const resourceResponse = await dispatch(
+      server,
+      request(
+        "GET",
+        "/api/skills/resource?skill=github%3Ayeet&path=references%2Frelease.md",
+        undefined,
+      ),
+    );
+
+    expect(skillsResponse.status).toBe(200);
+    expect(responseJson(skillsResponse)).toEqual({
+      skills: [{ name: "github:yeet", description: "Publish changes" }],
+    });
+    expect(resourceResponse.status).toBe(200);
+    expect(responseJson(resourceResponse)).toEqual({
+      type: "file",
+      path: "references/release.md",
+      size: 7,
+      mediaType: "text/markdown",
+      encoding: "utf8",
+      content: "Release",
+    });
+    expect(runtime.browseSkill).toHaveBeenCalledWith("github:yeet", "references/release.md");
+  });
+
   it("normalizes Zod request failures for inline field display", async () => {
     const requestSchema = z.strictObject({
       expectedVersion: z.string(),
@@ -225,6 +260,9 @@ function testServer(
 }
 
 interface TestRuntimeController extends MiniAppRuntimeController {
+  readonly browseSkill: ReturnType<
+    typeof vi.fn<(name: string, path: string) => Promise<SkillResource>>
+  >;
   readonly afterConfigWrite: ReturnType<typeof vi.fn<() => Promise<unknown>>>;
   readonly reload: ReturnType<typeof vi.fn<() => Promise<unknown>>>;
   readonly restart: ReturnType<typeof vi.fn<() => Promise<unknown>>>;
@@ -233,6 +271,15 @@ interface TestRuntimeController extends MiniAppRuntimeController {
 function testRuntime(): TestRuntimeController {
   return {
     status: () => ({ state: "ready" }),
+    skills: () => [{ name: "github:yeet", description: "Publish changes" }],
+    browseSkill: vi.fn(async () => ({
+      type: "file",
+      path: "references/release.md",
+      size: 7,
+      mediaType: "text/markdown",
+      encoding: "utf8",
+      content: "Release",
+    })),
     afterConfigWrite: vi.fn(async () => ({ state: "ready" })),
     reload: vi.fn(async () => ({ state: "ready" })),
     restart: vi.fn(async () => ({ state: "ready" })),

@@ -1,12 +1,14 @@
 import {
   Banner,
   Button,
+  Cell,
   Placeholder,
   Section,
 } from "@telegram-apps/telegram-ui/dist/components/Blocks/index.js";
 import { Spinner } from "@telegram-apps/telegram-ui/dist/components/Feedback/index.js";
 import { Slider } from "@telegram-apps/telegram-ui/dist/components/Form/Slider/Slider.js";
 import { Switch } from "@telegram-apps/telegram-ui/dist/components/Form/Switch/Switch.js";
+import { Tabbar } from "@telegram-apps/telegram-ui/dist/components/Layout/Tabbar/Tabbar.js";
 import { AppRoot } from "@telegram-apps/telegram-ui/dist/components/Service/index.js";
 import { Caption, Headline } from "@telegram-apps/telegram-ui/dist/components/Typography/index.js";
 import {
@@ -14,6 +16,7 @@ import {
   type FormEvent,
   createElement as h,
   type ReactElement,
+  type ReactNode,
   useEffect,
   useMemo,
   useState,
@@ -195,6 +198,35 @@ interface UiOption {
   readonly disabled?: boolean;
 }
 
+interface AvailableSkill {
+  readonly name: string;
+  readonly description: string;
+}
+
+interface SkillDirectoryEntry {
+  readonly name: string;
+  readonly path: string;
+  readonly type: "directory" | "file";
+  readonly size: number | null;
+}
+
+interface SkillDirectory {
+  readonly type: "directory";
+  readonly path: string;
+  readonly entries: readonly SkillDirectoryEntry[];
+}
+
+interface SkillFile {
+  readonly type: "file";
+  readonly path: string;
+  readonly size: number;
+  readonly mediaType: string;
+  readonly encoding: "base64" | "utf8";
+  readonly content: string;
+}
+
+type SkillResource = SkillDirectory | SkillFile;
+
 interface FieldProps {
   readonly draftKey: string;
   readonly configPath: string;
@@ -299,9 +331,15 @@ const editableKeys = [
 ] as const satisfies readonly (keyof ClientEditableCodexConfig)[];
 
 const webApp = window.Telegram?.WebApp;
+const TabbarContainer = Tabbar as unknown as (props: {
+  readonly children?: ReactNode;
+  readonly className?: string;
+  readonly "aria-label"?: string;
+}) => ReactElement;
 
 function SettingsApp(): ReactElement {
   const [appearance, setAppearance] = useState<"dark" | "light">(webApp?.colorScheme ?? "light");
+  const [activeTab, setActiveTab] = useState<"settings" | "skills">("settings");
   const [loadAttempt, setLoadAttempt] = useState(0);
   const [snapshot, setSnapshot] = useState<LoadedSnapshot>();
   const [draft, setDraft] = useState<ConfigDraft>();
@@ -514,7 +552,7 @@ function SettingsApp(): ReactElement {
   };
 
   const retry = (): void => setLoadAttempt((attempt) => attempt + 1);
-  const content =
+  const settingsContent =
     snapshot === undefined || draft === undefined
       ? renderLoading(loadError, retry)
       : renderForm({
@@ -536,7 +574,426 @@ function SettingsApp(): ReactElement {
           updateRemoteClientContext: setRemoteClientContext,
         });
 
-  return h(AppRoot, { appearance, className: "appRoot" }, content);
+  return h(
+    AppRoot,
+    { appearance, className: "appRoot" },
+    activeTab === "settings" ? settingsContent : h(SkillsBrowser),
+    h(
+      TabbarContainer,
+      {
+        className: "mainTabbar",
+        "aria-label": "Main navigation",
+      },
+      h(
+        Tabbar.Item,
+        {
+          selected: activeTab === "settings",
+          text: "Settings",
+          onClick: () => setActiveTab("settings"),
+          "aria-label": "Settings",
+        },
+        tabIcon("settings"),
+      ),
+      h(
+        Tabbar.Item,
+        {
+          selected: activeTab === "skills",
+          text: "Skills",
+          onClick: () => setActiveTab("skills"),
+          "aria-label": "Skills",
+        },
+        tabIcon("skills"),
+      ),
+    ),
+  );
+}
+
+function SkillsBrowser(): ReactElement {
+  const [loadAttempt, setLoadAttempt] = useState(0);
+  const [skills, setSkills] = useState<readonly AvailableSkill[]>();
+  const [loadError, setLoadError] = useState<string>();
+  const [selectedSkill, setSelectedSkill] = useState<AvailableSkill>();
+  const [skillDocument, setSkillDocument] = useState<SkillFile>();
+  const [skillDocumentError, setSkillDocumentError] = useState<string>();
+  const [directoryPath, setDirectoryPath] = useState("");
+  const [directory, setDirectory] = useState<SkillDirectory>();
+  const [directoryError, setDirectoryError] = useState<string>();
+  const [selectedFilePath, setSelectedFilePath] = useState<string>();
+  const [selectedFile, setSelectedFile] = useState<SkillFile>();
+  const [selectedFileError, setSelectedFileError] = useState<string>();
+
+  useEffect(() => {
+    const requestedAttempt = loadAttempt;
+    let active = true;
+    setSkills(undefined);
+    setLoadError(undefined);
+    void requestSkills()
+      .then((available) => {
+        if (active && requestedAttempt === loadAttempt) setSkills(available);
+      })
+      .catch((error: unknown) => {
+        if (active && requestedAttempt === loadAttempt) setLoadError(messageOf(error));
+      });
+    return () => {
+      active = false;
+    };
+  }, [loadAttempt]);
+
+  useEffect(() => {
+    if (selectedSkill === undefined) return;
+    let active = true;
+    setSkillDocument(undefined);
+    setSkillDocumentError(undefined);
+    void requestSkillResource(selectedSkill.name, "SKILL.md")
+      .then((resource) => {
+        if (!active) return;
+        if (resource.type !== "file" || resource.encoding !== "utf8") {
+          throw new Error("SKILL.md is not a readable text file.");
+        }
+        setSkillDocument(resource);
+      })
+      .catch((error: unknown) => {
+        if (active) setSkillDocumentError(messageOf(error));
+      });
+    return () => {
+      active = false;
+    };
+  }, [selectedSkill]);
+
+  useEffect(() => {
+    if (selectedSkill === undefined) return;
+    let active = true;
+    setDirectory(undefined);
+    setDirectoryError(undefined);
+    void requestSkillResource(selectedSkill.name, directoryPath)
+      .then((resource) => {
+        if (!active) return;
+        if (resource.type !== "directory") throw new Error("This path is not a directory.");
+        setDirectory(resource);
+      })
+      .catch((error: unknown) => {
+        if (active) setDirectoryError(messageOf(error));
+      });
+    return () => {
+      active = false;
+    };
+  }, [directoryPath, selectedSkill]);
+
+  useEffect(() => {
+    if (selectedSkill === undefined || selectedFilePath === undefined) return;
+    let active = true;
+    setSelectedFile(undefined);
+    setSelectedFileError(undefined);
+    void requestSkillResource(selectedSkill.name, selectedFilePath)
+      .then((resource) => {
+        if (!active) return;
+        if (resource.type !== "file") throw new Error("This path is not a file.");
+        setSelectedFile(resource);
+      })
+      .catch((error: unknown) => {
+        if (active) setSelectedFileError(messageOf(error));
+      });
+    return () => {
+      active = false;
+    };
+  }, [selectedFilePath, selectedSkill]);
+
+  const openSkill = (skill: AvailableSkill): void => {
+    setSelectedSkill(skill);
+    setDirectoryPath("");
+    setSelectedFilePath(undefined);
+    setSelectedFile(undefined);
+    setSelectedFileError(undefined);
+  };
+
+  if (selectedSkill !== undefined) {
+    return renderSkillDetail({
+      skill: selectedSkill,
+      skillDocument,
+      skillDocumentError,
+      directoryPath,
+      directory,
+      directoryError,
+      selectedFilePath,
+      selectedFile,
+      selectedFileError,
+      onBack: () => setSelectedSkill(undefined),
+      onDirectory: (path) => {
+        setDirectoryPath(path);
+        setSelectedFilePath(undefined);
+      },
+      onFile: setSelectedFilePath,
+    });
+  }
+
+  if (skills === undefined) {
+    if (loadError !== undefined) {
+      return h(
+        "div",
+        { className: "loadingRoot tabbedLoadingRoot" },
+        h(Placeholder, {
+          header: "Couldn’t load skills",
+          description: loadError,
+          action: h(
+            Button,
+            { mode: "filled", onClick: () => setLoadAttempt((attempt) => attempt + 1) },
+            "Try again",
+          ),
+        }),
+      );
+    }
+    return h(
+      "div",
+      { className: "loadingRoot tabbedLoadingRoot" },
+      h(
+        Placeholder,
+        {
+          header: "Loading Codex skills",
+          description: "Reading the skills currently available to this workspace…",
+        },
+        h(Spinner, { size: "l" }),
+      ),
+    );
+  }
+
+  return h(
+    "main",
+    { className: "page skillsPage" },
+    h(
+      "header",
+      { className: "pageHeader" },
+      h(
+        "div",
+        null,
+        h(Headline, { Component: "h1" }, "Skills"),
+        h(Caption, { className: "pageSubtitle" }, "Available to Codex in this workspace"),
+      ),
+      h(Caption, { className: "revision" }, String(skills.length)),
+    ),
+    skills.length === 0
+      ? h(Placeholder, {
+          header: "No skills available",
+          description: "Reload Codex after installing or enabling a skill.",
+        })
+      : h(
+          Section,
+          {
+            header: `${skills.length} ${skills.length === 1 ? "skill" : "skills"}`,
+            footer: "Open a skill to read its instructions and browse its bundled files.",
+          },
+          ...skills.map((skill) =>
+            h(
+              Cell,
+              {
+                key: skill.name,
+                Component: "button",
+                className: "skillCell",
+                subtitle: skill.description,
+                multiline: true,
+                after: h("span", { className: "cellChevron", "aria-hidden": "true" }, "›"),
+                onClick: () => openSkill(skill),
+              },
+              skill.name,
+            ),
+          ),
+        ),
+  );
+}
+
+interface SkillDetailOptions {
+  readonly skill: AvailableSkill;
+  readonly skillDocument: SkillFile | undefined;
+  readonly skillDocumentError: string | undefined;
+  readonly directoryPath: string;
+  readonly directory: SkillDirectory | undefined;
+  readonly directoryError: string | undefined;
+  readonly selectedFilePath: string | undefined;
+  readonly selectedFile: SkillFile | undefined;
+  readonly selectedFileError: string | undefined;
+  readonly onBack: () => void;
+  readonly onDirectory: (path: string) => void;
+  readonly onFile: (path: string) => void;
+}
+
+function renderSkillDetail(options: SkillDetailOptions): ReactElement {
+  const parentPath = parentDirectory(options.directoryPath);
+  return h(
+    "main",
+    { className: "page skillsPage" },
+    h(
+      "header",
+      { className: "skillDetailHeader" },
+      h(
+        Button,
+        { mode: "plain", size: "s", onClick: options.onBack, "aria-label": "Back to skills" },
+        "‹ Skills",
+      ),
+      h(Headline, { Component: "h1" }, options.skill.name),
+      h(Caption, { className: "pageSubtitle" }, options.skill.description),
+    ),
+    h(
+      "div",
+      { className: "sectionStack" },
+      h(
+        Section,
+        {
+          header: "SKILL.md",
+          footer: "These are the instructions Codex reads when the skill is selected.",
+        },
+        options.skillDocumentError === undefined
+          ? options.skillDocument === undefined
+            ? h("div", { className: "resourceLoading" }, h(Spinner, { size: "m" }))
+            : h("pre", { className: "skillSource" }, options.skillDocument.content)
+          : h(Banner, {
+              type: "inline",
+              header: "Couldn’t read SKILL.md",
+              subheader: options.skillDocumentError,
+            }),
+      ),
+      h(
+        Section,
+        {
+          header: options.directoryPath.length === 0 ? "Files" : options.directoryPath,
+          footer:
+            "Folders, scripts, references, images, and other resources bundled with this skill.",
+        },
+        options.directoryPath.length === 0
+          ? undefined
+          : h(
+              Cell,
+              {
+                Component: "button",
+                className: "skillCell",
+                before: h("span", { className: "fileIcon", "aria-hidden": "true" }, "↰"),
+                onClick: () => options.onDirectory(parentPath),
+              },
+              parentPath.length === 0 ? "Skill root" : parentPath,
+            ),
+        options.directoryError === undefined
+          ? options.directory === undefined
+            ? h("div", { className: "resourceLoading" }, h(Spinner, { size: "m" }))
+            : options.directory.entries.length === 0
+              ? h(Caption, { className: "emptyDirectory" }, "This folder is empty.")
+              : options.directory.entries.map((entry) =>
+                  h(
+                    Cell,
+                    {
+                      key: entry.path,
+                      Component: "button",
+                      className: "skillCell",
+                      before: h(
+                        "span",
+                        { className: "fileIcon", "aria-hidden": "true" },
+                        entry.type === "directory" ? "▸" : "·",
+                      ),
+                      subtitle:
+                        entry.type === "file" && entry.size !== null
+                          ? formatBytes(entry.size)
+                          : undefined,
+                      after: h("span", { className: "cellChevron", "aria-hidden": "true" }, "›"),
+                      onClick: () =>
+                        entry.type === "directory"
+                          ? options.onDirectory(entry.path)
+                          : options.onFile(entry.path),
+                    },
+                    entry.name,
+                  ),
+                )
+          : h(Banner, {
+              type: "inline",
+              header: "Couldn’t open this folder",
+              subheader: options.directoryError,
+            }),
+      ),
+      options.selectedFilePath === undefined
+        ? undefined
+        : h(
+            Section,
+            {
+              header: options.selectedFilePath,
+              footer:
+                options.selectedFile === undefined
+                  ? undefined
+                  : `${formatBytes(options.selectedFile.size)} · ${options.selectedFile.mediaType}`,
+            },
+            renderFilePreview(options.selectedFile, options.selectedFileError),
+          ),
+    ),
+  );
+}
+
+function renderFilePreview(file: SkillFile | undefined, error: string | undefined): ReactElement {
+  if (error !== undefined) {
+    return h(Banner, {
+      type: "inline",
+      header: "Couldn’t preview this file",
+      subheader: error,
+    });
+  }
+  if (file === undefined) {
+    return h("div", { className: "resourceLoading" }, h(Spinner, { size: "m" }));
+  }
+  if (file.encoding === "utf8") return h("pre", { className: "skillSource" }, file.content);
+  if (file.mediaType.startsWith("image/")) {
+    return h(
+      "div",
+      { className: "imagePreview" },
+      h("img", {
+        src: `data:${file.mediaType};base64,${file.content}`,
+        alt: file.path,
+      }),
+    );
+  }
+  return h(
+    Caption,
+    { className: "binaryPreview" },
+    "This binary file can be browsed, but it cannot be previewed in the Mini App.",
+  );
+}
+
+function tabIcon(kind: "settings" | "skills"): ReactElement {
+  return h(
+    "svg",
+    {
+      width: 28,
+      height: 28,
+      viewBox: "0 0 28 28",
+      fill: "none",
+      stroke: "currentColor",
+      strokeWidth: 2,
+      strokeLinecap: "round",
+      strokeLinejoin: "round",
+      "aria-hidden": "true",
+    },
+    ...(kind === "settings"
+      ? [
+          h("path", { key: "a", d: "M5 8h18M5 20h18M9 5v6M19 17v6" }),
+          h("circle", { key: "b", cx: 9, cy: 8, r: 2 }),
+          h("circle", { key: "c", cx: 19, cy: 20, r: 2 }),
+        ]
+      : [
+          h("path", {
+            key: "a",
+            d: "M14 3l1.8 6.2L22 11l-6.2 1.8L14 19l-1.8-6.2L6 11l6.2-1.8L14 3z",
+          }),
+          h("path", {
+            key: "b",
+            d: "M21.5 18l.8 2.7L25 21.5l-2.7.8-.8 2.7-.8-2.7-2.7-.8 2.7-.8.8-2.7z",
+          }),
+        ]),
+  );
+}
+
+function parentDirectory(path: string): string {
+  const parts = path.split("/").filter((part) => part.length > 0);
+  parts.pop();
+  return parts.join("/");
+}
+
+function formatBytes(bytes: number): string {
+  if (bytes < 1_024) return `${bytes} B`;
+  if (bytes < 1_024 * 1_024) return `${(bytes / 1_024).toFixed(bytes < 10_240 ? 1 : 0)} KB`;
+  return `${(bytes / 1_024 / 1_024).toFixed(1)} MB`;
 }
 
 interface FormRenderOptions {
@@ -1391,6 +1848,23 @@ async function requestRuntime(action: "reload" | "restart"): Promise<RuntimeStat
   return runtime;
 }
 
+async function requestSkills(): Promise<readonly AvailableSkill[]> {
+  const value = await requestJson("/api/skills", { method: "GET" });
+  const skills = arrayValue(recordValue(value)?.skills)?.map(parseAvailableSkill);
+  if (skills === undefined || skills.some((skill) => skill === undefined)) {
+    throw new Error("The bridge returned an invalid skill list.");
+  }
+  return skills as AvailableSkill[];
+}
+
+async function requestSkillResource(skill: string, path: string): Promise<SkillResource> {
+  const query = new URLSearchParams({ skill, path });
+  const value = await requestJson(`/api/skills/resource?${query.toString()}`, { method: "GET" });
+  const resource = parseSkillResource(value);
+  if (resource === undefined) throw new Error("The bridge returned an invalid skill resource.");
+  return resource;
+}
+
 async function requestJson(path: string, init: RequestInit): Promise<unknown> {
   const initData = webApp?.initData;
   if (initData === undefined || initData.length === 0) {
@@ -1463,6 +1937,61 @@ function parseRuntimeComponent(value: unknown): RuntimeComponentStatus | undefin
   return {
     state: record.state,
     message: typeof record.message === "string" ? record.message : null,
+  };
+}
+
+function parseAvailableSkill(value: unknown): AvailableSkill | undefined {
+  const record = recordValue(value);
+  return record !== undefined &&
+    typeof record.name === "string" &&
+    typeof record.description === "string"
+    ? { name: record.name, description: record.description }
+    : undefined;
+}
+
+function parseSkillResource(value: unknown): SkillResource | undefined {
+  const record = recordValue(value);
+  if (record === undefined || typeof record.path !== "string") return undefined;
+  if (record.type === "directory") {
+    const entries = arrayValue(record.entries)?.map(parseSkillDirectoryEntry);
+    if (entries === undefined || !entries.every(isDefined)) return undefined;
+    return { type: "directory", path: record.path, entries };
+  }
+  if (
+    record.type !== "file" ||
+    typeof record.size !== "number" ||
+    typeof record.mediaType !== "string" ||
+    (record.encoding !== "utf8" && record.encoding !== "base64") ||
+    typeof record.content !== "string"
+  ) {
+    return undefined;
+  }
+  return {
+    type: "file",
+    path: record.path,
+    size: record.size,
+    mediaType: record.mediaType,
+    encoding: record.encoding,
+    content: record.content,
+  };
+}
+
+function parseSkillDirectoryEntry(value: unknown): SkillDirectoryEntry | undefined {
+  const record = recordValue(value);
+  if (
+    record === undefined ||
+    typeof record.name !== "string" ||
+    typeof record.path !== "string" ||
+    (record.type !== "directory" && record.type !== "file") ||
+    !(typeof record.size === "number" || record.size === null)
+  ) {
+    return undefined;
+  }
+  return {
+    name: record.name,
+    path: record.path,
+    type: record.type,
+    size: record.size,
   };
 }
 

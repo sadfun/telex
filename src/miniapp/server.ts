@@ -9,6 +9,8 @@ import {
   type ConfigValidationIssue,
 } from "../codex/config-service.js";
 import { CodexRpcError } from "../codex/rpc.js";
+import type { AvailableSkill } from "../codex/runtime-service.js";
+import { SkillBrowserError, type SkillResource } from "../codex/skill-browser.js";
 import type { TelexSettingsStore } from "../core/settings-store.js";
 import { BridgeError } from "../shared/errors.js";
 import type { Logger } from "../shared/logger.js";
@@ -44,6 +46,8 @@ export interface MiniAppServerOptions {
 /** Narrow runtime surface exposed to the authenticated settings Mini App. */
 export interface MiniAppRuntimeController {
   status(): unknown;
+  skills(): readonly AvailableSkill[];
+  browseSkill(name: string, path: string): Promise<SkillResource>;
   afterConfigWrite(): Promise<unknown>;
   reload(): Promise<unknown>;
   restart(): Promise<unknown>;
@@ -176,6 +180,33 @@ export class MiniAppServer {
       return;
     }
 
+    if (url.pathname === "/api/skills") {
+      this.authenticate(request);
+      if (request.method === "GET") {
+        this.sendJson(response, 200, { skills: this.options.runtime.skills() });
+        return;
+      }
+      response.setHeader("Allow", "GET");
+      this.sendError(response, 405, "Method not allowed");
+      return;
+    }
+
+    if (url.pathname === "/api/skills/resource") {
+      this.authenticate(request);
+      if (request.method === "GET") {
+        const skill = url.searchParams.get("skill");
+        if (skill === null || skill.length === 0) {
+          throw new HttpError(400, "A skill name is required.");
+        }
+        const path = url.searchParams.get("path") ?? "";
+        this.sendJson(response, 200, await this.options.runtime.browseSkill(skill, path));
+        return;
+      }
+      response.setHeader("Allow", "GET");
+      this.sendError(response, 405, "Method not allowed");
+      return;
+    }
+
     if (url.pathname === "/api/runtime/reload" || url.pathname === "/api/runtime/restart") {
       this.authenticate(request);
       if (request.method === "POST") {
@@ -284,6 +315,11 @@ export class MiniAppServer {
       this.sendError(response, error.status, error.message);
       return;
     }
+    if (error instanceof SkillBrowserError) {
+      const status = error.code === "forbidden" ? 403 : error.code === "not_found" ? 404 : 413;
+      this.sendError(response, status, error.message);
+      return;
+    }
     if (error instanceof ZodError) {
       this.sendJson(response, 400, {
         error: "Invalid config update",
@@ -319,6 +355,10 @@ export class MiniAppServer {
       }
       if (error.code === "MINIAPP_FORBIDDEN") {
         this.sendError(response, 403, error.message);
+        return;
+      }
+      if (error.code === "SKILL_NOT_FOUND") {
+        this.sendError(response, 404, error.message);
         return;
       }
     }

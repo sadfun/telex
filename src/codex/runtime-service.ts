@@ -15,6 +15,7 @@ import type { Logger } from "../shared/logger.js";
 import type { CodexConfigService } from "./config-service.js";
 import type { CodexAppServer, CodexAppServerExit } from "./rpc.js";
 import type { CodexService, EffectiveCodexSettings, ExplicitSkillInput } from "./service.js";
+import { readSkillResource, type SkillResource } from "./skill-browser.js";
 
 const CONFIG_WATCH_DEBOUNCE_MS = 300;
 
@@ -42,6 +43,11 @@ export interface CodexRuntimeStatus {
   readonly config: RuntimeComponentStatus;
   readonly mcp: RuntimeComponentStatus;
   readonly skills: RuntimeComponentStatus;
+}
+
+export interface AvailableSkill {
+  readonly name: string;
+  readonly description: string;
 }
 
 export interface CodexRuntimeServiceOptions {
@@ -156,6 +162,20 @@ export class CodexRuntimeService {
 
   public settings(): EffectiveCodexSettings {
     return this.#settings;
+  }
+
+  public skills(): readonly AvailableSkill[] {
+    return [...this.#skills.values()]
+      .map((skill) => ({ name: skill.name, description: skill.description }))
+      .sort((left, right) => left.name.localeCompare(right.name));
+  }
+
+  public async browseSkill(name: string, path: string): Promise<SkillResource> {
+    const skill = this.#skills.get(name);
+    if (skill === undefined) {
+      throw new BridgeError("This skill is not available to Codex.", "SKILL_NOT_FOUND");
+    }
+    return await readSkillResource(skill.path, path);
   }
 
   public skillInputs(text: string): readonly ExplicitSkillInput[] {

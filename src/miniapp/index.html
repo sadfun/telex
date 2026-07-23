@@ -45,7 +45,7 @@
       .page {
         width: min(100%, 720px);
         margin: 0 auto;
-        padding: 20px 12px calc(112px + env(safe-area-inset-bottom));
+        padding: 20px 12px calc(196px + env(safe-area-inset-bottom));
       }
       .pageHeader {
         display: flex;
@@ -178,9 +178,9 @@
         position: fixed;
         z-index: 2;
         right: 0;
-        bottom: 0;
+        bottom: calc(82px + env(safe-area-inset-bottom));
         left: 0;
-        padding: 10px 12px calc(12px + env(safe-area-inset-bottom));
+        padding: 10px 12px 12px;
         border-top: var(--tgui--border--width) solid var(--tgui--divider);
         background: color-mix(in srgb, var(--tgui--bg_color) 92%, transparent);
         backdrop-filter: blur(18px);
@@ -205,6 +205,83 @@
         display: grid;
         min-height: 100vh;
         place-items: center;
+      }
+      .tabbedLoadingRoot {
+        padding-bottom: calc(82px + env(safe-area-inset-bottom));
+      }
+      .mainTabbar {
+        z-index: 4;
+      }
+      .skillsPage {
+        padding-bottom: calc(104px + env(safe-area-inset-bottom));
+      }
+      .skillCell {
+        width: 100%;
+        color: inherit;
+        text-align: left;
+      }
+      .cellChevron {
+        color: var(--tgui--hint_color);
+        font-size: 28px;
+        font-weight: 300;
+        line-height: 1;
+      }
+      .skillDetailHeader {
+        display: grid;
+        gap: 4px;
+        padding: 0 8px 18px;
+      }
+      .skillDetailHeader > button {
+        width: max-content;
+        margin: 0 0 6px -12px;
+      }
+      .skillDetailHeader h1 {
+        margin: 0;
+        overflow-wrap: anywhere;
+      }
+      .skillSource {
+        max-height: min(58vh, 560px);
+        margin: 0;
+        padding: 14px 16px;
+        overflow: auto;
+        color: var(--tgui--text_color);
+        background: var(--tgui--secondary_bg_color);
+        font: 12px/1.55 ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+        overflow-wrap: normal;
+        tab-size: 2;
+        white-space: pre-wrap;
+      }
+      .resourceLoading {
+        display: grid;
+        min-height: 88px;
+        place-items: center;
+      }
+      .emptyDirectory,
+      .binaryPreview {
+        display: block;
+        padding: 18px 16px;
+        color: var(--tgui--hint_color);
+      }
+      .fileIcon {
+        display: grid;
+        width: 24px;
+        height: 24px;
+        place-items: center;
+        color: var(--tgui--accent_text_color);
+        font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+        font-weight: 700;
+      }
+      .imagePreview {
+        display: grid;
+        padding: 16px;
+        place-items: center;
+      }
+      .imagePreview img {
+        display: block;
+        max-width: 100%;
+        max-height: min(58vh, 560px);
+        border-radius: 12px;
+        object-fit: contain;
       }
       .featureStage {
         text-transform: capitalize;

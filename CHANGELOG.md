@@ -2,6 +2,13 @@
 
 All notable changes to Telex are documented in this file.
 
+## [0.0.15] - 2026-07-23
+
+### Added
+
+- Added a persistent Mini App tab bar with the existing settings screen and a new **Skills** tab.
+- Added an authenticated, read-only browser for every enabled Codex skill, including `SKILL.md`, bundled scripts, references, and image previews.
+
 ## [0.0.12] - 2026-07-21
 
 ### Fixed
@@ -43,6 +50,7 @@ All notable changes to Telex are documented in this file.
 - Fixed cached ephemeral command replies so they remain private and removed unsupported ephemeral command declarations.
 - Fixed commands addressed to another bot being handled by Telex.
 
+[0.0.15]: https://github.com/sadfun/telex/compare/v0.0.14...v0.0.15
 [0.0.12]: https://github.com/sadfun/telex/compare/v0.0.11...v0.0.12
 [0.0.8]: https://github.com/sadfun/telex/compare/v0.0.7...v0.0.8
 [0.0.7]: https://github.com/sadfun/telex/compare/v0.0.6...v0.0.7
