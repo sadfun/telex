@@ -34,6 +34,17 @@
         "null"
       ]
     },
+    "threadSource": {
+      "description": "Optional client-supplied analytics source classification for this forked thread.",
+      "anyOf": [
+        {
+          "$ref": "#/definitions/ThreadSource"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
     "config": {
       "type": [
         "object",
@@ -45,6 +56,16 @@
       "type": [
         "string",
         "null"
+      ]
+    },
+    "sandbox": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/SandboxMode"
+        },
+        {
+          "type": "null"
+        }
       ]
     },
     "developerInstructions": {
@@ -83,27 +104,6 @@
       "type": [
         "string",
         "null"
-      ]
-    },
-    "threadSource": {
-      "description": "Optional client-supplied analytics source classification for this forked thread.",
-      "anyOf": [
-        {
-          "$ref": "#/definitions/ThreadSource"
-        },
-        {
-          "type": "null"
-        }
-      ]
-    },
-    "sandbox": {
-      "anyOf": [
-        {
-          "$ref": "#/definitions/SandboxMode"
-        },
-        {
-          "type": "null"
-        }
       ]
     }
   },

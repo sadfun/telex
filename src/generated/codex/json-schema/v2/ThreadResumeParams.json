@@ -53,16 +53,6 @@
         "null"
       ]
     },
-    "sandbox": {
-      "anyOf": [
-        {
-          "$ref": "#/definitions/SandboxMode"
-        },
-        {
-          "type": "null"
-        }
-      ]
-    },
     "personality": {
       "anyOf": [
         {
@@ -77,6 +67,16 @@
       "type": [
         "string",
         "null"
+      ]
+    },
+    "sandbox": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/SandboxMode"
+        },
+        {
+          "type": "null"
+        }
       ]
     },
     "model": {
@@ -258,6 +258,26 @@
         {
           "type": "object",
           "required": [
+            "audio_url",
+            "type"
+          ],
+          "properties": {
+            "audio_url": {
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "enum": [
+                "input_audio"
+              ],
+              "title": "InputAudioContentItemType"
+            }
+          },
+          "title": "InputAudioContentItem"
+        },
+        {
+          "type": "object",
+          "required": [
             "text",
             "type"
           ],
@@ -342,6 +362,26 @@
             }
           },
           "title": "InputImageFunctionCallOutputContentItem"
+        },
+        {
+          "type": "object",
+          "required": [
+            "audio_url",
+            "type"
+          ],
+          "properties": {
+            "audio_url": {
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "enum": [
+                "input_audio"
+              ],
+              "title": "InputAudioFunctionCallOutputContentItemType"
+            }
+          },
+          "title": "InputAudioFunctionCallOutputContentItem"
         },
         {
           "type": "object",

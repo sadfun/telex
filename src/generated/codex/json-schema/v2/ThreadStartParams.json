@@ -3,14 +3,10 @@
   "title": "ThreadStartParams",
   "type": "object",
   "properties": {
-    "sessionStartSource": {
-      "anyOf": [
-        {
-          "$ref": "#/definitions/ThreadStartSource"
-        },
-        {
-          "type": "null"
-        }
+    "serviceName": {
+      "type": [
+        "string",
+        "null"
       ]
     },
     "approvalPolicy": {
@@ -69,18 +65,6 @@
         }
       ]
     },
-    "serviceTier": {
-      "type": [
-        "string",
-        "null"
-      ]
-    },
-    "ephemeral": {
-      "type": [
-        "boolean",
-        "null"
-      ]
-    },
     "sandbox": {
       "anyOf": [
         {
@@ -89,6 +73,18 @@
         {
           "type": "null"
         }
+      ]
+    },
+    "ephemeral": {
+      "type": [
+        "boolean",
+        "null"
+      ]
+    },
+    "serviceTier": {
+      "type": [
+        "string",
+        "null"
       ]
     },
     "threadSource": {
@@ -102,10 +98,14 @@
         }
       ]
     },
-    "serviceName": {
-      "type": [
-        "string",
-        "null"
+    "sessionStartSource": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/ThreadStartSource"
+        },
+        {
+          "type": "null"
+        }
       ]
     },
     "model": {
@@ -407,6 +407,16 @@
         },
         "environmentId": {
           "type": "string"
+        },
+        "runtimeWorkspaceRoots": {
+          "description": "Environment-native runtime workspace roots. Omitted defaults to `cwd`.",
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "$ref": "#/definitions/LegacyAppPathString"
+          }
         }
       }
     }

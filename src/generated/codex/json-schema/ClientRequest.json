@@ -883,6 +883,30 @@
         "method": {
           "type": "string",
           "enum": [
+            "app/read"
+          ],
+          "title": "App/readRequestMethod"
+        },
+        "params": {
+          "$ref": "#/definitions/AppsReadParams"
+        }
+      },
+      "title": "App/readRequest"
+    },
+    {
+      "type": "object",
+      "required": [
+        "id",
+        "method",
+        "params"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/definitions/RequestId"
+        },
+        "method": {
+          "type": "string",
+          "enum": [
             "app/list"
           ],
           "title": "App/listRequestMethod"
@@ -892,6 +916,30 @@
         }
       },
       "title": "App/listRequest"
+    },
+    {
+      "type": "object",
+      "required": [
+        "id",
+        "method",
+        "params"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/definitions/RequestId"
+        },
+        "method": {
+          "type": "string",
+          "enum": [
+            "app/installed"
+          ],
+          "title": "App/installedRequestMethod"
+        },
+        "params": {
+          "$ref": "#/definitions/AppsInstalledParams"
+        }
+      },
+      "title": "App/installedRequest"
     },
     {
       "type": "object",
@@ -2177,6 +2225,23 @@
         "guardian_subagent"
       ]
     },
+    "AppsInstalledParams": {
+      "description": "Read the committed installed connector runtime snapshot.",
+      "type": "object",
+      "properties": {
+        "forceRefresh": {
+          "description": "When true and Apps are permitted, refresh and publish the hosted connector runtime tool snapshot first.",
+          "type": "boolean"
+        },
+        "threadId": {
+          "description": "Optional loaded thread id used to evaluate effective app configuration.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    },
     "AppsListParams": {
       "description": "EXPERIMENTAL - list available apps/connectors.",
       "type": "object",
@@ -2207,6 +2272,26 @@
             "string",
             "null"
           ]
+        }
+      }
+    },
+    "AppsReadParams": {
+      "description": "EXPERIMENTAL - read metadata for specific apps/connectors.",
+      "type": "object",
+      "required": [
+        "appIds"
+      ],
+      "properties": {
+        "appIds": {
+          "description": "App ids to read. The server accepts at most 100 ids and deduplicates repeated ids while preserving their first-request order.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "includeTools": {
+          "description": "When true, include display-only public tool summaries in the returned metadata.",
+          "type": "boolean"
         }
       }
     },
@@ -2340,6 +2425,14 @@
           "type": "string"
         }
       }
+    },
+    "CodexResponseHandoffMode": {
+      "type": "string",
+      "enum": [
+        "thinking",
+        "commentary",
+        "bemTags"
+      ]
     },
     "CollaborationMode": {
       "description": "Collaboration mode for a Codex session.",
@@ -2739,6 +2832,26 @@
         {
           "type": "object",
           "required": [
+            "audio_url",
+            "type"
+          ],
+          "properties": {
+            "audio_url": {
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "enum": [
+                "input_audio"
+              ],
+              "title": "InputAudioContentItemType"
+            }
+          },
+          "title": "InputAudioContentItem"
+        },
+        {
+          "type": "object",
+          "required": [
             "text",
             "type"
           ],
@@ -2965,6 +3078,46 @@
         {
           "type": "object",
           "required": [
+            "type",
+            "url"
+          ],
+          "properties": {
+            "type": {
+              "type": "string",
+              "enum": [
+                "audio"
+              ],
+              "title": "AudioUserInputType"
+            },
+            "url": {
+              "type": "string"
+            }
+          },
+          "title": "AudioUserInput"
+        },
+        {
+          "type": "object",
+          "required": [
+            "path",
+            "type"
+          ],
+          "properties": {
+            "path": {
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "enum": [
+                "localAudio"
+              ],
+              "title": "LocalAudioUserInputType"
+            }
+          },
+          "title": "LocalAudioUserInput"
+        },
+        {
+          "type": "object",
+          "required": [
             "name",
             "path",
             "type"
@@ -3011,6 +3164,35 @@
           "title": "MentionUserInput"
         }
       ]
+    },
+    "TurnSteerParams": {
+      "type": "object",
+      "required": [
+        "expectedTurnId",
+        "input",
+        "threadId"
+      ],
+      "properties": {
+        "threadId": {
+          "type": "string"
+        },
+        "clientUserMessageId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "expectedTurnId": {
+          "description": "Required active turn id precondition. The request fails when it does not match the currently active turn.",
+          "type": "string"
+        },
+        "input": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/UserInput"
+          }
+        }
+      }
     },
     "ExperimentalFeatureEnablementSetParams": {
       "type": "object",
@@ -3071,6 +3253,20 @@
         "includeHome": {
           "description": "If true, include detection under the user's home directory.",
           "type": "boolean"
+        },
+        "migrationSource": {
+          "description": "Optional migration-source selector. Missing or unrecognized values use the default source.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "source": {
+          "description": "Deprecated field retained for compatibility. This field is ignored; use `migrationSource` to select the migration source.",
+          "type": [
+            "string",
+            "null"
+          ]
         }
       }
     },
@@ -3086,8 +3282,15 @@
             "$ref": "#/definitions/ExternalAgentConfigMigrationItem"
           }
         },
+        "migrationSource": {
+          "description": "Migration-source selector used to produce the migration items. Pass the same value to detection and import; missing or unrecognized values use the default source.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "source": {
-          "description": "Source product that produced the migration items. Missing means unspecified.",
+          "description": "Optional identifier for the product that initiated the import.",
           "type": [
             "string",
             "null"
@@ -3138,6 +3341,7 @@
         "SUBAGENTS",
         "HOOKS",
         "COMMANDS",
+        "MEMORY",
         "SESSIONS"
       ]
     },
@@ -3447,6 +3651,26 @@
         {
           "type": "object",
           "required": [
+            "audio_url",
+            "type"
+          ],
+          "properties": {
+            "audio_url": {
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "enum": [
+                "input_audio"
+              ],
+              "title": "InputAudioFunctionCallOutputContentItemType"
+            }
+          },
+          "title": "InputAudioFunctionCallOutputContentItem"
+        },
+        {
+          "type": "object",
+          "required": [
             "encrypted_content",
             "type"
           ],
@@ -3490,35 +3714,6 @@
         }
       }
     },
-    "TurnSteerParams": {
-      "type": "object",
-      "required": [
-        "expectedTurnId",
-        "input",
-        "threadId"
-      ],
-      "properties": {
-        "threadId": {
-          "type": "string"
-        },
-        "clientUserMessageId": {
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "expectedTurnId": {
-          "description": "Required active turn id precondition. The request fails when it does not match the currently active turn.",
-          "type": "string"
-        },
-        "input": {
-          "type": "array",
-          "items": {
-            "$ref": "#/definitions/UserInput"
-          }
-        }
-      }
-    },
     "TurnStartParams": {
       "type": "object",
       "required": [
@@ -3526,16 +3721,8 @@
         "threadId"
       ],
       "properties": {
-        "summary": {
-          "description": "Override the reasoning summary for this turn and subsequent turns.",
-          "anyOf": [
-            {
-              "$ref": "#/definitions/ReasoningSummary"
-            },
-            {
-              "type": "null"
-            }
-          ]
+        "threadId": {
+          "type": "string"
         },
         "approvalPolicy": {
           "description": "Override the approval policy for this turn and subsequent turns.",
@@ -3565,15 +3752,11 @@
             "null"
           ]
         },
-        "personality": {
-          "description": "Override the personality for this turn and subsequent turns.",
-          "anyOf": [
-            {
-              "$ref": "#/definitions/Personality"
-            },
-            {
-              "type": "null"
-            }
+        "serviceTier": {
+          "description": "Override the service tier for this turn and subsequent turns.",
+          "type": [
+            "string",
+            "null"
           ]
         },
         "cwd": {
@@ -3618,17 +3801,29 @@
             "null"
           ]
         },
-        "threadId": {
-          "type": "string"
+        "summary": {
+          "description": "Override the reasoning summary for this turn and subsequent turns.",
+          "anyOf": [
+            {
+              "$ref": "#/definitions/ReasoningSummary"
+            },
+            {
+              "type": "null"
+            }
+          ]
         },
         "outputSchema": {
           "description": "Optional JSON Schema used to constrain the final assistant message for this turn."
         },
-        "serviceTier": {
-          "description": "Override the service tier for this turn and subsequent turns.",
-          "type": [
-            "string",
-            "null"
+        "personality": {
+          "description": "Override the personality for this turn and subsequent turns.",
+          "anyOf": [
+            {
+              "$ref": "#/definitions/Personality"
+            },
+            {
+              "type": "null"
+            }
           ]
         }
       }
@@ -3657,6 +3852,21 @@
           ]
         }
       ]
+    },
+    "TurnInterruptParams": {
+      "type": "object",
+      "required": [
+        "threadId",
+        "turnId"
+      ],
+      "properties": {
+        "threadId": {
+          "type": "string"
+        },
+        "turnId": {
+          "type": "string"
+        }
+      }
     },
     "GetAccountParams": {
       "type": "object",
@@ -3971,6 +4181,31 @@
             }
           },
           "title": "ChatgptAuthTokensLoginAccountParams"
+        },
+        {
+          "description": "[UNSTABLE] Managed Amazon Bedrock login is experimental.",
+          "type": "object",
+          "required": [
+            "apiKey",
+            "region",
+            "type"
+          ],
+          "properties": {
+            "apiKey": {
+              "type": "string"
+            },
+            "region": {
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "enum": [
+                "amazonBedrock"
+              ],
+              "title": "AmazonBedrockLoginAccountParamsType"
+            }
+          },
+          "title": "AmazonBedrockLoginAccountParams"
         }
       ]
     },
@@ -4172,6 +4407,12 @@
             "$ref": "#/definitions/McpServerMigration"
           }
         },
+        "memory": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
         "plugins": {
           "default": [],
           "type": "array",
@@ -4202,18 +4443,28 @@
         }
       }
     },
-    "TurnInterruptParams": {
+    "TurnEnvironmentParams": {
       "type": "object",
       "required": [
-        "threadId",
-        "turnId"
+        "cwd",
+        "environmentId"
       ],
       "properties": {
-        "threadId": {
+        "cwd": {
+          "$ref": "#/definitions/LegacyAppPathString"
+        },
+        "environmentId": {
           "type": "string"
         },
-        "turnId": {
-          "type": "string"
+        "runtimeWorkspaceRoots": {
+          "description": "Environment-native runtime workspace roots. Omitted defaults to `cwd`.",
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "$ref": "#/definitions/LegacyAppPathString"
+          }
         }
       }
     },
@@ -4545,7 +4796,8 @@
       "type": "string",
       "enum": [
         "UNLISTED",
-        "PRIVATE"
+        "PRIVATE",
+        "LISTED"
       ]
     },
     "PluginShareUpdateTargetsParams": {
@@ -4618,21 +4870,6 @@
         }
       }
     },
-    "TurnEnvironmentParams": {
-      "type": "object",
-      "required": [
-        "cwd",
-        "environmentId"
-      ],
-      "properties": {
-        "cwd": {
-          "$ref": "#/definitions/LegacyAppPathString"
-        },
-        "environmentId": {
-          "type": "string"
-        }
-      }
-    },
     "ThreadUnsubscribeParams": {
       "type": "object",
       "required": [
@@ -4650,6 +4887,21 @@
         "threadId"
       ],
       "properties": {
+        "threadId": {
+          "type": "string"
+        }
+      }
+    },
+    "ThreadReadParams": {
+      "type": "object",
+      "required": [
+        "threadId"
+      ],
+      "properties": {
+        "includeTurns": {
+          "description": "When true, include turns and their items from rollout history.",
+          "type": "boolean"
+        },
         "threadId": {
           "type": "string"
         }
@@ -4677,26 +4929,19 @@
         }
       }
     },
-    "ThreadReadParams": {
-      "type": "object",
-      "required": [
-        "threadId"
-      ],
-      "properties": {
-        "includeTurns": {
-          "description": "When true, include turns and their items from rollout history.",
-          "type": "boolean"
-        },
-        "threadId": {
-          "type": "string"
-        }
-      }
+    "ThreadStartSource": {
+      "type": "string",
+      "enum": [
+        "startup",
+        "clear"
+      ]
     },
     "RealtimeConversationVersion": {
       "type": "string",
       "enum": [
         "v1",
-        "v2"
+        "v2",
+        "v3"
       ]
     },
     "RealtimeOutputModality": {
@@ -4823,24 +5068,13 @@
         }
       ]
     },
-    "ThreadStartSource": {
-      "type": "string",
-      "enum": [
-        "startup",
-        "clear"
-      ]
-    },
     "ThreadStartParams": {
       "type": "object",
       "properties": {
-        "sessionStartSource": {
-          "anyOf": [
-            {
-              "$ref": "#/definitions/ThreadStartSource"
-            },
-            {
-              "type": "null"
-            }
+        "serviceName": {
+          "type": [
+            "string",
+            "null"
           ]
         },
         "approvalPolicy": {
@@ -4899,18 +5133,6 @@
             }
           ]
         },
-        "serviceTier": {
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "ephemeral": {
-          "type": [
-            "boolean",
-            "null"
-          ]
-        },
         "sandbox": {
           "anyOf": [
             {
@@ -4919,6 +5141,18 @@
             {
               "type": "null"
             }
+          ]
+        },
+        "ephemeral": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "serviceTier": {
+          "type": [
+            "string",
+            "null"
           ]
         },
         "threadSource": {
@@ -4932,10 +5166,14 @@
             }
           ]
         },
-        "serviceName": {
-          "type": [
-            "string",
-            "null"
+        "sessionStartSource": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/ThreadStartSource"
+            },
+            {
+              "type": "null"
+            }
           ]
         },
         "model": {
@@ -4967,6 +5205,9 @@
         "unknown"
       ]
     },
+    "ThreadSource": {
+      "type": "string"
+    },
     "RemoteControlDisableParams": {
       "type": "object",
       "properties": {
@@ -4983,9 +5224,6 @@
         }
       }
     },
-    "ThreadSource": {
-      "type": "string"
-    },
     "ThreadSortKey": {
       "type": "string",
       "enum": [
@@ -4993,6 +5231,22 @@
         "updated_at",
         "recency_at"
       ]
+    },
+    "ThreadShellCommandParams": {
+      "type": "object",
+      "required": [
+        "command",
+        "threadId"
+      ],
+      "properties": {
+        "command": {
+          "description": "Shell command string evaluated by the thread's configured shell. Unlike `command/exec`, this intentionally preserves shell syntax such as pipes, redirects, and quoting. This runs unsandboxed with full access rather than inheriting the thread sandbox policy.",
+          "type": "string"
+        },
+        "threadId": {
+          "type": "string"
+        }
+      }
     },
     "RequestId": {
       "anyOf": [
@@ -6257,22 +6511,6 @@
         }
       }
     },
-    "ThreadShellCommandParams": {
-      "type": "object",
-      "required": [
-        "command",
-        "threadId"
-      ],
-      "properties": {
-        "command": {
-          "description": "Shell command string evaluated by the thread's configured shell. Unlike `command/exec`, this intentionally preserves shell syntax such as pipes, redirects, and quoting. This runs unsandboxed with full access rather than inheriting the thread sandbox policy.",
-          "type": "string"
-        },
-        "threadId": {
-          "type": "string"
-        }
-      }
-    },
     "ThreadRealtimeAudioChunk": {
       "description": "EXPERIMENTAL - thread realtime audio chunk.",
       "type": "object",
@@ -6326,17 +6564,6 @@
         }
       }
     },
-    "ThreadCompactStartParams": {
-      "type": "object",
-      "required": [
-        "threadId"
-      ],
-      "properties": {
-        "threadId": {
-          "type": "string"
-        }
-      }
-    },
     "ThreadRealtimeStartTransport": {
       "description": "EXPERIMENTAL - transport used by thread realtime.",
       "oneOf": [
@@ -6378,6 +6605,33 @@
           "title": "WebrtcThreadRealtimeStartTransport"
         }
       ]
+    },
+    "ThreadCompactStartParams": {
+      "type": "object",
+      "required": [
+        "threadId"
+      ],
+      "properties": {
+        "threadId": {
+          "type": "string"
+        }
+      }
+    },
+    "ThreadRealtimeInitialItem": {
+      "description": "EXPERIMENTAL - role-bearing text item included when a realtime V3 session starts.",
+      "type": "object",
+      "required": [
+        "role",
+        "text"
+      ],
+      "properties": {
+        "role": {
+          "$ref": "#/definitions/ConversationTextRole"
+        },
+        "text": {
+          "type": "string"
+        }
+      }
     },
     "ThreadDeleteParams": {
       "type": "object",
@@ -6424,6 +6678,17 @@
             "null"
           ]
         },
+        "threadSource": {
+          "description": "Optional client-supplied analytics source classification for this forked thread.",
+          "anyOf": [
+            {
+              "$ref": "#/definitions/ThreadSource"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "config": {
           "type": [
             "object",
@@ -6435,6 +6700,16 @@
           "type": [
             "string",
             "null"
+          ]
+        },
+        "sandbox": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/SandboxMode"
+            },
+            {
+              "type": "null"
+            }
           ]
         },
         "developerInstructions": {
@@ -6473,27 +6748,6 @@
           "type": [
             "string",
             "null"
-          ]
-        },
-        "threadSource": {
-          "description": "Optional client-supplied analytics source classification for this forked thread.",
-          "anyOf": [
-            {
-              "$ref": "#/definitions/ThreadSource"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
-        "sandbox": {
-          "anyOf": [
-            {
-              "$ref": "#/definitions/SandboxMode"
-            },
-            {
-              "type": "null"
-            }
           ]
         }
       }
@@ -6661,16 +6915,6 @@
             "null"
           ]
         },
-        "sandbox": {
-          "anyOf": [
-            {
-              "$ref": "#/definitions/SandboxMode"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
         "personality": {
           "anyOf": [
             {
@@ -6685,6 +6929,16 @@
           "type": [
             "string",
             "null"
+          ]
+        },
+        "sandbox": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/SandboxMode"
+            },
+            {
+              "type": "null"
+            }
           ]
         },
         "model": {

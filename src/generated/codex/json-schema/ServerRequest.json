@@ -604,7 +604,7 @@
         "turnId"
       ],
       "properties": {
-        "turnId": {
+        "threadId": {
           "type": "string"
         },
         "approvalId": {
@@ -614,7 +614,7 @@
             "null"
           ]
         },
-        "threadId": {
+        "turnId": {
           "type": "string"
         },
         "command": {
@@ -1057,9 +1057,13 @@
               ]
             },
             "subpath": {
-              "type": [
-                "string",
-                "null"
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/LegacyAppPathString"
+                },
+                {
+                  "type": "null"
+                }
               ]
             }
           },
@@ -1112,9 +1116,13 @@
               "type": "string"
             },
             "subpath": {
-              "type": [
-                "string",
-                "null"
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/LegacyAppPathString"
+                },
+                {
+                  "type": "null"
+                }
               ]
             }
           }
