@@ -237,6 +237,13 @@ The handwritten application is strict TypeScript 7. Messaging transports depend 
 
 Application updates and Codex protocol updates are intentionally separate. Each Telex release ships the exact compatible Codex CLI version recorded in `codex.version`. Startup installs that version into Telex's isolated toolchain directory.
 
+On AppArmor-restricted Linux hosts, Telex probes the Codex command sandbox before
+starting the app-server. If Ubuntu blocks the vendored bubblewrap helper with a
+`userns` or loopback permission error, Telex retries under an already loaded
+root-managed AppArmor profile that explicitly permits user namespaces (for
+example the profile installed with rootless Docker). The system-wide AppArmor
+restriction remains enabled; Telex never changes kernel sysctls.
+
 Maintainers can test a newer Codex protocol from a source checkout:
 
 ```sh

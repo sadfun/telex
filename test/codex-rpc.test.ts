@@ -106,6 +106,7 @@ describe("CodexAppServer lifecycle", () => {
     initializeFailure = true;
     const rpc = appServer();
     const firstStart = rpc.start();
+    await Promise.resolve();
     const first = onlyChild();
     first.exitOnTerminate = true;
 
@@ -192,6 +193,7 @@ function appServer(): CodexAppServer {
     "/codex-home",
     "test",
     new Logger("error"),
+    async (binaryPath, args) => ({ executable: binaryPath, args }),
   );
 }
 

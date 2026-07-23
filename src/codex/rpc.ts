@@ -15,6 +15,7 @@ import { type Deferred, deferred, delay, withTimeout } from "../shared/async.js"
 import { externalProcessEnvironment } from "../shared/environment.js";
 import { BridgeError, errorMessage } from "../shared/errors.js";
 import type { Logger } from "../shared/logger.js";
+import { type CodexLaunch, resolveCodexLaunch } from "./linux-sandbox.js";
 
 type StableClientRequestInput = ClientRequest extends infer Request
   ? Request extends { id: RequestId }
@@ -91,6 +92,12 @@ export interface CodexAppServerExit {
 }
 
 export type ExitListener = (exit: CodexAppServerExit) => void;
+export type CodexLaunchResolver = (
+  binaryPath: string,
+  args: readonly string[],
+  cwd: string,
+  env: NodeJS.ProcessEnv,
+) => Promise<CodexLaunch>;
 
 export class CodexAppServer {
   readonly #pending = new Map<RequestId, PendingRequest>();
@@ -105,6 +112,7 @@ export class CodexAppServer {
   readonly #codexHome: string;
   readonly #clientVersion: string;
   readonly #logger: Logger;
+  readonly #resolveLaunch: CodexLaunchResolver;
 
   public constructor(
     binaryPath: string,
@@ -112,12 +120,15 @@ export class CodexAppServer {
     codexHome: string,
     clientVersion: string,
     logger: Logger,
+    launchResolver: CodexLaunchResolver = async (path, args, cwd, env) =>
+      await resolveCodexLaunch({ binaryPath: path, args, cwd, env }),
   ) {
     this.#binaryPath = binaryPath;
     this.#workspace = workspace;
     this.#codexHome = codexHome;
     this.#clientVersion = clientVersion;
     this.#logger = logger;
+    this.#resolveLaunch = launchResolver;
   }
 
   public async start(): Promise<InitializeResponse> {
@@ -126,19 +137,28 @@ export class CodexAppServer {
     }
     this.#stopping = false;
 
-    const child = spawn(
+    const appServerArgs = ["app-server", "--strict-config", "--listen", "stdio://"] as const;
+    const environment = externalProcessEnvironment({
+      CODEX_HOME: this.#codexHome,
+      LOG_FORMAT: "json",
+    });
+    const launch = await this.#resolveLaunch(
       this.#binaryPath,
-      ["app-server", "--strict-config", "--listen", "stdio://"],
-      {
-        cwd: this.#workspace,
-        env: externalProcessEnvironment({
-          CODEX_HOME: this.#codexHome,
-          LOG_FORMAT: "json",
-        }),
-        stdio: ["pipe", "pipe", "pipe"],
-        shell: false,
-      },
+      appServerArgs,
+      this.#workspace,
+      environment,
     );
+    if (launch.appArmorProfile !== undefined) {
+      this.#logger.warn("Using an AppArmor userns compatibility profile for Codex sandboxing", {
+        profile: launch.appArmorProfile,
+      });
+    }
+    const child = spawn(launch.executable, launch.args, {
+      cwd: this.#workspace,
+      env: environment,
+      stdio: ["pipe", "pipe", "pipe"],
+      shell: false,
+    });
     this.#child = child;
     let spawned = false;
     child.once("spawn", () => {
