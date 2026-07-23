@@ -2,6 +2,13 @@
 
 All notable changes to Telex are documented in this file.
 
+## [0.0.17] - 2026-07-23
+
+### Fixed
+
+- Allowed the Mini App to load its same-origin compiled stylesheet under the production Content Security Policy.
+- Added a production-asset browser preview fixture and a regression test that keeps external stylesheet delivery and CSP permissions in sync.
+
 ## [0.0.16] - 2026-07-23
 
 ### Changed
@@ -62,6 +69,7 @@ All notable changes to Telex are documented in this file.
 - Fixed cached ephemeral command replies so they remain private and removed unsupported ephemeral command declarations.
 - Fixed commands addressed to another bot being handled by Telex.
 
+[0.0.17]: https://github.com/sadfun/telex/compare/v0.0.16...v0.0.17
 [0.0.16]: https://github.com/sadfun/telex/compare/v0.0.15...v0.0.16
 [0.0.15]: https://github.com/sadfun/telex/compare/v0.0.14...v0.0.15
 [0.0.12]: https://github.com/sadfun/telex/compare/v0.0.11...v0.0.12

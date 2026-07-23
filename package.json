@@ -1,6 +1,6 @@
 {
   "name": "telex",
-  "version": "0.0.16",
+  "version": "0.0.17",
   "private": true,
   "type": "module",
   "description": "Telex — a Telegram bridge for the OpenAI Codex app-server.",

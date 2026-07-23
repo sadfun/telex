@@ -177,9 +177,14 @@ describe("MiniAppServer config API", () => {
       );
 
       const response = await dispatch(server, request("GET", "/miniapp/app.css", undefined));
+      const htmlResponse = await dispatch(server, request("GET", "/miniapp", undefined));
 
       expect(response.status).toBe(200);
       expect(response.body?.toString("utf8")).toBe(":root{color-scheme:light dark}");
+      expect(htmlResponse.status).toBe(200);
+      expect(htmlResponse.headers.get("content-security-policy")).toContain(
+        "style-src 'self' 'unsafe-inline'",
+      );
     } finally {
       await rm(assetDirectory, { recursive: true, force: true });
     }
@@ -261,6 +266,7 @@ interface TestableMiniAppServer {
 
 interface CapturedResponse {
   readonly response: ServerResponse;
+  readonly headers: Map<string, unknown>;
   status: number | undefined;
   body: Buffer | undefined;
 }
@@ -361,15 +367,23 @@ function request(method: string, url: string, body: unknown): IncomingMessage {
 }
 
 function captureResponse(): CapturedResponse {
+  const headers = new Map<string, unknown>();
   const captured = {
+    headers,
     status: undefined,
     body: undefined,
   } as CapturedResponse;
   const response = {
     headersSent: false,
-    setHeader: vi.fn(),
-    writeHead(status: number) {
+    setHeader(name: string, value: unknown) {
+      headers.set(name.toLowerCase(), value);
+      return response;
+    },
+    writeHead(status: number, values?: Readonly<Record<string, unknown>>) {
       captured.status = status;
+      for (const [name, value] of Object.entries(values ?? {})) {
+        headers.set(name.toLowerCase(), value);
+      }
       response.headersSent = true;
       return response;
     },

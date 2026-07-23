@@ -295,7 +295,7 @@ export class MiniAppServer {
     response.setHeader("Cache-Control", "no-store");
     response.setHeader(
       "Content-Security-Policy",
-      "default-src 'none'; script-src 'self' https://telegram.org; style-src 'unsafe-inline'; connect-src 'self'; img-src 'self' data: https:; frame-ancestors https://web.telegram.org https://*.telegram.org",
+      "default-src 'none'; script-src 'self' https://telegram.org; style-src 'self' 'unsafe-inline'; connect-src 'self'; img-src 'self' data: https:; frame-ancestors https://web.telegram.org https://*.telegram.org",
     );
     response.setHeader("Permissions-Policy", "camera=(), microphone=(), geolocation=()");
     response.setHeader("Referrer-Policy", "no-referrer");
