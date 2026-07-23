@@ -1,5 +1,8 @@
 import { createHmac } from "node:crypto";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import type { IncomingMessage, ServerResponse } from "node:http";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 import { type CodexConfigService, ConfigValidationError } from "../src/codex/config-service.js";
@@ -158,6 +161,30 @@ describe("MiniAppServer config API", () => {
     expect(runtime.browseSkill).toHaveBeenCalledWith("github:yeet", "references/release.md");
   });
 
+  it("serves the compiled Mini App stylesheet", async () => {
+    const assetDirectory = await mkdtemp(join(tmpdir(), "telex-miniapp-assets-"));
+    try {
+      await Promise.all([
+        writeFile(join(assetDirectory, "index.html"), "<!doctype html>"),
+        writeFile(join(assetDirectory, "app.js"), "export {};"),
+        writeFile(join(assetDirectory, "app.css"), ":root{color-scheme:light dark}"),
+      ]);
+      const server = testServer(
+        { update: vi.fn(), read: vi.fn(), validate: vi.fn() },
+        testSettingsStore(),
+        testRuntime(),
+        assetDirectory,
+      );
+
+      const response = await dispatch(server, request("GET", "/miniapp/app.css", undefined));
+
+      expect(response.status).toBe(200);
+      expect(response.body?.toString("utf8")).toBe(":root{color-scheme:light dark}");
+    } finally {
+      await rm(assetDirectory, { recursive: true, force: true });
+    }
+  });
+
   it("normalizes Zod request failures for inline field display", async () => {
     const requestSchema = z.strictObject({
       expectedVersion: z.string(),
@@ -242,6 +269,7 @@ function testServer(
   configService: TestConfigService,
   settings: TestSettingsStore = testSettingsStore(),
   runtime: TestRuntimeController = testRuntime(),
+  assetDirectory?: string,
 ): MiniAppServer {
   const logger = {
     error: vi.fn(),
@@ -256,6 +284,7 @@ function testServer(
     runtime,
     settings: settings as unknown as TelexSettingsStore,
     logger,
+    ...(assetDirectory === undefined ? {} : { assetDirectory }),
   });
 }
 

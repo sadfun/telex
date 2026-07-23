@@ -2,6 +2,18 @@
 
 All notable changes to Telex are documented in this file.
 
+## [0.0.16] - 2026-07-23
+
+### Changed
+
+- Rebuilt the settings Mini App with source-owned shadcn/ui components, Tailwind CSS, and Radix primitives while preserving Telegram theme colors and safe areas.
+- Rendered skill instructions and Markdown resources as readable documents and condensed skill descriptions into compact two-line list rows.
+
+### Fixed
+
+- Fixed narrow-screen text overflow in skill details and long labels.
+- Fixed the clean-state save bar and bottom navigation obscuring settings and skill content.
+
 ## [0.0.15] - 2026-07-23
 
 ### Added
@@ -50,6 +62,7 @@ All notable changes to Telex are documented in this file.
 - Fixed cached ephemeral command replies so they remain private and removed unsupported ephemeral command declarations.
 - Fixed commands addressed to another bot being handled by Telex.
 
+[0.0.16]: https://github.com/sadfun/telex/compare/v0.0.15...v0.0.16
 [0.0.15]: https://github.com/sadfun/telex/compare/v0.0.14...v0.0.15
 [0.0.12]: https://github.com/sadfun/telex/compare/v0.0.11...v0.0.12
 [0.0.8]: https://github.com/sadfun/telex/compare/v0.0.7...v0.0.8

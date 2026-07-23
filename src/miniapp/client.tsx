@@ -1,29 +1,31 @@
 import {
-  Banner,
-  Button,
-  Cell,
-  Placeholder,
-  Section,
-} from "@telegram-apps/telegram-ui/dist/components/Blocks/index.js";
-import { Spinner } from "@telegram-apps/telegram-ui/dist/components/Feedback/index.js";
-import { Slider } from "@telegram-apps/telegram-ui/dist/components/Form/Slider/Slider.js";
-import { Switch } from "@telegram-apps/telegram-ui/dist/components/Form/Switch/Switch.js";
-import { Tabbar } from "@telegram-apps/telegram-ui/dist/components/Layout/Tabbar/Tabbar.js";
-import { AppRoot } from "@telegram-apps/telegram-ui/dist/components/Service/index.js";
-import { Caption, Headline } from "@telegram-apps/telegram-ui/dist/components/Typography/index.js";
-import {
   type ChangeEvent,
   type FormEvent,
   createElement as h,
   type ReactElement,
-  type ReactNode,
   useEffect,
   useMemo,
   useState,
 } from "react";
 import { createRoot } from "react-dom/client";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 import type { EditableCodexConfig } from "../codex/config-service.js";
 import type { AskForApproval } from "../generated/codex/v2/AskForApproval.js";
+import {
+  AppRoot,
+  Banner,
+  Button,
+  Caption,
+  Cell,
+  Headline,
+  Placeholder,
+  Section,
+  Slider,
+  Spinner,
+  Switch,
+  Tabbar,
+} from "./ui.js";
 
 interface TelegramWebApp {
   readonly initData: string;
@@ -331,11 +333,6 @@ const editableKeys = [
 ] as const satisfies readonly (keyof ClientEditableCodexConfig)[];
 
 const webApp = window.Telegram?.WebApp;
-const TabbarContainer = Tabbar as unknown as (props: {
-  readonly children?: ReactNode;
-  readonly className?: string;
-  readonly "aria-label"?: string;
-}) => ReactElement;
 
 function SettingsApp(): ReactElement {
   const [appearance, setAppearance] = useState<"dark" | "light">(webApp?.colorScheme ?? "light");
@@ -579,7 +576,7 @@ function SettingsApp(): ReactElement {
     { appearance, className: "appRoot" },
     activeTab === "settings" ? settingsContent : h(SkillsBrowser),
     h(
-      TabbarContainer,
+      Tabbar,
       {
         className: "mainTabbar",
         "aria-label": "Main navigation",
@@ -843,7 +840,7 @@ function renderSkillDetail(options: SkillDetailOptions): ReactElement {
         options.skillDocumentError === undefined
           ? options.skillDocument === undefined
             ? h("div", { className: "resourceLoading" }, h(Spinner, { size: "m" }))
-            : h("pre", { className: "skillSource" }, options.skillDocument.content)
+            : renderMarkdownPreview(options.skillDocument.content, true)
           : h(Banner, {
               type: "inline",
               header: "Couldn’t read SKILL.md",
@@ -933,7 +930,11 @@ function renderFilePreview(file: SkillFile | undefined, error: string | undefine
   if (file === undefined) {
     return h("div", { className: "resourceLoading" }, h(Spinner, { size: "m" }));
   }
-  if (file.encoding === "utf8") return h("pre", { className: "skillSource" }, file.content);
+  if (file.encoding === "utf8") {
+    return file.mediaType === "text/markdown" || file.path.toLowerCase().endsWith(".md")
+      ? renderMarkdownPreview(file.content)
+      : h("pre", { className: "skillSource" }, file.content);
+  }
   if (file.mediaType.startsWith("image/")) {
     return h(
       "div",
@@ -948,6 +949,17 @@ function renderFilePreview(file: SkillFile | undefined, error: string | undefine
     Caption,
     { className: "binaryPreview" },
     "This binary file can be browsed, but it cannot be previewed in the Mini App.",
+  );
+}
+
+function renderMarkdownPreview(content: string, stripFrontmatter = false): ReactElement {
+  const markdown = stripFrontmatter
+    ? content.replace(/^---\r?\n[\s\S]*?\r?\n---\r?\n?/, "")
+    : content;
+  return h(
+    "div",
+    { className: "markdown" },
+    h(ReactMarkdown, { remarkPlugins: [remarkGfm] }, markdown),
   );
 }
 
@@ -1419,13 +1431,14 @@ function renderForm(options: FormRenderOptions): ReactElement {
     : errorCount > 0
       ? "Fix validation issues"
       : "Save changes";
+  const showSaveDock = options.dirty || options.saving || options.validating || errorCount > 0;
 
   return h(
     "form",
     { onSubmit: (event: FormEvent<HTMLFormElement>) => void options.onSave(event) },
     h(
       "main",
-      { className: "page" },
+      { className: `page ${showSaveDock ? "pageWithSaveDock" : ""}` },
       h(
         "header",
         { className: "pageHeader" },
@@ -1456,33 +1469,35 @@ function renderForm(options: FormRenderOptions): ReactElement {
         featureSection,
       ),
     ),
-    h(
-      "div",
-      { className: "saveDock" },
-      h(
-        "div",
-        { className: "saveDockInner" },
-        h(
-          Caption,
-          {
-            className: `saveStatus ${errorCount > 0 ? "saveStatusError" : options.dirty ? "saveStatusReady" : ""}`,
-            "aria-live": "polite",
-          },
-          options.validating ? "Checking settings…" : options.notice,
-        ),
-        h(
-          Button,
-          {
-            type: "submit",
-            size: "l",
-            stretched: true,
-            loading: options.saving,
-            disabled: saveDisabled,
-          },
-          saveText,
-        ),
-      ),
-    ),
+    showSaveDock
+      ? h(
+          "div",
+          { className: "saveDock" },
+          h(
+            "div",
+            { className: "saveDockInner" },
+            h(
+              Caption,
+              {
+                className: `saveStatus ${errorCount > 0 ? "saveStatusError" : options.dirty ? "saveStatusReady" : ""}`,
+                "aria-live": "polite",
+              },
+              options.validating ? "Checking settings…" : options.notice,
+            ),
+            h(
+              Button,
+              {
+                type: "submit",
+                size: "l",
+                stretched: true,
+                loading: options.saving,
+                disabled: saveDisabled,
+              },
+              saveText,
+            ),
+          ),
+        )
+      : undefined,
   );
 }
 
@@ -1582,7 +1597,7 @@ function reasoningSliderField(
       getAriaLabel: () => "Reasoning effort",
       getAriaValueText: (index: number) =>
         sentenceCase(efforts[Math.round(index)]?.reasoningEffort ?? effectiveValue),
-      onChange: (index: number) => {
+      onValueChange: (index: number) => {
         const effort = efforts[Math.round(index)];
         if (effort !== undefined) onChange(effort.reasoningEffort);
       },
@@ -1641,8 +1656,7 @@ function toggleField(props: {
       id: props.fieldId,
       checked: props.checked,
       disabled: props.disabled,
-      onChange: (event: ChangeEvent<HTMLInputElement>) =>
-        props.onChange(event.currentTarget.checked),
+      onCheckedChange: props.onChange,
       "aria-label": props.label,
     }),
   );

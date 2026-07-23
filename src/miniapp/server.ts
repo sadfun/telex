@@ -82,6 +82,7 @@ export class MiniAppServer {
     await Promise.all([
       access(join(this.#assetDirectory, "index.html")),
       access(join(this.#assetDirectory, "app.js")),
+      access(join(this.#assetDirectory, "app.css")),
     ]);
     await new Promise<void>((resolve, reject) => {
       const onError = (error: Error): void => {
@@ -233,6 +234,10 @@ export class MiniAppServer {
       await this.sendAsset(response, request.method, "app.js", "text/javascript; charset=utf-8");
       return;
     }
+    if (url.pathname === "/miniapp/app.css") {
+      await this.sendAsset(response, request.method, "app.css", "text/css; charset=utf-8");
+      return;
+    }
 
     this.sendError(response, 404, "Not found");
   }
@@ -272,7 +277,7 @@ export class MiniAppServer {
   private async sendAsset(
     response: ServerResponse,
     method: string,
-    name: "index.html" | "app.js",
+    name: "index.html" | "app.js" | "app.css",
     contentType: string,
   ): Promise<void> {
     const path = join(this.#assetDirectory, name);
