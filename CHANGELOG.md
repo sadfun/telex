@@ -2,6 +2,13 @@
 
 All notable changes to Telex are documented in this file.
 
+## [0.0.20] - 2026-07-26
+
+### Fixed
+
+- Corrected the Mini App's Telegram theme mapping so the primary background colors the canvas, secondary backgrounds color cards, and section colors remain available for nested controls.
+- Applied Telegram's dedicated subtitle, section-header, separator, and bottom-bar theme colors with fallbacks for older clients.
+
 ## [0.0.17] - 2026-07-23
 
 ### Fixed
@@ -69,6 +76,7 @@ All notable changes to Telex are documented in this file.
 - Fixed cached ephemeral command replies so they remain private and removed unsupported ephemeral command declarations.
 - Fixed commands addressed to another bot being handled by Telex.
 
+[0.0.20]: https://github.com/sadfun/telex/compare/v0.0.19...v0.0.20
 [0.0.17]: https://github.com/sadfun/telex/compare/v0.0.16...v0.0.17
 [0.0.16]: https://github.com/sadfun/telex/compare/v0.0.15...v0.0.16
 [0.0.15]: https://github.com/sadfun/telex/compare/v0.0.14...v0.0.15

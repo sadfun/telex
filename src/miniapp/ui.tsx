@@ -334,7 +334,7 @@ function TabbarRoot({ className, children, ...props }: TabbarProps): ReactElemen
   return (
     <nav
       className={cn(
-        "fixed inset-x-0 bottom-0 z-40 border-t border-border bg-background/94 px-3 pt-2 pb-[max(8px,env(safe-area-inset-bottom))] backdrop-blur-xl",
+        "ui-tabbar fixed inset-x-0 bottom-0 z-40 border-t border-border px-3 pt-2 pb-[max(8px,env(safe-area-inset-bottom))] backdrop-blur-xl",
         className,
       )}
       {...props}

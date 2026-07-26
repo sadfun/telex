@@ -26,6 +26,21 @@ describe("Mini App responsive shell", () => {
     expect(styles).toContain(".pageWithSaveDock");
   });
 
+  it("uses Telegram's primary background for the canvas and secondary color for cards", async () => {
+    const styles = await readFile(new URL("styles.css", miniAppDirectory), "utf8");
+
+    expect(styles).toContain("--background: var(--tg-theme-bg-color, #ffffff)");
+    expect(styles).toContain(
+      "--card: var(--tg-theme-secondary-bg-color, var(--tg-theme-bg-color, #f4f4f5))",
+    );
+    expect(styles).toContain("--tg-theme-section-bg-color");
+    expect(styles).toContain("--tg-theme-section-separator-color");
+    expect(styles).toContain("--tg-theme-section-header-text-color");
+    expect(styles).toContain("--tg-theme-subtitle-text-color");
+    expect(styles).toContain("--tg-theme-bottom-bar-bg-color");
+    expect(styles).not.toContain("--background: var(--tg-theme-secondary-bg-color, #f4f4f5)");
+  });
+
   it("renders skill Markdown and hides the clean-state save dock", async () => {
     const client = await readFile(new URL("client.tsx", miniAppDirectory), "utf8");
 

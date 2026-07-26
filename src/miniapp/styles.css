@@ -26,22 +26,30 @@
 :root {
   color-scheme: light dark;
   --radius: 0.875rem;
-  --background: var(--tg-theme-secondary-bg-color, #f4f4f5);
+  --background: var(--tg-theme-bg-color, #ffffff);
   --foreground: var(--tg-theme-text-color, #111113);
-  --card: var(--tg-theme-bg-color, #ffffff);
+  --card: var(--tg-theme-secondary-bg-color, var(--tg-theme-bg-color, #f4f4f5));
   --card-foreground: var(--tg-theme-text-color, #111113);
   --primary: var(--tg-theme-button-color, #2481cc);
   --primary-foreground: var(--tg-theme-button-text-color, #ffffff);
-  --secondary: var(--tg-theme-section-bg-color, #e9e9ee);
+  --secondary: var(--tg-theme-section-bg-color, var(--tg-theme-secondary-bg-color, #e9e9ee));
   --secondary-foreground: var(--tg-theme-text-color, #111113);
-  --muted: var(--tg-theme-section-bg-color, #e9e9ee);
-  --muted-foreground: var(--tg-theme-hint-color, #71717a);
-  --accent: var(--tg-theme-section-bg-color, #e9e9ee);
+  --muted: var(--tg-theme-section-bg-color, var(--tg-theme-secondary-bg-color, #e9e9ee));
+  --muted-foreground: var(--tg-theme-subtitle-text-color, var(--tg-theme-hint-color, #71717a));
+  --accent: var(--tg-theme-section-bg-color, var(--tg-theme-secondary-bg-color, #e9e9ee));
   --accent-foreground: var(--tg-theme-text-color, #111113);
   --destructive: var(--tg-theme-destructive-text-color, #dc2626);
-  --border: color-mix(in srgb, var(--tg-theme-hint-color, #71717a) 22%, transparent);
-  --input: color-mix(in srgb, var(--tg-theme-hint-color, #71717a) 28%, transparent);
+  --border: var(
+    --tg-theme-section-separator-color,
+    color-mix(in srgb, var(--tg-theme-hint-color, #71717a) 22%, transparent)
+  );
+  --input: var(
+    --tg-theme-section-separator-color,
+    color-mix(in srgb, var(--tg-theme-hint-color, #71717a) 28%, transparent)
+  );
   --ring: var(--tg-theme-link-color, #2481cc);
+  --section-header: var(--tg-theme-section-header-text-color, var(--tg-theme-hint-color, #71717a));
+  --tabbar-background: var(--tg-theme-bottom-bar-bg-color, var(--tg-theme-bg-color, #ffffff));
   font-family:
     -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", Roboto, Helvetica, Arial,
     sans-serif;
@@ -517,11 +525,15 @@ button {
 
 .ui-section-header {
   padding: 0 6px 7px;
-  color: var(--muted-foreground);
+  color: var(--section-header);
   font-size: 0.75rem;
   font-weight: 600;
   letter-spacing: 0.055em;
   text-transform: uppercase;
+}
+
+.ui-tabbar {
+  background: color-mix(in srgb, var(--tabbar-background) 94%, transparent);
 }
 
 .ui-section-footer {

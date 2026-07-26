@@ -16,7 +16,7 @@ await Promise.all([
   readFile(join(sourceAssetDirectory, "app.js"), "utf8").then((bundle) =>
     writeFile(
       join(previewAssetDirectory, "app.js"),
-      `for(const [name,value] of Object.entries({"--tg-theme-bg-color":"#202022","--tg-theme-secondary-bg-color":"#111113","--tg-theme-section-bg-color":"#2c2c2e","--tg-theme-text-color":"#f5f5f7","--tg-theme-hint-color":"#a1a1aa","--tg-theme-button-color":"#2990d8","--tg-theme-button-text-color":"#ffffff","--tg-theme-link-color":"#55aaf0","--tg-theme-destructive-text-color":"#ff6961"})){document.documentElement.style.setProperty(name,value)}window.Telegram={WebApp:{initData:${JSON.stringify(initData)},colorScheme:"dark",ready(){},expand(){},onEvent(){},offEvent(){},HapticFeedback:{notificationOccurred(){}}}};\n${bundle}`,
+      `for(const [name,value] of Object.entries({"--tg-theme-bg-color":"#000000","--tg-theme-secondary-bg-color":"#1c1c1e","--tg-theme-section-bg-color":"#2c2c2e","--tg-theme-text-color":"#f5f5f7","--tg-theme-hint-color":"#8e8e93","--tg-theme-button-color":"#2990d8","--tg-theme-button-text-color":"#ffffff","--tg-theme-link-color":"#55aaf0","--tg-theme-bottom-bar-bg-color":"#000000","--tg-theme-section-header-text-color":"#8e8e93","--tg-theme-section-separator-color":"#38383a","--tg-theme-subtitle-text-color":"#8e8e93","--tg-theme-destructive-text-color":"#ff6961"})){document.documentElement.style.setProperty(name,value)}window.Telegram={WebApp:{initData:${JSON.stringify(initData)},colorScheme:"dark",ready(){},expand(){},onEvent(){},offEvent(){},HapticFeedback:{notificationOccurred(){}}}};\n${bundle}`,
     ),
   ),
 ]);
