@@ -9,7 +9,7 @@ import {
   type ConfigValidationIssue,
 } from "../codex/config-service.js";
 import { CodexRpcError } from "../codex/rpc.js";
-import type { AvailableSkill } from "../codex/runtime-service.js";
+import type { AvailableSkill, CodexUsageLimits } from "../codex/runtime-service.js";
 import { SkillBrowserError, type SkillResource } from "../codex/skill-browser.js";
 import type { TelexSettingsStore } from "../core/settings-store.js";
 import { BridgeError } from "../shared/errors.js";
@@ -46,6 +46,7 @@ export interface MiniAppServerOptions {
 /** Narrow runtime surface exposed to the authenticated settings Mini App. */
 export interface MiniAppRuntimeController {
   status(): unknown;
+  usageLimits(): Promise<CodexUsageLimits>;
   skills(): readonly AvailableSkill[];
   browseSkill(name: string, path: string): Promise<SkillResource>;
   afterConfigWrite(): Promise<unknown>;
@@ -185,6 +186,17 @@ export class MiniAppServer {
       this.authenticate(request);
       if (request.method === "GET") {
         this.sendJson(response, 200, { skills: this.options.runtime.skills() });
+        return;
+      }
+      response.setHeader("Allow", "GET");
+      this.sendError(response, 405, "Method not allowed");
+      return;
+    }
+
+    if (url.pathname === "/api/usage") {
+      this.authenticate(request);
+      if (request.method === "GET") {
+        this.sendJson(response, 200, await this.options.runtime.usageLimits());
         return;
       }
       response.setHeader("Allow", "GET");

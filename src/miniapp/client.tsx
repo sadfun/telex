@@ -173,6 +173,16 @@ interface TelexSettings {
   readonly remoteClientContext: boolean;
 }
 
+interface UsageLimitWindow {
+  readonly remainingPercent: number;
+  readonly resetsAt: number | null;
+}
+
+interface UsageLimits {
+  readonly weekly: UsageLimitWindow | null;
+  readonly fiveHour: UsageLimitWindow | null;
+}
+
 interface WriteOutcome {
   readonly status: "ok" | "okOverridden";
   readonly overriddenMetadata: OverrideMetadata | null;
@@ -347,6 +357,9 @@ function SettingsApp(): ReactElement {
   const [validation, setValidation] = useState<ValidationResult>({ valid: true, issues: [] });
   const [validating, setValidating] = useState(false);
   const [notice, setNotice] = useState("Settings are up to date.");
+  const [usage, setUsage] = useState<UsageLimits>();
+  const [usageError, setUsageError] = useState<string>();
+  const [usageRefreshing, setUsageRefreshing] = useState(false);
 
   useEffect(() => {
     if (webApp === undefined) return;
@@ -381,6 +394,43 @@ function SettingsApp(): ReactElement {
       active = false;
     };
   }, [loadAttempt]);
+
+  const refreshUsage = async (): Promise<void> => {
+    setUsageRefreshing(true);
+    try {
+      setUsage(await requestUsage());
+      setUsageError(undefined);
+    } catch (error) {
+      setUsageError(messageOf(error));
+    } finally {
+      setUsageRefreshing(false);
+    }
+  };
+
+  useEffect(() => {
+    if (webApp === undefined || webApp.initData.length === 0) return;
+    let active = true;
+    const load = async (): Promise<void> => {
+      try {
+        const next = await requestUsage();
+        if (active) {
+          setUsage(next);
+          setUsageError(undefined);
+        }
+      } catch (error) {
+        if (active) setUsageError(messageOf(error));
+      } finally {
+        if (active) setUsageRefreshing(false);
+      }
+    };
+    setUsageRefreshing(true);
+    void load();
+    const timer = window.setInterval(() => void load(), 60_000);
+    return () => {
+      active = false;
+      window.clearInterval(timer);
+    };
+  }, []);
 
   const normalizedValues = useMemo(
     () => (draft === undefined ? undefined : configFromDraft(draft)),
@@ -562,8 +612,12 @@ function SettingsApp(): ReactElement {
           validating,
           runtimeAction,
           notice,
+          usage,
+          usageError,
+          usageRefreshing,
           onSave: save,
           onRuntimeAction: runRuntimeAction,
+          onRefreshUsage: refreshUsage,
           updateScalar,
           updateModel,
           updateGranularApproval,
@@ -1018,8 +1072,12 @@ interface FormRenderOptions {
   readonly validating: boolean;
   readonly runtimeAction: "reload" | "restart" | undefined;
   readonly notice: string;
+  readonly usage: UsageLimits | undefined;
+  readonly usageError: string | undefined;
+  readonly usageRefreshing: boolean;
   readonly onSave: (event: FormEvent<HTMLFormElement>) => Promise<void>;
   readonly onRuntimeAction: (action: "reload" | "restart") => Promise<void>;
+  readonly onRefreshUsage: () => Promise<void>;
   readonly updateScalar: (key: ScalarDraftKey, value: string) => void;
   readonly updateModel: (value: string) => void;
   readonly updateGranularApproval: (key: keyof GranularApproval, value: boolean) => void;
@@ -1045,6 +1103,12 @@ function renderForm(options: FormRenderOptions): ReactElement {
   const allowedWindowsSandboxes = stringSet(requirements?.allowedWindowsSandboxImplementations);
   const issueSummary = renderIssueSummary(issues);
 
+  const usageSection = renderUsageSection(
+    options.usage,
+    options.usageError,
+    options.usageRefreshing,
+    options.onRefreshUsage,
+  );
   const runtime = snapshot.runtime;
   const runtimeComponents = [
     ["Config", runtime.config],
@@ -1461,6 +1525,7 @@ function renderForm(options: FormRenderOptions): ReactElement {
       h(
         "div",
         { className: "sectionStack" },
+        usageSection,
         runtimeSection,
         telexSection,
         modelSection,
@@ -1499,6 +1564,132 @@ function renderForm(options: FormRenderOptions): ReactElement {
         )
       : undefined,
   );
+}
+
+function renderUsageSection(
+  usage: UsageLimits | undefined,
+  error: string | undefined,
+  refreshing: boolean,
+  onRefresh: () => Promise<void>,
+): ReactElement {
+  const windows = [
+    usage?.weekly === null || usage?.weekly === undefined
+      ? undefined
+      : (["Weekly", usage.weekly] as const),
+    usage?.fiveHour === null || usage?.fiveHour === undefined
+      ? undefined
+      : (["5 hours", usage.fiveHour] as const),
+  ].filter(isDefined);
+  let body: ReactElement;
+  if (usage === undefined && error === undefined) {
+    body = h(
+      "div",
+      { className: "usageLoading", "aria-live": "polite" },
+      h(Spinner, { size: "m" }),
+      h(Caption, null, "Checking Codex usage…"),
+    );
+  } else if (usage === undefined) {
+    body = h(
+      "div",
+      { className: "usageUnavailable", role: "status" },
+      h("strong", null, "Usage unavailable"),
+      h(Caption, null, error),
+    );
+  } else if (windows.length === 0) {
+    body = h(
+      "div",
+      { className: "usageUnavailable", role: "status" },
+      h("strong", null, "No active limits"),
+      h(Caption, null, "Codex is not reporting a weekly or five-hour usage window."),
+    );
+  } else {
+    body = h(
+      "div",
+      { className: "usageWindows", "aria-live": "polite" },
+      ...windows.map(([label, window]) => renderUsageWindow(label, window)),
+      error === undefined
+        ? undefined
+        : h(Caption, { className: "usageStale" }, `Could not refresh: ${error}`),
+    );
+  }
+  return h(
+    Section,
+    {
+      header: h(
+        "div",
+        { className: "usageHeader" },
+        h("span", null, "Usage limits"),
+        h(
+          Button,
+          {
+            type: "button",
+            mode: "plain",
+            size: "s",
+            className: "usageRefresh",
+            loading: refreshing,
+            disabled: refreshing,
+            onClick: () => void onRefresh(),
+            "aria-label": "Refresh usage limits",
+          },
+          "Refresh",
+        ),
+      ),
+      footer:
+        "Refreshes automatically. The five-hour limit appears only while Codex reports that window.",
+    },
+    body,
+  );
+}
+
+function renderUsageWindow(label: string, window: UsageLimitWindow): ReactElement {
+  const percent = Math.max(0, Math.min(100, window.remainingPercent));
+  const percentText = formatRemainingPercent(percent);
+  const level = percent <= 20 ? "low" : percent <= 50 ? "medium" : "healthy";
+  return h(
+    "div",
+    { className: "usageWindow", key: label },
+    h(
+      "div",
+      { className: "usageWindowHeader" },
+      h("strong", null, label),
+      h("span", { className: `usageRemaining usageRemaining-${level}` }, percentText),
+    ),
+    h(
+      "div",
+      {
+        className: "usageTrack",
+        role: "progressbar",
+        "aria-label": `${label} usage remaining`,
+        "aria-valuemin": 0,
+        "aria-valuemax": 100,
+        "aria-valuenow": Math.round(percent),
+      },
+      h("span", {
+        className: `usageFill usageFill-${level}`,
+        style: { width: `${percent}%` },
+      }),
+    ),
+    h(Caption, { className: "usageReset" }, formatResetTime(window.resetsAt)),
+  );
+}
+
+function formatRemainingPercent(percent: number): string {
+  if (percent > 0 && percent < 1) return "<1% left";
+  return `${Math.round(percent)}% left`;
+}
+
+function formatResetTime(resetsAt: number | null): string {
+  if (resetsAt === null) return "Reset time unavailable";
+  const reset = new Date(resetsAt * 1_000);
+  if (Number.isNaN(reset.getTime())) return "Reset time unavailable";
+  const formatted = new Intl.DateTimeFormat(undefined, {
+    weekday: "short",
+    month: "short",
+    day: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+  }).format(reset);
+  return `Resets ${formatted}`;
 }
 
 function listField(props: FieldProps): ReactElement {
@@ -1871,6 +2062,10 @@ async function requestSkills(): Promise<readonly AvailableSkill[]> {
   return skills as AvailableSkill[];
 }
 
+async function requestUsage(): Promise<UsageLimits> {
+  return parseUsageLimits(await requestJson("/api/usage", { method: "GET" }));
+}
+
 async function requestSkillResource(skill: string, path: string): Promise<SkillResource> {
   const query = new URLSearchParams({ skill, path });
   const value = await requestJson(`/api/skills/resource?${query.toString()}`, { method: "GET" });
@@ -1961,6 +2156,33 @@ function parseAvailableSkill(value: unknown): AvailableSkill | undefined {
     typeof record.description === "string"
     ? { name: record.name, description: record.description }
     : undefined;
+}
+
+function parseUsageLimits(value: unknown): UsageLimits {
+  const record = recordValue(value);
+  if (record === undefined) throw new Error("The bridge returned invalid usage limits.");
+  const weekly = parseUsageLimitWindow(record.weekly);
+  const fiveHour = parseUsageLimitWindow(record.fiveHour);
+  if (weekly === undefined || fiveHour === undefined) {
+    throw new Error("The bridge returned invalid usage limits.");
+  }
+  return { weekly, fiveHour };
+}
+
+function parseUsageLimitWindow(value: unknown): UsageLimitWindow | null | undefined {
+  if (value === null) return null;
+  const record = recordValue(value);
+  if (record === undefined) return undefined;
+  const remainingPercent = record.remainingPercent;
+  const resetsAt = record.resetsAt;
+  if (
+    typeof remainingPercent !== "number" ||
+    !Number.isFinite(remainingPercent) ||
+    (resetsAt !== null && (typeof resetsAt !== "number" || !Number.isFinite(resetsAt)))
+  ) {
+    return undefined;
+  }
+  return { remainingPercent, resetsAt };
 }
 
 function parseSkillResource(value: unknown): SkillResource | undefined {

@@ -64,6 +64,35 @@ describe("CodexRuntimeService", () => {
     await runtime.stop();
   });
 
+  it("reports remaining weekly and optional five-hour usage windows", async () => {
+    const rpc = new FakeRuntimeRpc();
+    const runtime = createRuntime(rpc, fakeCodex());
+
+    expect(await runtime.usageLimits()).toEqual({
+      weekly: { remainingPercent: 72.5, resetsAt: 1_800_604_800 },
+      fiveHour: { remainingPercent: 42, resetsAt: 1_800_018_000 },
+    });
+    expect(rpc.requests.at(-1)).toEqual({
+      method: "account/rateLimits/read",
+      params: undefined,
+    });
+
+    rpc.rateLimits = {
+      rateLimits: {
+        primary: {
+          usedPercent: 27.5,
+          windowDurationMins: 10_080,
+          resetsAt: 1_800_604_800,
+        },
+        secondary: null,
+      },
+    };
+    expect(await runtime.usageLimits()).toEqual({
+      weekly: { remainingPercent: 72.5, resetsAt: 1_800_604_800 },
+      fiveHour: null,
+    });
+  });
+
   it("runs the native config, MCP, and skill reload cascade", async () => {
     const rpc = new FakeRuntimeRpc();
     const runtime = createRuntime(rpc, fakeCodex());
@@ -323,6 +352,33 @@ class FakeRuntimeRpc {
   readonly #exits = new Set<ExitListener>();
   public config = configResponse("user-v1");
   public skills: SkillsListResponse = skillsResponse();
+  public rateLimits: {
+    rateLimits: {
+      primary: {
+        usedPercent: number;
+        windowDurationMins: number;
+        resetsAt: number;
+      };
+      secondary: {
+        usedPercent: number;
+        windowDurationMins: number;
+        resetsAt: number;
+      } | null;
+    };
+  } = {
+    rateLimits: {
+      primary: {
+        usedPercent: 58,
+        windowDurationMins: 300,
+        resetsAt: 1_800_018_000,
+      },
+      secondary: {
+        usedPercent: 27.5,
+        windowDurationMins: 10_080,
+        resetsAt: 1_800_604_800,
+      },
+    },
+  };
   public failNextConfigRead: Error | undefined;
   public startError: Error | undefined;
   public readonly start = vi.fn(async () => {
@@ -365,6 +421,8 @@ class FakeRuntimeRpc {
         return this.config as Result;
       case "skills/list":
         return this.skills as Result;
+      case "account/rateLimits/read":
+        return this.rateLimits as Result;
       case "fs/watch":
         return { path: (request.params as { readonly path: string }).path } as Result;
       case "config/batchWrite":

@@ -161,6 +161,24 @@ describe("MiniAppServer config API", () => {
     expect(runtime.browseSkill).toHaveBeenCalledWith("github:yeet", "references/release.md");
   });
 
+  it("returns authenticated Codex usage limits", async () => {
+    const runtime = testRuntime();
+    const server = testServer(
+      { update: vi.fn(), read: vi.fn(), validate: vi.fn() },
+      testSettingsStore(),
+      runtime,
+    );
+
+    const response = await dispatch(server, request("GET", "/api/usage", undefined));
+
+    expect(response.status).toBe(200);
+    expect(responseJson(response)).toEqual({
+      weekly: { remainingPercent: 68, resetsAt: 1_800_000_000 },
+      fiveHour: null,
+    });
+    expect(runtime.usageLimits).toHaveBeenCalledOnce();
+  });
+
   it("serves the compiled Mini App stylesheet", async () => {
     const assetDirectory = await mkdtemp(join(tmpdir(), "telex-miniapp-assets-"));
     try {
@@ -295,6 +313,14 @@ function testServer(
 }
 
 interface TestRuntimeController extends MiniAppRuntimeController {
+  readonly usageLimits: ReturnType<
+    typeof vi.fn<
+      () => Promise<{
+        readonly weekly: { readonly remainingPercent: number; readonly resetsAt: number } | null;
+        readonly fiveHour: null;
+      }>
+    >
+  >;
   readonly browseSkill: ReturnType<
     typeof vi.fn<(name: string, path: string) => Promise<SkillResource>>
   >;
@@ -306,6 +332,10 @@ interface TestRuntimeController extends MiniAppRuntimeController {
 function testRuntime(): TestRuntimeController {
   return {
     status: () => ({ state: "ready" }),
+    usageLimits: vi.fn(async () => ({
+      weekly: { remainingPercent: 68, resetsAt: 1_800_000_000 },
+      fiveHour: null,
+    })),
     skills: () => [{ name: "github:yeet", description: "Publish changes" }],
     browseSkill: vi.fn(async () => ({
       type: "file",

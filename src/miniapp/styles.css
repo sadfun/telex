@@ -138,10 +138,146 @@ button {
   white-space: nowrap;
 }
 
+@media (max-width: 480px) {
+  .pageHeader {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 7px;
+  }
+
+  .revision {
+    max-width: 100%;
+    padding-bottom: 0;
+  }
+}
+
 .sectionStack {
   display: grid;
   min-width: 0;
   gap: 18px;
+}
+
+.usageHeader {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.usageRefresh {
+  min-height: 28px;
+  margin: -7px -8px -7px 0;
+  padding: 0 8px;
+  font-size: 0.75rem;
+  letter-spacing: normal;
+  text-transform: none;
+}
+
+.usageLoading,
+.usageUnavailable {
+  display: grid;
+  min-height: 108px;
+  place-items: center;
+  align-content: center;
+  gap: 8px;
+  padding: 20px 16px;
+  text-align: center;
+}
+
+.usageUnavailable strong {
+  font-size: 0.95rem;
+}
+
+.usageUnavailable .ui-caption,
+.usageLoading .ui-caption {
+  max-width: 30rem;
+  color: var(--muted-foreground);
+}
+
+.usageWindows {
+  min-width: 0;
+}
+
+.usageWindow {
+  display: grid;
+  min-width: 0;
+  gap: 10px;
+  padding: 16px;
+}
+
+.usageWindow + .usageWindow {
+  border-top: 1px solid var(--border);
+}
+
+.usageWindowHeader {
+  display: flex;
+  min-width: 0;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.usageWindowHeader strong {
+  font-size: 0.95rem;
+}
+
+.usageRemaining {
+  flex: 0 0 auto;
+  font-size: 1rem;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+
+.usageRemaining-healthy {
+  color: #31a24c;
+}
+
+.usageRemaining-medium {
+  color: #d28617;
+}
+
+.usageRemaining-low,
+.usageStale {
+  color: var(--destructive);
+}
+
+.usageTrack {
+  height: 8px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: var(--muted);
+}
+
+.usageFill {
+  display: block;
+  height: 100%;
+  min-width: 2px;
+  border-radius: inherit;
+  transition: width 0.25s ease;
+}
+
+.usageFill-healthy {
+  background: #31a24c;
+}
+
+.usageFill-medium {
+  background: #d28617;
+}
+
+.usageFill-low {
+  background: var(--destructive);
+}
+
+.usageReset,
+.usageStale {
+  color: var(--muted-foreground);
+  font-size: 0.75rem;
+  line-height: 1.35;
+}
+
+.usageStale {
+  display: block;
+  padding: 0 16px 14px;
 }
 
 .ui-section-header {

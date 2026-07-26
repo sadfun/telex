@@ -33,4 +33,18 @@ describe("Mini App responsive shell", () => {
     expect(client).toContain("const showSaveDock =");
     expect(client).toContain("showSaveDock");
   });
+
+  it("renders weekly usage and keeps the five-hour window conditional", async () => {
+    const [client, styles] = await Promise.all([
+      readFile(new URL("client.tsx", miniAppDirectory), "utf8"),
+      readFile(new URL("styles.css", miniAppDirectory), "utf8"),
+    ]);
+
+    expect(client).toContain('["Weekly", usage.weekly]');
+    expect(client).toContain('["5 hours", usage.fiveHour]');
+    expect(client).toContain("usage?.fiveHour === null");
+    expect(client).toContain('role: "progressbar"');
+    expect(styles).toContain(".usageTrack");
+    expect(styles).toContain(".usageRemaining-low");
+  });
 });

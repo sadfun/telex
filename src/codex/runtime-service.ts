@@ -8,6 +8,9 @@ import type { ConfigLayerSource } from "../generated/codex/v2/ConfigLayerSource.
 import type { ConfigReadResponse } from "../generated/codex/v2/ConfigReadResponse.js";
 import type { FsChangedNotification } from "../generated/codex/v2/FsChangedNotification.js";
 import type { FsWatchResponse } from "../generated/codex/v2/FsWatchResponse.js";
+import type { GetAccountRateLimitsResponse } from "../generated/codex/v2/GetAccountRateLimitsResponse.js";
+import type { RateLimitSnapshot } from "../generated/codex/v2/RateLimitSnapshot.js";
+import type { RateLimitWindow } from "../generated/codex/v2/RateLimitWindow.js";
 import type { SkillMetadata } from "../generated/codex/v2/SkillMetadata.js";
 import type { SkillsListResponse } from "../generated/codex/v2/SkillsListResponse.js";
 import { BridgeError, errorMessage } from "../shared/errors.js";
@@ -48,6 +51,16 @@ export interface CodexRuntimeStatus {
 export interface AvailableSkill {
   readonly name: string;
   readonly description: string;
+}
+
+export interface CodexUsageLimitWindow {
+  readonly remainingPercent: number;
+  readonly resetsAt: number | null;
+}
+
+export interface CodexUsageLimits {
+  readonly weekly: CodexUsageLimitWindow | null;
+  readonly fiveHour: CodexUsageLimitWindow | null;
 }
 
 export interface CodexRuntimeServiceOptions {
@@ -168,6 +181,14 @@ export class CodexRuntimeService {
     return [...this.#skills.values()]
       .map((skill) => ({ name: skill.name, description: skill.description }))
       .sort((left, right) => left.name.localeCompare(right.name));
+  }
+
+  public async usageLimits(): Promise<CodexUsageLimits> {
+    const response = await this.#rpc.request<GetAccountRateLimitsResponse>({
+      method: "account/rateLimits/read",
+      params: undefined,
+    });
+    return usageLimitsFromSnapshot(response.rateLimits);
   }
 
   public async browseSkill(name: string, path: string): Promise<SkillResource> {
@@ -623,6 +644,27 @@ export class CodexRuntimeService {
     );
     return result;
   }
+}
+
+function usageLimitsFromSnapshot(snapshot: RateLimitSnapshot): CodexUsageLimits {
+  let weekly: CodexUsageLimitWindow | null = null;
+  let fiveHour: CodexUsageLimitWindow | null = null;
+  for (const window of [snapshot.primary, snapshot.secondary]) {
+    if (window?.windowDurationMins === 7 * 24 * 60 && weekly === null) {
+      weekly = usageLimitWindow(window);
+    }
+    if (window?.windowDurationMins === 5 * 60 && fiveHour === null) {
+      fiveHour = usageLimitWindow(window);
+    }
+  }
+  return { weekly, fiveHour };
+}
+
+function usageLimitWindow(window: RateLimitWindow): CodexUsageLimitWindow {
+  return {
+    remainingPercent: Math.max(0, Math.min(100, 100 - window.usedPercent)),
+    resetsAt: window.resetsAt,
+  };
 }
 
 function initialStatus(): CodexRuntimeStatus {

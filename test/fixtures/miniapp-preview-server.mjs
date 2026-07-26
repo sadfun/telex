@@ -131,6 +131,16 @@ const server = new MiniAppServer({
   },
   runtime: {
     status: () => runtimeStatus,
+    usageLimits: async () => ({
+      weekly: {
+        remainingPercent: 68,
+        resetsAt: Math.floor(Date.now() / 1_000) + 3 * 24 * 60 * 60 + 7 * 60 * 60,
+      },
+      fiveHour: {
+        remainingPercent: 42,
+        resetsAt: Math.floor(Date.now() / 1_000) + 2 * 60 * 60 + 18 * 60,
+      },
+    }),
     skills: () => skills,
     browseSkill: async (_name, path) => skillResource(path),
     afterConfigWrite: async () => runtimeStatus,
