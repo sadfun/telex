@@ -39,6 +39,8 @@
   --accent: var(--tg-theme-section-bg-color, var(--tg-theme-secondary-bg-color, #e9e9ee));
   --accent-foreground: var(--tg-theme-text-color, #111113);
   --destructive: var(--tg-theme-destructive-text-color, #dc2626);
+  --destructive-foreground: var(--tg-theme-bg-color, var(--primary-foreground));
+  --switch-thumb: var(--tg-theme-bg-color, var(--primary-foreground));
   --border: var(
     --tg-theme-section-separator-color,
     color-mix(in srgb, var(--tg-theme-hint-color, #71717a) 22%, transparent)
@@ -55,6 +57,11 @@
     sans-serif;
   font-synthesis: none;
   text-rendering: optimizeLegibility;
+}
+
+.appRoot.dark {
+  --destructive-foreground: var(--tg-theme-text-color, var(--primary-foreground));
+  --switch-thumb: var(--tg-theme-text-color, var(--primary-foreground));
 }
 
 * {
@@ -516,11 +523,29 @@ button {
 }
 
 .resetConfirmApply {
+  color: var(--destructive-foreground);
   background: var(--destructive);
 }
 
 .resetConfirmApply:hover {
-  background: color-mix(in srgb, var(--destructive) 88%, black);
+  color: var(--destructive-foreground);
+  background: color-mix(in srgb, var(--destructive) 88%, var(--destructive-foreground));
+}
+
+.ui-switch {
+  background: var(--input);
+}
+
+.ui-switch[data-state="checked"] {
+  background: var(--primary);
+}
+
+.ui-switch-thumb {
+  background: var(--switch-thumb);
+}
+
+.ui-switch[data-state="checked"] .ui-switch-thumb {
+  background: var(--primary-foreground);
 }
 
 .ui-section-header {

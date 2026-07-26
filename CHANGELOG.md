@@ -2,6 +2,13 @@
 
 All notable changes to Telex are documented in this file.
 
+## [0.0.22] - 2026-07-26
+
+### Fixed
+
+- Paired Mini App switch tracks and thumbs with Telegram's `button_color` and `button_text_color` instead of a hard-coded white thumb.
+- Derived filled destructive-action foregrounds from Telegram's live light/dark theme colors and removed the hard-coded hover blend.
+
 ## [0.0.20] - 2026-07-26
 
 ### Fixed
@@ -76,6 +83,7 @@ All notable changes to Telex are documented in this file.
 - Fixed cached ephemeral command replies so they remain private and removed unsupported ephemeral command declarations.
 - Fixed commands addressed to another bot being handled by Telex.
 
+[0.0.22]: https://github.com/sadfun/telex/compare/v0.0.21...v0.0.22
 [0.0.20]: https://github.com/sadfun/telex/compare/v0.0.19...v0.0.20
 [0.0.17]: https://github.com/sadfun/telex/compare/v0.0.16...v0.0.17
 [0.0.16]: https://github.com/sadfun/telex/compare/v0.0.15...v0.0.16

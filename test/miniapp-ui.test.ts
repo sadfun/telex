@@ -41,6 +41,28 @@ describe("Mini App responsive shell", () => {
     expect(styles).not.toContain("--background: var(--tg-theme-secondary-bg-color, #f4f4f5)");
   });
 
+  it("pairs switch and destructive-action colors without hard-coded foregrounds", async () => {
+    const [styles, ui] = await Promise.all([
+      readFile(new URL("styles.css", miniAppDirectory), "utf8"),
+      readFile(new URL("ui.tsx", miniAppDirectory), "utf8"),
+    ]);
+
+    expect(styles).toContain("--switch-thumb: var(--tg-theme-bg-color, var(--primary-foreground))");
+    expect(styles).toContain(
+      "--destructive-foreground: var(--tg-theme-bg-color, var(--primary-foreground))",
+    );
+    expect(styles).toContain(".appRoot.dark");
+    expect(styles).toContain(
+      "--destructive-foreground: var(--tg-theme-text-color, var(--primary-foreground))",
+    );
+    expect(styles).toContain('.ui-switch[data-state="checked"] .ui-switch-thumb');
+    expect(styles).toContain("background: var(--primary-foreground)");
+    expect(styles).toContain("color: var(--destructive-foreground)");
+    expect(styles).not.toContain("var(--destructive) 88%, black");
+    expect(ui).toContain("ui-switch-thumb");
+    expect(ui).not.toContain("bg-white");
+  });
+
   it("renders skill Markdown and hides the clean-state save dock", async () => {
     const client = await readFile(new URL("client.tsx", miniAppDirectory), "utf8");
 
