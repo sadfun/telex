@@ -89,6 +89,59 @@ export function telegramMenuButton(miniAppUrl: string | undefined): MenuButton {
   };
 }
 
+type TelegramMenuButtonApi = Pick<Api, "getChatMenuButton" | "setChatMenuButton">;
+
+function menuButtonsMatch(actual: MenuButton, expected: MenuButton): boolean {
+  if (actual.type !== expected.type) return false;
+  if (actual.type !== "web_app" || expected.type !== "web_app") return true;
+  return actual.text === expected.text && actual.web_app.url === expected.web_app.url;
+}
+
+export async function reconcileTelegramMenuButton(
+  api: TelegramMenuButtonApi,
+  allowedUserIds: ReadonlySet<number>,
+  miniAppUrl: string | undefined,
+  logger: Logger,
+): Promise<void> {
+  const menuButton = telegramMenuButton(miniAppUrl);
+  const chatIds = [...allowedUserIds].toSorted((left, right) => left - right);
+  const scopes: readonly (number | undefined)[] = [undefined, ...chatIds];
+  let configuredScopes = 0;
+
+  for (const chatId of scopes) {
+    const parameters =
+      chatId === undefined
+        ? { menu_button: menuButton }
+        : { chat_id: chatId, menu_button: menuButton };
+    try {
+      await api.setChatMenuButton(parameters);
+      const actual = await api.getChatMenuButton(chatId === undefined ? {} : { chat_id: chatId });
+      if (!menuButtonsMatch(actual, menuButton)) {
+        logger.warn("Telegram returned an unexpected menu button after registration", {
+          scope: chatId === undefined ? "default" : "private-chat",
+          ...(chatId === undefined ? {} : { chatId }),
+          expectedType: menuButton.type,
+          actualType: actual.type,
+        });
+        continue;
+      }
+      configuredScopes += 1;
+    } catch (error) {
+      logger.warn("Could not register the Telegram Mini App menu button", {
+        scope: chatId === undefined ? "default" : "private-chat",
+        ...(chatId === undefined ? {} : { chatId }),
+        error: errorMessage(error),
+      });
+    }
+  }
+
+  logger.info("Telegram menu button registration reconciled", {
+    miniAppEnabled: miniAppUrl !== undefined,
+    configuredScopes,
+    totalScopes: scopes.length,
+  });
+}
+
 export class TelegramChannel implements MessagingChannel {
   public readonly name = "telegram";
   readonly #bot: Bot;
@@ -156,13 +209,12 @@ export class TelegramChannel implements MessagingChannel {
     await this.#bot.api.setMyCommands(telegramBotCommands).catch((error: unknown) => {
       this.#logger.warn("Could not register Telegram commands", { error: errorMessage(error) });
     });
-    await this.#bot.api
-      .setChatMenuButton({ menu_button: telegramMenuButton(this.#miniAppUrl) })
-      .catch((error: unknown) => {
-        this.#logger.warn("Could not register the Telegram Mini App menu button", {
-          error: errorMessage(error),
-        });
-      });
+    await reconcileTelegramMenuButton(
+      this.#bot.api,
+      this.#allowedUserIds,
+      this.#miniAppUrl,
+      this.#logger,
+    );
 
     this.#runner = run(this.#bot, {
       runner: {
