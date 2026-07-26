@@ -9,7 +9,11 @@ import {
   type ConfigValidationIssue,
 } from "../codex/config-service.js";
 import { CodexRpcError } from "../codex/rpc.js";
-import type { AvailableSkill, CodexUsageLimits } from "../codex/runtime-service.js";
+import type {
+  ApplyBankedResetOutcome,
+  AvailableSkill,
+  CodexUsageLimits,
+} from "../codex/runtime-service.js";
 import { SkillBrowserError, type SkillResource } from "../codex/skill-browser.js";
 import type { TelexSettingsStore } from "../core/settings-store.js";
 import { BridgeError } from "../shared/errors.js";
@@ -30,6 +34,11 @@ const settingsUpdateSchema = z.strictObject({
     .optional(),
 });
 
+const applyBankedResetSchema = z.strictObject({
+  creditId: z.string().min(1).max(512),
+  idempotencyKey: z.string().min(1).max(128),
+});
+
 export interface MiniAppServerOptions {
   readonly host: string;
   readonly port: number;
@@ -47,6 +56,7 @@ export interface MiniAppServerOptions {
 export interface MiniAppRuntimeController {
   status(): unknown;
   usageLimits(): Promise<CodexUsageLimits>;
+  applyBankedReset(creditId: string, idempotencyKey: string): Promise<ApplyBankedResetOutcome>;
   skills(): readonly AvailableSkill[];
   browseSkill(name: string, path: string): Promise<SkillResource>;
   afterConfigWrite(): Promise<unknown>;
@@ -200,6 +210,22 @@ export class MiniAppServer {
         return;
       }
       response.setHeader("Allow", "GET");
+      this.sendError(response, 405, "Method not allowed");
+      return;
+    }
+
+    if (url.pathname === "/api/usage/reset") {
+      this.authenticate(request);
+      if (request.method === "POST") {
+        const input = applyBankedResetSchema.parse(await this.readJson(request));
+        const outcome = await this.options.runtime.applyBankedReset(
+          input.creditId,
+          input.idempotencyKey,
+        );
+        this.sendJson(response, 200, { outcome });
+        return;
+      }
+      response.setHeader("Allow", "POST");
       this.sendError(response, 405, "Method not allowed");
       return;
     }

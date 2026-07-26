@@ -47,4 +47,20 @@ describe("Mini App responsive shell", () => {
     expect(styles).toContain(".usageTrack");
     expect(styles).toContain(".usageRemaining-low");
   });
+
+  it("expands banked resets and requires confirmation before applying one", async () => {
+    const [client, styles] = await Promise.all([
+      readFile(new URL("client.tsx", miniAppDirectory), "utf8"),
+      readFile(new URL("styles.css", miniAppDirectory), "utf8"),
+    ]);
+
+    expect(client).toContain("banked reset");
+    expect(client).toContain('"aria-expanded": expanded');
+    expect(client).toContain("Apply this reset");
+    expect(client).toContain("Apply banked reset?");
+    expect(client).toContain('"aria-modal": "true"');
+    expect(client).toContain('requestJson("/api/usage/reset"');
+    expect(styles).toContain(".bankedResetsSummary");
+    expect(styles).toContain(".resetDialogBackdrop");
+  });
 });

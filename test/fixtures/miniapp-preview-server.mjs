@@ -114,6 +114,37 @@ const skills = [
   },
 ];
 
+let usageWindows = {
+  weekly: {
+    remainingPercent: 68,
+    resetsAt: Math.floor(Date.now() / 1_000) + 3 * 24 * 60 * 60 + 7 * 60 * 60,
+  },
+  fiveHour: {
+    remainingPercent: 42,
+    resetsAt: Math.floor(Date.now() / 1_000) + 2 * 60 * 60 + 18 * 60,
+  },
+};
+let bankedResetCredits = [
+  {
+    id: "preview-reset-1",
+    resetType: "codexRateLimits",
+    status: "available",
+    grantedAt: Math.floor(Date.now() / 1_000) - 5 * 24 * 60 * 60,
+    expiresAt: Math.floor(Date.now() / 1_000) + 21 * 24 * 60 * 60,
+    title: "Codex usage reset",
+    description: "Restores all Codex usage windows that are currently eligible.",
+  },
+  {
+    id: "preview-reset-2",
+    resetType: "codexRateLimits",
+    status: "available",
+    grantedAt: Math.floor(Date.now() / 1_000) - 2 * 24 * 60 * 60,
+    expiresAt: Math.floor(Date.now() / 1_000) + 45 * 24 * 60 * 60,
+    title: null,
+    description: null,
+  },
+];
+
 const server = new MiniAppServer({
   host: "0.0.0.0",
   port: Number(process.env.PREVIEW_PORT ?? "8787"),
@@ -132,15 +163,28 @@ const server = new MiniAppServer({
   runtime: {
     status: () => runtimeStatus,
     usageLimits: async () => ({
-      weekly: {
-        remainingPercent: 68,
-        resetsAt: Math.floor(Date.now() / 1_000) + 3 * 24 * 60 * 60 + 7 * 60 * 60,
-      },
-      fiveHour: {
-        remainingPercent: 42,
-        resetsAt: Math.floor(Date.now() / 1_000) + 2 * 60 * 60 + 18 * 60,
+      ...usageWindows,
+      bankedResets: {
+        availableCount: bankedResetCredits.length,
+        credits: bankedResetCredits,
       },
     }),
+    applyBankedReset: async (creditId) => {
+      const available = bankedResetCredits.some((credit) => credit.id === creditId);
+      if (!available) return "noCredit";
+      bankedResetCredits = bankedResetCredits.filter((credit) => credit.id !== creditId);
+      usageWindows = {
+        weekly: {
+          remainingPercent: 100,
+          resetsAt: Math.floor(Date.now() / 1_000) + 7 * 24 * 60 * 60,
+        },
+        fiveHour: {
+          remainingPercent: 100,
+          resetsAt: Math.floor(Date.now() / 1_000) + 5 * 60 * 60,
+        },
+      };
+      return "reset";
+    },
     skills: () => skills,
     browseSkill: async (_name, path) => skillResource(path),
     afterConfigWrite: async () => runtimeStatus,
