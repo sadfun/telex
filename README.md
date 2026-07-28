@@ -171,6 +171,13 @@ In the other direction, Telex uploads completed Codex image-generation results a
 
 Telegram's hosted Bot API only allows bots to download files up to 20 MB and upload general files up to 50 MB. Telex still forwards the file metadata and a clear limitation notice when a download or upload is unavailable. Set `TELEGRAM_API_BASE` to a [local Bot API server](https://core.telegram.org/bots/api#using-a-local-bot-api-server) to remove the download limit and support larger uploads.
 
+## Docker
+
+[docs/docker.md](docs/docker.md) describes the container image: Telex runs as
+an unprivileged user with all state under a `/data` volume, and the container
+replaces Codex's Linux sandbox as the isolation boundary. A Compose example
+lives in [docker/docker-compose.example.yml](docker/docker-compose.example.yml).
+
 ## Slack connector
 
 Telex can additionally bridge Codex into Slack over [Socket Mode](https://docs.slack.dev/apis/events-api/using-socket-mode) — no public URL required. Direct messages stream progress like the Telegram private chat; in channels the bot answers mentions in threads, with each thread acting as its own Codex conversation. Approvals arrive as buttons, files flow in both directions, and commands are available as `/telex <subcommand>` (Slack reserves bare `/new`-style messages for its own slash-command system). Scheduled runs created from Slack notify back into the originating channel or thread.
