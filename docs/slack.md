@@ -102,6 +102,13 @@ Everyone shares one Telex: the same Codex account, the same workspace
 directory on the host, and the same conversation state per channel/thread.
 Open it to the whole workspace only if that is acceptable.
 
+Optionally, `SLACK_ADMIN_USER_IDS` (comma-separated member IDs) restricts
+instance-wide commands — `/telex config`, `login`, `logout`, `reload`,
+`restart`, `update` — to the listed users. Unset, every authorized user may
+run them. `/telex config` opens interactive Codex settings built from Slack
+buttons (model, reasoning effort, speed tier, approvals, sandbox, web
+search) in the bot DM — the Slack counterpart of the Telegram Mini App.
+
 ## 4. Configure Telex
 
 Add the three variables to the environment (`.env` for a source checkout, or

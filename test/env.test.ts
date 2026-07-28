@@ -79,6 +79,29 @@ describe("loadAppConfig", () => {
     expect([...(config.slack?.allowedUserIds ?? ["sentinel"])]).toEqual([]);
   });
 
+  it("parses the optional Slack admin list", () => {
+    const config = loadAppConfig({
+      SLACK_BOT_TOKEN: "xoxb-123",
+      SLACK_APP_TOKEN: "xapp-1",
+      SLACK_ALLOWED_USER_IDS: "*",
+      SLACK_ADMIN_USER_IDS: "U0AFAK0FB46",
+    });
+    expect([...(config.slack?.adminUserIds ?? [])]).toEqual(["U0AFAK0FB46"]);
+    expect(
+      loadAppConfig({
+        SLACK_BOT_TOKEN: "xoxb-123",
+        SLACK_APP_TOKEN: "xapp-1",
+        SLACK_ALLOWED_USER_IDS: "*",
+      }).slack?.adminUserIds,
+    ).toBeUndefined();
+  });
+
+  it("rejects an admin list without the Slack connector", () => {
+    expect(() => loadAppConfig({ ...required, SLACK_ADMIN_USER_IDS: "U0AFAK0FB46" })).toThrow(
+      /requires the Slack connector/,
+    );
+  });
+
   it("rejects mixing * with explicit Slack user IDs", () => {
     expect(() =>
       loadAppConfig({

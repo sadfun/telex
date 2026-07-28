@@ -27,6 +27,7 @@ const envSchema = z.object({
   SLACK_BOT_TOKEN: z.string().startsWith("xoxb-").optional(),
   SLACK_APP_TOKEN: z.string().startsWith("xapp-").optional(),
   SLACK_ALLOWED_USER_IDS: z.string().min(1).optional(),
+  SLACK_ADMIN_USER_IDS: z.string().min(1).optional(),
   PUBLIC_URL: z
     .url()
     .refine((value) => new URL(value).protocol === "https:", "PUBLIC_URL must use HTTPS")
@@ -47,6 +48,8 @@ export interface SlackConfig {
   readonly allowedUserIds: ReadonlySet<string>;
   /** `SLACK_ALLOWED_USER_IDS=*`: every regular member of the workspace. */
   readonly allowAllWorkspaceMembers: boolean;
+  /** When set, instance-wide commands (config, login, restart…) are limited to these users. */
+  readonly adminUserIds: ReadonlySet<string> | undefined;
 }
 
 export interface TelegramConfig {
@@ -129,22 +132,42 @@ function telegramConfigFromParsed(parsed: z.infer<typeof envSchema>): TelegramCo
 
 function slackConfigFromParsed(parsed: z.infer<typeof envSchema>): SlackConfig | undefined {
   const fields = [parsed.SLACK_BOT_TOKEN, parsed.SLACK_APP_TOKEN, parsed.SLACK_ALLOWED_USER_IDS];
-  if (fields.every((field) => field === undefined)) return undefined;
+  if (fields.every((field) => field === undefined)) {
+    if (parsed.SLACK_ADMIN_USER_IDS !== undefined) {
+      throw new Error("SLACK_ADMIN_USER_IDS requires the Slack connector to be configured");
+    }
+    return undefined;
+  }
   if (fields.some((field) => field === undefined)) {
     throw new Error(
       "The Slack connector needs SLACK_BOT_TOKEN, SLACK_APP_TOKEN, and SLACK_ALLOWED_USER_IDS set together",
     );
   }
+  const adminUserIds =
+    parsed.SLACK_ADMIN_USER_IDS === undefined
+      ? undefined
+      : parseSlackUserIds(parsed.SLACK_ADMIN_USER_IDS);
   if ((parsed.SLACK_ALLOWED_USER_IDS ?? "").trim() === "*") {
     return {
       botToken: parsed.SLACK_BOT_TOKEN ?? "",
       appToken: parsed.SLACK_APP_TOKEN ?? "",
       allowedUserIds: new Set(),
       allowAllWorkspaceMembers: true,
+      adminUserIds,
     };
   }
-  const allowedUserIds = new Set(
-    (parsed.SLACK_ALLOWED_USER_IDS ?? "").split(",").map((part) =>
+  return {
+    botToken: parsed.SLACK_BOT_TOKEN ?? "",
+    appToken: parsed.SLACK_APP_TOKEN ?? "",
+    allowedUserIds: parseSlackUserIds(parsed.SLACK_ALLOWED_USER_IDS ?? ""),
+    allowAllWorkspaceMembers: false,
+    adminUserIds,
+  };
+}
+
+function parseSlackUserIds(raw: string): ReadonlySet<string> {
+  return new Set(
+    raw.split(",").map((part) =>
       z
         .string()
         .regex(
@@ -154,12 +177,6 @@ function slackConfigFromParsed(parsed: z.infer<typeof envSchema>): SlackConfig |
         .parse(part.trim().toUpperCase()),
     ),
   );
-  return {
-    botToken: parsed.SLACK_BOT_TOKEN ?? "",
-    appToken: parsed.SLACK_APP_TOKEN ?? "",
-    allowedUserIds,
-    allowAllWorkspaceMembers: false,
-  };
 }
 
 function updateConfigFromParsed(parsed: z.infer<typeof updateEnvSchema>): UpdateConfig {

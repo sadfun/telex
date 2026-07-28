@@ -219,6 +219,7 @@ export async function runTelex(): Promise<TelexRunResult> {
             config.slack,
             join(config.workspace, ".telex", "attachments"),
             logger.child({ component: "slack" }),
+            configService,
           );
     const channels = [telegram, slack].filter(
       (channel): channel is NonNullable<typeof channel> => channel !== undefined,

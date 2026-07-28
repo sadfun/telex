@@ -16,6 +16,7 @@ import { type Deferred, deferred } from "../../shared/async.js";
 import { errorMessage } from "../../shared/errors.js";
 import type { Logger } from "../../shared/logger.js";
 import { isWorkspaceMember } from "./authorization.js";
+import { type CodexConfigAccess, SlackConfigUi, slackConfigActionPrefix } from "./config-ui.js";
 import { downloadSlackFile, SlackFileDownloadError } from "./file.js";
 import { escapeSlackEntities } from "./format.js";
 import {
@@ -107,6 +108,17 @@ const membershipCacheTtlMs = 10 * 60 * 1_000;
 /** Commands that act on one conversation and therefore need a thread in channels. */
 const conversationScopedCommands = new Set(["new", "back", "stop", "schedules", "continue"]);
 
+/** Commands that change this Telex instance for everyone using it. */
+const adminCommands = new Set(["config", "login", "logout", "reload", "restart", "update"]);
+
+/** Mirror of the bridge's plain-text command parser, for gating before dispatch. */
+function parseTextCommand(text: string): Readonly<{ name: string; args: string }> | undefined {
+  const match = /^\/([a-z][a-z0-9_]*)(?:@[a-z0-9_]+)?(?:[ \t]+([^\r\n]*))?$/i.exec(text.trim());
+  const name = match?.[1];
+  if (name === undefined) return undefined;
+  return { name: name.toLowerCase(), args: match?.[2]?.trimStart() ?? "" };
+}
+
 export class SlackChannel implements MessagingChannel {
   public readonly name = "slack";
   readonly #web: WebClient;
@@ -114,6 +126,8 @@ export class SlackChannel implements MessagingChannel {
   readonly #api: SlackMessagingApi;
   readonly #allowedUserIds: ReadonlySet<string>;
   readonly #allowAllWorkspaceMembers: boolean;
+  readonly #adminUserIds: ReadonlySet<string> | undefined;
+  readonly #configUi: SlackConfigUi | undefined;
   readonly #membership = new Map<string, Readonly<{ allowed: boolean; checkedAt: number }>>();
   #botTeamId: string | undefined;
   readonly #botToken: string;
@@ -132,15 +146,25 @@ export class SlackChannel implements MessagingChannel {
   #handler: MessageHandler | undefined;
   #botUserId: string | undefined;
 
-  public constructor(config: SlackConfig, attachmentDirectory: string, logger: Logger) {
+  public constructor(
+    config: SlackConfig,
+    attachmentDirectory: string,
+    logger: Logger,
+    configAccess?: CodexConfigAccess,
+  ) {
     this.#botToken = config.botToken;
     this.#allowedUserIds = config.allowedUserIds;
     this.#allowAllWorkspaceMembers = config.allowAllWorkspaceMembers;
+    this.#adminUserIds = config.adminUserIds;
     this.#attachmentDirectory = attachmentDirectory;
     this.#logger = logger;
     this.#web = new WebClient(config.botToken, { logLevel: LogLevel.ERROR });
     this.#socket = new SocketModeClient({ appToken: config.appToken, logLevel: LogLevel.ERROR });
     this.#api = webMessagingApi(this.#web);
+    this.#configUi =
+      configAccess === undefined
+        ? undefined
+        : new SlackConfigUi(this.#api, configAccess, logger.child({ component: "slack-config" }));
     this.#socket.on("message", (envelope: SocketEnvelope) => {
       void this.withAck(envelope, async () => {
         await this.handleMessageEvent(envelope.event as SlackMessageEvent);
@@ -189,6 +213,39 @@ export class SlackChannel implements MessagingChannel {
       return cached.allowed;
     }
     return this.checkWorkspaceMembership(userId);
+  }
+
+  private isAdmin(userId: string): boolean {
+    return this.#adminUserIds === undefined || this.#adminUserIds.has(userId);
+  }
+
+  private async dispatch(
+    inbound: InboundMessage,
+    channelId: string,
+    userId: string,
+  ): Promise<void> {
+    const handler = this.#handler;
+    if (handler === undefined) return;
+    // The bridge also parses bare "/command" text (e.g. from "@Telex /config"
+    // mentions), so gate on that form as well, not only on slash commands.
+    const command =
+      inbound.command ??
+      (inbound.attachments.length === 0 ? parseTextCommand(inbound.text) : undefined);
+    if (command !== undefined && adminCommands.has(command.name) && !this.isAdmin(userId)) {
+      await inbound.responder.sendText(
+        "This command changes Telex for everyone using it and is limited to its admins.",
+      );
+      return;
+    }
+    if (command?.name === "config" && this.#configUi !== undefined) {
+      if (!inbound.address.isPrivate) {
+        await inbound.responder.sendText("Open Codex settings in a direct message with the bot.");
+        return;
+      }
+      await this.#configUi.open(channelId);
+      return;
+    }
+    await handler(inbound);
   }
 
   private async checkWorkspaceMembership(userId: string): Promise<boolean> {
@@ -363,7 +420,7 @@ export class SlackChannel implements MessagingChannel {
       responder,
     };
     try {
-      await handler(inbound);
+      await this.dispatch(inbound, event.channel, sender);
     } catch (error) {
       this.#logger.error("Slack message handler failed", error, { messageTs: inbound.id });
       await responder.sendText(`Bridge error: ${errorMessage(error)}`).catch(() => undefined);
@@ -434,7 +491,7 @@ export class SlackChannel implements MessagingChannel {
       responder,
     };
     try {
-      await handler(inbound);
+      await this.dispatch(inbound, channelId, userId);
     } catch (error) {
       this.#logger.error("Slack slash command failed", error, { command: command.name });
       await respondEphemerally(`Bridge error: ${errorMessage(error)}`).catch(() => undefined);
@@ -451,6 +508,24 @@ export class SlackChannel implements MessagingChannel {
     if (actionId === "telex_link") return;
     if (!(await this.isUserAllowed(userId))) {
       this.#logger.warn("Ignored Slack interaction from unauthorized user", { userId });
+      return;
+    }
+    if (actionId.startsWith(slackConfigActionPrefix)) {
+      const messageTs = payload.message?.ts;
+      if (this.#configUi === undefined || channelId === undefined || messageTs === undefined) {
+        return;
+      }
+      if (!this.isAdmin(userId)) {
+        await this.#api
+          .postEphemeral({
+            channel: channelId,
+            user: userId,
+            text: "Codex settings are limited to Telex admins.",
+          })
+          .catch(() => undefined);
+        return;
+      }
+      await this.#configUi.handleAction(action.value ?? "", channelId, messageTs);
       return;
     }
     if (actionId.startsWith("telex_choice")) {
@@ -540,7 +615,7 @@ export class SlackChannel implements MessagingChannel {
       responder,
     };
     try {
-      await handler(inbound);
+      await this.dispatch(inbound, channelId, userId);
     } catch (error) {
       this.#logger.error("Slack command action failed", error, { command: command.name });
       await responder.sendText(`Bridge error: ${errorMessage(error)}`).catch(() => undefined);
