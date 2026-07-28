@@ -8,6 +8,11 @@ const booleanString = z
   .default("true")
   .transform((value) => value === "true" || value === "1");
 
+const disabledBooleanString = z
+  .enum(["true", "false", "1", "0"])
+  .default("false")
+  .transform((value) => value === "true" || value === "1");
+
 const updateEnvSchema = z.object({
   TELEX_UPDATE_MODE: z.enum(["off", "notify", "auto"]).default("notify"),
   TELEX_UPDATE_INTERVAL_HOURS: z.coerce.number().min(1).max(168).default(6),
@@ -24,6 +29,7 @@ const envSchema = z.object({
   TELEGRAM_ALLOWED_USER_IDS: z.string().min(1),
   TELEGRAM_API_BASE: z.url().default("https://api.telegram.org"),
   TELEGRAM_POLL_TIMEOUT: z.coerce.number().int().min(1).max(50).default(30),
+  ANDROID_TV_ENABLED: disabledBooleanString,
   PUBLIC_URL: z
     .url()
     .refine((value) => new URL(value).protocol === "https:", "PUBLIC_URL must use HTTPS")
@@ -42,6 +48,7 @@ export interface AppConfig {
   readonly allowedUserIds: ReadonlySet<number>;
   readonly telegramApiBase: string;
   readonly telegramPollTimeout: number;
+  readonly androidTvEnabled: boolean;
   readonly publicUrl: string | undefined;
   readonly tunnelMode: "auto" | "off";
   readonly dataDirectory: string;
@@ -77,6 +84,7 @@ export function loadAppConfig(environment: NodeJS.ProcessEnv = process.env): App
     allowedUserIds,
     telegramApiBase: parsed.TELEGRAM_API_BASE.replace(/\/$/, ""),
     telegramPollTimeout: parsed.TELEGRAM_POLL_TIMEOUT,
+    androidTvEnabled: parsed.ANDROID_TV_ENABLED,
     publicUrl: parsed.PUBLIC_URL?.replace(/\/$/, ""),
     tunnelMode: parsed.TELEX_TUNNEL,
     dataDirectory: resolve(parsed.TELEX_DATA_DIR),

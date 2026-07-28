@@ -30,7 +30,9 @@ import type { ItemStartedNotification } from "../generated/codex/v2/ItemStartedN
 import type { LoginAccountResponse } from "../generated/codex/v2/LoginAccountResponse.js";
 import type { PermissionsRequestApprovalResponse } from "../generated/codex/v2/PermissionsRequestApprovalResponse.js";
 import type { ReasoningSummaryTextDeltaNotification } from "../generated/codex/v2/ReasoningSummaryTextDeltaNotification.js";
+import type { Thread } from "../generated/codex/v2/Thread.js";
 import type { ThreadItem } from "../generated/codex/v2/ThreadItem.js";
+import type { ThreadReadResponse } from "../generated/codex/v2/ThreadReadResponse.js";
 import type { ThreadResumeResponse } from "../generated/codex/v2/ThreadResumeResponse.js";
 import type { ThreadStartParams } from "../generated/codex/v2/ThreadStartParams.js";
 import type { ThreadStartResponse } from "../generated/codex/v2/ThreadStartResponse.js";
@@ -559,6 +561,30 @@ export class CodexService {
     return previous;
   }
 
+  public async listConversationThreads(prefixes: readonly string[]): Promise<readonly Thread[]> {
+    const ids = new Set<string>();
+    for (const conversation of this.#conversations.list(prefixes)) {
+      ids.add(conversation.activeThreadId);
+      for (const threadId of conversation.previousThreadIds) ids.add(threadId);
+    }
+    const results = await Promise.allSettled(
+      [...ids].map(async (threadId) => await this.readThread(threadId, false)),
+    );
+    return results
+      .flatMap((result) => (result.status === "fulfilled" ? [result.value] : []))
+      .toSorted((left, right) => right.updatedAt - left.updatedAt);
+  }
+
+  public async readConversationThread(
+    prefixes: readonly string[],
+    threadId: string,
+  ): Promise<Thread> {
+    if (!this.#conversations.ownsThread(prefixes, threadId)) {
+      throw new BridgeError("That Codex task is not available to this device.", "THREAD_FORBIDDEN");
+    }
+    return await this.readThread(threadId, true);
+  }
+
   public async interrupt(conversationKey: string): Promise<boolean> {
     const active = this.#activeByConversation.get(conversationKey);
     if (active?.turnId === undefined) return false;
@@ -675,6 +701,14 @@ export class CodexService {
     });
     this.#loadedThreads.add(resumed.thread.id);
     return resumed.thread.id;
+  }
+
+  private async readThread(threadId: string, includeTurns: boolean): Promise<Thread> {
+    const response = await this.#rpc.request<ThreadReadResponse>({
+      method: "thread/read",
+      params: { threadId, includeTurns },
+    });
+    return response.thread;
   }
 
   private additionalContext(

@@ -1,0 +1,8 @@
+<resources>
+    <color name="telex_background">#0B1020</color>
+    <color name="telex_surface">#151D33</color>
+    <color name="telex_surface_focused">#26375E</color>
+    <color name="telex_primary">#7DD3FC</color>
+    <color name="telex_text">#F8FAFC</color>
+    <color name="telex_muted">#94A3B8</color>
+</resources>

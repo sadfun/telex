@@ -22,6 +22,12 @@ const storedStateSchema = z.object({
 type ConversationState = z.infer<typeof conversationStateSchema>;
 type StoredState = z.infer<typeof storedStateSchema>;
 
+export interface StoredConversation {
+  readonly key: string;
+  readonly activeThreadId: string;
+  readonly previousThreadIds: readonly string[];
+}
+
 export class ConversationStore {
   static readonly #historyLimit = 10;
   readonly #conversations = new Map<string, ConversationState>();
@@ -62,6 +68,24 @@ export class ConversationStore {
 
   public previous(conversationKey: string): string | undefined {
     return this.#conversations.get(conversationKey)?.previousThreadIds[0];
+  }
+
+  public list(prefixes: readonly string[]): readonly StoredConversation[] {
+    return [...this.#conversations.entries()]
+      .filter(([key]) => prefixes.some((prefix) => key === prefix || key.startsWith(`${prefix}:`)))
+      .map(([key, state]) => ({
+        key,
+        activeThreadId: state.activeThreadId,
+        previousThreadIds: [...state.previousThreadIds],
+      }));
+  }
+
+  public ownsThread(prefixes: readonly string[], threadId: string): boolean {
+    return this.list(prefixes).some(
+      (conversation) =>
+        conversation.activeThreadId === threadId ||
+        conversation.previousThreadIds.includes(threadId),
+    );
   }
 
   public async set(conversationKey: string, threadId: string): Promise<void> {

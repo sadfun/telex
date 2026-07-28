@@ -28,6 +28,7 @@ const helpText = [
   "/status — check Codex and sign-in status",
   "/login — sign in to ChatGPT",
   "/logout — sign out",
+  "/pair CODE — pair an Android TV",
   "/config — open Codex settings",
   "/reload — reload Codex config, MCP servers, and skills",
   "/restart — safely restart the Codex app-server",
@@ -60,6 +61,19 @@ export interface CodexRuntimeCommand {
   restart(): Promise<unknown>;
 }
 
+export interface DevicePairingCommand {
+  approve(
+    code: string,
+    owner: ProviderReference,
+  ): Promise<
+    | {
+        readonly status: "approved";
+        readonly device: { readonly id: string; readonly name: string };
+      }
+    | { readonly status: "not_found" }
+  >;
+}
+
 interface PendingLogin {
   readonly responder: MessageResponder;
   readonly timer: NodeJS.Timeout;
@@ -74,6 +88,7 @@ export class CodexBridge {
   readonly #updateCommand: TelexUpdateCommand | undefined;
   readonly #runtimeCommand: CodexRuntimeCommand | undefined;
   readonly #scheduledRuns: ScheduledRunsEngine | undefined;
+  readonly #devicePairing: DevicePairingCommand | undefined;
   readonly #pendingLogins = new Map<string, PendingLogin>();
   #signedInConfirmed = false;
   #updateInProgress = false;
@@ -105,6 +120,7 @@ export class CodexBridge {
     updateCommand?: TelexUpdateCommand,
     runtimeCommand?: CodexRuntimeCommand,
     scheduledRuns?: ScheduledRunsEngine,
+    devicePairing?: DevicePairingCommand,
   ) {
     this.#codex = codex;
     this.#publicUrl = publicUrl;
@@ -112,6 +128,7 @@ export class CodexBridge {
     this.#updateCommand = updateCommand;
     this.#runtimeCommand = runtimeCommand;
     this.#scheduledRuns = scheduledRuns;
+    this.#devicePairing = devicePairing;
     codex.onLoginCompleted((notification) => {
       void this.handleLoginCompleted(notification);
     });
@@ -155,8 +172,14 @@ export class CodexBridge {
 
   private async handleCommand(message: InboundMessage, command: InboundCommand): Promise<void> {
     switch (command.name) {
-      case "start":
-        await this.handleStart(message);
+      case "start": {
+        const pairingCode = /^tv_(\d{8})$/u.exec(command.args)?.[1];
+        if (pairingCode === undefined) await this.handleStart(message);
+        else await this.handlePairing(message, pairingCode);
+        return;
+      }
+      case "pair":
+        await this.handlePairing(message, command.args);
         return;
       case "help":
         await message.responder.sendText(helpText);
@@ -379,6 +402,32 @@ export class CodexBridge {
       message.responder,
       await this.#codex.startDeviceLogin(),
       `${introText}\n\nOne thing first: let's connect your ChatGPT account.`,
+    );
+  }
+
+  private async handlePairing(message: InboundMessage, rawCode: string): Promise<void> {
+    if (!(await this.requirePrivateChat(message))) return;
+    const pairing = this.#devicePairing;
+    if (pairing === undefined) {
+      await message.responder.sendText("Android TV pairing is not enabled on this Telex server.");
+      return;
+    }
+    const code = rawCode.trim();
+    if (!/^\d{8}$/u.test(code)) {
+      await message.responder.sendText(
+        "That pairing code should contain 8 digits. Open Telex on the TV to get a fresh code.",
+      );
+      return;
+    }
+    const result = await pairing.approve(code, messageOwner(message));
+    if (result.status === "not_found") {
+      await message.responder.sendText(
+        "That Android TV pairing code is invalid or expired. Request a fresh code on the TV.",
+      );
+      return;
+    }
+    await message.responder.sendText(
+      `✅ Paired ${result.device.name}. The TV can now open your Codex tasks and chat.`,
     );
   }
 

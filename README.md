@@ -212,6 +212,22 @@ Telex keeps the running Codex process synchronized using the [app-server mechani
 
 The runtime card in the Mini App shows the current outcome and offers **Apply changes** and **Restart Codex**. `/reload` and `/restart` provide the same private-chat controls. Restart is the fallback for startup-only state: Telex pauses new turns, lets active turns finish, restarts its child app-server with the same `CODEX_HOME`, reloads watches and resources, and lazily resumes persisted thread IDs. It does not restart the Telegram bridge or discard authentication and conversation history.
 
+## Android TV prototype
+
+The `agent/android-tv-prototype` branch includes an opt-in native Android TV
+adapter. Telex remains on the server; a lightweight Kotlin APK pairs through an
+8-digit code approved in the private Telegram bot chat, then lists the owner's
+Codex tasks, opens history, streams chat, handles approval choices, and receives
+scheduled notifications over HTTPS REST + SSE.
+
+Enable it with `ANDROID_TV_ENABLED=true`. It shares Telex's existing HTTP origin,
+so a stable `PUBLIC_URL` is recommended. The prototype deliberately has no
+central pairing broker or Google Play Services dependency; the server origin is
+entered once or provisioned through a `telex://connect` deep link.
+
+See [docs/android-tv.md](docs/android-tv.md) for architecture, threat boundaries,
+APK build instructions, pairing steps, and current prototype limitations.
+
 ## Source development
 
 ```sh

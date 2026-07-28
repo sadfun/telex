@@ -2,6 +2,9 @@ import { access, readFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { AutomationStore, ScheduledRunsEngine } from "./automations/index.js";
+import { AndroidTvChannel } from "./channels/android-tv/channel.js";
+import { AndroidTvDeviceStore } from "./channels/android-tv/device-store.js";
+import { AndroidTvPairingService } from "./channels/android-tv/pairing.js";
 import { TelegramChannel } from "./channels/telegram/channel.js";
 import { CodexConfigService } from "./codex/config-service.js";
 import { CodexAppServer } from "./codex/rpc.js";
@@ -55,6 +58,7 @@ export async function runTelex(): Promise<TelexRunResult> {
   const statePath = join(config.dataDirectory, "conversations.json");
   const settingsPath = join(config.dataDirectory, "settings.json");
   const automationsPath = join(config.dataDirectory, "automations.json");
+  const androidTvDevicesPath = join(config.dataDirectory, "android-tv-devices.json");
   const resources: Stoppable[] = [];
   const manuallyInstalledUpdate = deferred<string>();
   let updateMonitor: Promise<string | undefined> | undefined;
@@ -106,7 +110,16 @@ export async function runTelex(): Promise<TelexRunResult> {
       automationsPath,
       logger.child({ component: "automation-store" }),
     );
-    await Promise.all([conversations.load(), settings.load(), automations.load()]);
+    const androidTvDevices = new AndroidTvDeviceStore(
+      androidTvDevicesPath,
+      logger.child({ component: "android-tv-devices" }),
+    );
+    await Promise.all([
+      conversations.load(),
+      settings.load(),
+      automations.load(),
+      androidTvDevices.load(),
+    ]);
     const transcriptionTransport = new CurlImpersonateTransport(
       toolchainsDirectory,
       logger.child({ component: "transcription-transport" }),
@@ -148,6 +161,18 @@ export async function runTelex(): Promise<TelexRunResult> {
     resources.push(runtime);
     await runtime.start();
 
+    const androidTvPairing = config.androidTvEnabled
+      ? new AndroidTvPairingService(androidTvDevices)
+      : undefined;
+    const androidTv =
+      androidTvPairing === undefined
+        ? undefined
+        : new AndroidTvChannel({
+            devices: androidTvDevices,
+            pairing: androidTvPairing,
+            codex,
+            logger: logger.child({ component: "android-tv" }),
+          });
     const miniApp = new MiniAppServer({
       host: config.host,
       port: config.port,
@@ -157,6 +182,7 @@ export async function runTelex(): Promise<TelexRunResult> {
       runtime,
       settings,
       logger: logger.child({ component: "miniapp" }),
+      ...(androidTv === undefined ? {} : { androidTv }),
     });
     resources.push(miniApp);
     await miniApp.start();
@@ -207,7 +233,7 @@ export async function runTelex(): Promise<TelexRunResult> {
     const scheduledRuns = new ScheduledRunsEngine({
       store: automations,
       codex,
-      channels: [telegram],
+      channels: [telegram, ...(androidTv === undefined ? [] : [androidTv])],
       workspace: config.workspace,
       logger: logger.child({ component: "scheduled-runs" }),
     });
@@ -233,9 +259,14 @@ export async function runTelex(): Promise<TelexRunResult> {
       },
       runtime,
       scheduledRuns,
+      androidTvPairing,
     );
     resources.push(telegram);
     await telegram.start(bridge.handleMessage);
+    if (androidTv !== undefined) {
+      resources.push(androidTv);
+      await androidTv.start(bridge.handleMessage);
+    }
     resources.push(scheduledRuns);
     await scheduledRuns.start();
 

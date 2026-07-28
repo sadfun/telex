@@ -71,6 +71,7 @@ export const telegramBotCommands = [
   { command: "status", description: "Show Codex status" },
   { command: "login", description: "Sign in to Codex" },
   { command: "logout", description: "Sign out of Codex" },
+  { command: "pair", description: "Pair an Android TV" },
   { command: "config", description: "Open Codex settings" },
   { command: "reload", description: "Reload Codex resources" },
   { command: "restart", description: "Restart the Codex app-server" },

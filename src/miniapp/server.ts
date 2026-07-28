@@ -3,6 +3,7 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { ZodError, z } from "zod";
+import type { AndroidTvHttpHandler } from "../channels/android-tv/channel.js";
 import {
   type CodexConfigService,
   ConfigValidationError,
@@ -48,6 +49,7 @@ export interface MiniAppServerOptions {
   readonly runtime: MiniAppRuntimeController;
   readonly settings: TelexSettingsStore;
   readonly logger: Logger;
+  readonly androidTv?: AndroidTvHttpHandler;
   readonly maxAuthAgeSeconds?: number;
   readonly assetDirectory?: string;
 }
@@ -132,6 +134,13 @@ export class MiniAppServer {
 
     if (request.method === "GET" && url.pathname === "/healthz") {
       this.sendJson(response, 200, { ok: true });
+      return;
+    }
+
+    if (
+      this.options.androidTv !== undefined &&
+      (await this.options.androidTv.handleHttp(request, response, url))
+    ) {
       return;
     }
 

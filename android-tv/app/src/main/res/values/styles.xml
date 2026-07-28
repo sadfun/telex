@@ -1,0 +1,8 @@
+<resources>
+    <style name="Theme.TelexTv" parent="@android:style/Theme.Material.NoActionBar">
+        <item name="android:fontFamily">sans</item>
+        <item name="android:windowBackground">@color/telex_background</item>
+        <item name="android:colorAccent">@color/telex_primary</item>
+        <item name="android:navigationBarColor">@color/telex_background</item>
+    </style>
+</resources>
