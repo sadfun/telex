@@ -103,7 +103,9 @@ SLACK_ALLOWED_USER_IDS=U0123ABCDEF,U0456GHIJKL
 ```
 
 All three must be set together; leaving them all unset keeps the connector
-disabled. Restart Telex and check the log for
+disabled. Telegram is optional when Slack is configured — with only the Slack
+variables set, Telex runs Slack-only (the Telegram bot and the settings Mini
+App stay off). Restart Telex and check the log for
 `Slack bot connected through Socket Mode`.
 
 ## 5. Talk to it

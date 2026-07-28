@@ -9,7 +9,7 @@ const required = {
 describe("loadAppConfig", () => {
   it("parses allowlisted users and safe defaults", () => {
     const config = loadAppConfig(required);
-    expect([...config.allowedUserIds]).toEqual([42, 9001]);
+    expect([...(config.telegram?.allowedUserIds ?? [])]).toEqual([42, 9001]);
     expect(config.telegramApiBase).toBe("https://api.telegram.org");
     expect(config.checkCodexUpdates).toBe(true);
     expect(config.updateMode).toBe("notify");
@@ -57,6 +57,26 @@ describe("loadAppConfig", () => {
 
   it("leaves the Slack connector disabled by default", () => {
     expect(loadAppConfig(required).slack).toBeUndefined();
+  });
+
+  it("supports Slack-only operation without Telegram credentials", () => {
+    const config = loadAppConfig({
+      SLACK_BOT_TOKEN: "xoxb-123",
+      SLACK_APP_TOKEN: "xapp-1",
+      SLACK_ALLOWED_USER_IDS: "U0123ABC",
+    });
+    expect(config.telegram).toBeUndefined();
+    expect(config.slack).toBeDefined();
+  });
+
+  it("rejects a configuration with no connectors at all", () => {
+    expect(() => loadAppConfig({})).toThrow(/at least one connector/);
+  });
+
+  it("rejects partial Telegram settings", () => {
+    expect(() => loadAppConfig({ TELEGRAM_BOT_TOKEN: "12345678901234567890:token" })).toThrow(
+      /set together/,
+    );
   });
 
   it("parses complete Slack settings", () => {

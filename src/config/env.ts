@@ -20,8 +20,8 @@ const updateEnvSchema = z.object({
 
 const envSchema = z.object({
   ...updateEnvSchema.shape,
-  TELEGRAM_BOT_TOKEN: z.string().min(20),
-  TELEGRAM_ALLOWED_USER_IDS: z.string().min(1),
+  TELEGRAM_BOT_TOKEN: z.string().min(20).optional(),
+  TELEGRAM_ALLOWED_USER_IDS: z.string().min(1).optional(),
   TELEGRAM_API_BASE: z.url().default("https://api.telegram.org"),
   TELEGRAM_POLL_TIMEOUT: z.coerce.number().int().min(1).max(50).default(30),
   SLACK_BOT_TOKEN: z.string().startsWith("xoxb-").optional(),
@@ -46,9 +46,13 @@ export interface SlackConfig {
   readonly allowedUserIds: ReadonlySet<string>;
 }
 
-export interface AppConfig {
-  readonly telegramToken: string;
+export interface TelegramConfig {
+  readonly botToken: string;
   readonly allowedUserIds: ReadonlySet<number>;
+}
+
+export interface AppConfig {
+  readonly telegram: TelegramConfig | undefined;
   readonly telegramApiBase: string;
   readonly telegramPollTimeout: number;
   readonly slack: SlackConfig | undefined;
@@ -75,19 +79,20 @@ export interface UpdateConfig {
 
 export function loadAppConfig(environment: NodeJS.ProcessEnv = process.env): AppConfig {
   const parsed = envSchema.parse(environment);
-  const allowedUserIds = new Set(
-    parsed.TELEGRAM_ALLOWED_USER_IDS.split(",").map((part) =>
-      z.coerce.number().int().positive().safe().parse(part.trim()),
-    ),
-  );
+  const telegram = telegramConfigFromParsed(parsed);
+  const slack = slackConfigFromParsed(parsed);
+  if (telegram === undefined && slack === undefined) {
+    throw new Error(
+      "Configure at least one connector: Telegram (TELEGRAM_BOT_TOKEN + TELEGRAM_ALLOWED_USER_IDS) or Slack (SLACK_BOT_TOKEN + SLACK_APP_TOKEN + SLACK_ALLOWED_USER_IDS)",
+    );
+  }
 
   return {
     ...updateConfigFromParsed(parsed),
-    telegramToken: parsed.TELEGRAM_BOT_TOKEN,
-    allowedUserIds,
+    telegram,
     telegramApiBase: parsed.TELEGRAM_API_BASE.replace(/\/$/, ""),
     telegramPollTimeout: parsed.TELEGRAM_POLL_TIMEOUT,
-    slack: slackConfigFromParsed(parsed),
+    slack,
     publicUrl: parsed.PUBLIC_URL?.replace(/\/$/, ""),
     tunnelMode: parsed.TELEX_TUNNEL,
     dataDirectory: resolve(parsed.TELEX_DATA_DIR),
@@ -101,6 +106,22 @@ export function loadAppConfig(environment: NodeJS.ProcessEnv = process.env): App
 
 export function loadUpdateConfig(environment: NodeJS.ProcessEnv = process.env): UpdateConfig {
   return updateConfigFromParsed(updateEnvSchema.parse(environment));
+}
+
+function telegramConfigFromParsed(parsed: z.infer<typeof envSchema>): TelegramConfig | undefined {
+  const fields = [parsed.TELEGRAM_BOT_TOKEN, parsed.TELEGRAM_ALLOWED_USER_IDS];
+  if (fields.every((field) => field === undefined)) return undefined;
+  if (fields.some((field) => field === undefined)) {
+    throw new Error(
+      "The Telegram connector needs TELEGRAM_BOT_TOKEN and TELEGRAM_ALLOWED_USER_IDS set together",
+    );
+  }
+  const allowedUserIds = new Set(
+    (parsed.TELEGRAM_ALLOWED_USER_IDS ?? "")
+      .split(",")
+      .map((part) => z.coerce.number().int().positive().safe().parse(part.trim())),
+  );
+  return { botToken: parsed.TELEGRAM_BOT_TOKEN ?? "", allowedUserIds };
 }
 
 function slackConfigFromParsed(parsed: z.infer<typeof envSchema>): SlackConfig | undefined {
