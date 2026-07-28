@@ -21,4 +21,10 @@ project_root_markers = []
 EOF
 fi
 
+# With GH_TOKEN set, let git clone/fetch over HTTPS through gh's credential
+# helper (gh itself reads GH_TOKEN directly).
+if [ -n "${GH_TOKEN:-}" ] && command -v gh >/dev/null 2>&1; then
+  gh auth setup-git >/dev/null 2>&1 || true
+fi
+
 exec "$@"
