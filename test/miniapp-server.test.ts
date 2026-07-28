@@ -161,6 +161,56 @@ describe("MiniAppServer config API", () => {
     expect(runtime.browseSkill).toHaveBeenCalledWith("github:yeet", "references/release.md");
   });
 
+  it("returns authenticated Codex usage limits", async () => {
+    const runtime = testRuntime();
+    const server = testServer(
+      { update: vi.fn(), read: vi.fn(), validate: vi.fn() },
+      testSettingsStore(),
+      runtime,
+    );
+
+    const response = await dispatch(server, request("GET", "/api/usage", undefined));
+
+    expect(response.status).toBe(200);
+    expect(responseJson(response)).toEqual({
+      weekly: { remainingPercent: 68, resetsAt: 1_800_000_000 },
+      fiveHour: null,
+      bankedResets: {
+        availableCount: 1,
+        credits: [
+          {
+            id: "reset-1",
+            resetType: "codexRateLimits",
+            status: "available",
+            grantedAt: 1_799_000_000,
+            expiresAt: 1_801_000_000,
+            title: "Usage reset",
+            description: null,
+          },
+        ],
+      },
+    });
+    expect(runtime.usageLimits).toHaveBeenCalledOnce();
+  });
+
+  it("applies an authenticated banked reset with an idempotency key", async () => {
+    const runtime = testRuntime();
+    const server = testServer(
+      { update: vi.fn(), read: vi.fn(), validate: vi.fn() },
+      testSettingsStore(),
+      runtime,
+    );
+
+    const response = await dispatch(
+      server,
+      request("POST", "/api/usage/reset", { creditId: "reset-1", idempotencyKey: "attempt-1" }),
+    );
+
+    expect(response.status).toBe(200);
+    expect(responseJson(response)).toEqual({ outcome: "reset" });
+    expect(runtime.applyBankedReset).toHaveBeenCalledWith("reset-1", "attempt-1");
+  });
+
   it("serves the compiled Mini App stylesheet", async () => {
     const assetDirectory = await mkdtemp(join(tmpdir(), "telex-miniapp-assets-"));
     try {
@@ -295,6 +345,31 @@ function testServer(
 }
 
 interface TestRuntimeController extends MiniAppRuntimeController {
+  readonly usageLimits: ReturnType<
+    typeof vi.fn<
+      () => Promise<{
+        readonly weekly: { readonly remainingPercent: number; readonly resetsAt: number } | null;
+        readonly fiveHour: null;
+        readonly bankedResets: {
+          readonly availableCount: number;
+          readonly credits: readonly [
+            {
+              readonly id: string;
+              readonly resetType: "codexRateLimits";
+              readonly status: "available";
+              readonly grantedAt: number;
+              readonly expiresAt: number;
+              readonly title: string;
+              readonly description: null;
+            },
+          ];
+        };
+      }>
+    >
+  >;
+  readonly applyBankedReset: ReturnType<
+    typeof vi.fn<(creditId: string, idempotencyKey: string) => Promise<"reset">>
+  >;
   readonly browseSkill: ReturnType<
     typeof vi.fn<(name: string, path: string) => Promise<SkillResource>>
   >;
@@ -306,6 +381,25 @@ interface TestRuntimeController extends MiniAppRuntimeController {
 function testRuntime(): TestRuntimeController {
   return {
     status: () => ({ state: "ready" }),
+    usageLimits: vi.fn(async () => ({
+      weekly: { remainingPercent: 68, resetsAt: 1_800_000_000 },
+      fiveHour: null,
+      bankedResets: {
+        availableCount: 1,
+        credits: [
+          {
+            id: "reset-1",
+            resetType: "codexRateLimits",
+            status: "available",
+            grantedAt: 1_799_000_000,
+            expiresAt: 1_801_000_000,
+            title: "Usage reset",
+            description: null,
+          },
+        ],
+      },
+    })),
+    applyBankedReset: vi.fn(async () => "reset"),
     skills: () => [{ name: "github:yeet", description: "Publish changes" }],
     browseSkill: vi.fn(async () => ({
       type: "file",

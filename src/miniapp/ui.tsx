@@ -243,9 +243,9 @@ export function Switch(props: SwitchProps): ReactElement {
       disabled={props.disabled === true}
       onCheckedChange={props.onCheckedChange}
       aria-label={props["aria-label"]}
-      className="inline-flex h-7 w-12 shrink-0 cursor-pointer items-center rounded-full border-2 border-transparent bg-input shadow-xs outline-none transition-colors focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50 data-[state=checked]:bg-primary"
+      className="ui-switch inline-flex h-7 w-12 shrink-0 cursor-pointer items-center rounded-full border-2 border-transparent shadow-xs outline-none transition-colors focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50"
     >
-      <SwitchPrimitive.Thumb className="pointer-events-none block size-6 rounded-full bg-white shadow-md transition-transform data-[state=checked]:translate-x-5 data-[state=unchecked]:translate-x-0" />
+      <SwitchPrimitive.Thumb className="ui-switch-thumb pointer-events-none block size-6 rounded-full shadow-md transition-[background,transform] data-[state=checked]:translate-x-5 data-[state=unchecked]:translate-x-0" />
     </SwitchPrimitive.Root>
   );
 }
@@ -334,7 +334,7 @@ function TabbarRoot({ className, children, ...props }: TabbarProps): ReactElemen
   return (
     <nav
       className={cn(
-        "fixed inset-x-0 bottom-0 z-40 border-t border-border bg-background/94 px-3 pt-2 pb-[max(8px,env(safe-area-inset-bottom))] backdrop-blur-xl",
+        "ui-tabbar fixed inset-x-0 bottom-0 z-40 border-t border-border px-3 pt-2 pb-[max(8px,env(safe-area-inset-bottom))] backdrop-blur-xl",
         className,
       )}
       {...props}

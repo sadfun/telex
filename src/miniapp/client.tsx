@@ -2,6 +2,7 @@ import {
   type ChangeEvent,
   type FormEvent,
   createElement as h,
+  type MouseEvent,
   type ReactElement,
   useEffect,
   useMemo,
@@ -172,6 +173,39 @@ interface RuntimeStatus {
 interface TelexSettings {
   readonly remoteClientContext: boolean;
 }
+
+interface UsageLimitWindow {
+  readonly remainingPercent: number;
+  readonly resetsAt: number | null;
+}
+
+interface BankedReset {
+  readonly id: string;
+  readonly resetType: "codexRateLimits" | "unknown";
+  readonly status: "available" | "redeeming" | "redeemed" | "unknown";
+  readonly grantedAt: number;
+  readonly expiresAt: number | null;
+  readonly title: string | null;
+  readonly description: string | null;
+}
+
+interface BankedResets {
+  readonly availableCount: number;
+  readonly credits: readonly BankedReset[] | null;
+}
+
+interface UsageLimits {
+  readonly weekly: UsageLimitWindow | null;
+  readonly fiveHour: UsageLimitWindow | null;
+  readonly bankedResets: BankedResets | null;
+}
+
+interface ResetConfirmation {
+  readonly credit: BankedReset;
+  readonly idempotencyKey: string;
+}
+
+type ApplyResetOutcome = "reset" | "nothingToReset" | "noCredit" | "alreadyRedeemed";
 
 interface WriteOutcome {
   readonly status: "ok" | "okOverridden";
@@ -347,6 +381,14 @@ function SettingsApp(): ReactElement {
   const [validation, setValidation] = useState<ValidationResult>({ valid: true, issues: [] });
   const [validating, setValidating] = useState(false);
   const [notice, setNotice] = useState("Settings are up to date.");
+  const [usage, setUsage] = useState<UsageLimits>();
+  const [usageError, setUsageError] = useState<string>();
+  const [usageRefreshing, setUsageRefreshing] = useState(false);
+  const [bankedResetsExpanded, setBankedResetsExpanded] = useState(false);
+  const [resetConfirmation, setResetConfirmation] = useState<ResetConfirmation>();
+  const [resetApplying, setResetApplying] = useState(false);
+  const [resetError, setResetError] = useState<string>();
+  const [resetNotice, setResetNotice] = useState<string>();
 
   useEffect(() => {
     if (webApp === undefined) return;
@@ -381,6 +423,94 @@ function SettingsApp(): ReactElement {
       active = false;
     };
   }, [loadAttempt]);
+
+  const refreshUsage = async (): Promise<void> => {
+    setUsageRefreshing(true);
+    try {
+      setUsage(await requestUsage());
+      setUsageError(undefined);
+    } catch (error) {
+      setUsageError(messageOf(error));
+    } finally {
+      setUsageRefreshing(false);
+    }
+  };
+
+  const chooseBankedReset = (credit: BankedReset): void => {
+    setResetError(undefined);
+    setResetConfirmation({
+      credit,
+      idempotencyKey: resetAttemptId(),
+    });
+  };
+
+  const closeResetConfirmation = (): void => {
+    if (resetApplying) return;
+    setResetConfirmation(undefined);
+    setResetError(undefined);
+  };
+
+  const applyBankedReset = async (): Promise<void> => {
+    if (resetConfirmation === undefined || resetApplying) return;
+    setResetApplying(true);
+    setResetError(undefined);
+    try {
+      const outcome = await requestApplyBankedReset(resetConfirmation);
+      const creditId = resetConfirmation.credit.id;
+      if (outcome === "reset" || outcome === "alreadyRedeemed") {
+        setUsage((current) => removeAppliedReset(current, creditId));
+        setResetNotice(
+          outcome === "reset"
+            ? "Banked reset applied. Refreshing your usage limits…"
+            : "This banked reset was already applied. Refreshing your usage limits…",
+        );
+        setResetConfirmation(undefined);
+        webApp?.HapticFeedback?.notificationOccurred("success");
+        await refreshUsage();
+        setResetNotice(
+          outcome === "reset" ? "Banked reset applied." : "This banked reset was already applied.",
+        );
+        return;
+      }
+      if (outcome === "nothingToReset") {
+        setResetError("None of your current usage windows are eligible for a reset yet.");
+      } else {
+        setUsage((current) => clearUnavailableResets(current));
+        setResetError("This banked reset is no longer available.");
+      }
+      webApp?.HapticFeedback?.notificationOccurred("warning");
+    } catch (error) {
+      setResetError(messageOf(error));
+      webApp?.HapticFeedback?.notificationOccurred("error");
+    } finally {
+      setResetApplying(false);
+    }
+  };
+
+  useEffect(() => {
+    if (webApp === undefined || webApp.initData.length === 0) return;
+    let active = true;
+    const load = async (): Promise<void> => {
+      try {
+        const next = await requestUsage();
+        if (active) {
+          setUsage(next);
+          setUsageError(undefined);
+        }
+      } catch (error) {
+        if (active) setUsageError(messageOf(error));
+      } finally {
+        if (active) setUsageRefreshing(false);
+      }
+    };
+    setUsageRefreshing(true);
+    void load();
+    const timer = window.setInterval(() => void load(), 60_000);
+    return () => {
+      active = false;
+      window.clearInterval(timer);
+    };
+  }, []);
 
   const normalizedValues = useMemo(
     () => (draft === undefined ? undefined : configFromDraft(draft)),
@@ -562,8 +692,16 @@ function SettingsApp(): ReactElement {
           validating,
           runtimeAction,
           notice,
+          usage,
+          usageError,
+          usageRefreshing,
+          bankedResetsExpanded,
+          resetNotice,
           onSave: save,
           onRuntimeAction: runRuntimeAction,
+          onRefreshUsage: refreshUsage,
+          onToggleBankedResets: () => setBankedResetsExpanded((expanded) => !expanded),
+          onChooseBankedReset: chooseBankedReset,
           updateScalar,
           updateModel,
           updateGranularApproval,
@@ -575,6 +713,15 @@ function SettingsApp(): ReactElement {
     AppRoot,
     { appearance, className: "appRoot" },
     activeTab === "settings" ? settingsContent : h(SkillsBrowser),
+    resetConfirmation === undefined
+      ? undefined
+      : h(ResetConfirmationDialog, {
+          confirmation: resetConfirmation,
+          applying: resetApplying,
+          error: resetError,
+          onCancel: closeResetConfirmation,
+          onApply: applyBankedReset,
+        }),
     h(
       Tabbar,
       {
@@ -1018,8 +1165,16 @@ interface FormRenderOptions {
   readonly validating: boolean;
   readonly runtimeAction: "reload" | "restart" | undefined;
   readonly notice: string;
+  readonly usage: UsageLimits | undefined;
+  readonly usageError: string | undefined;
+  readonly usageRefreshing: boolean;
+  readonly bankedResetsExpanded: boolean;
+  readonly resetNotice: string | undefined;
   readonly onSave: (event: FormEvent<HTMLFormElement>) => Promise<void>;
   readonly onRuntimeAction: (action: "reload" | "restart") => Promise<void>;
+  readonly onRefreshUsage: () => Promise<void>;
+  readonly onToggleBankedResets: () => void;
+  readonly onChooseBankedReset: (credit: BankedReset) => void;
   readonly updateScalar: (key: ScalarDraftKey, value: string) => void;
   readonly updateModel: (value: string) => void;
   readonly updateGranularApproval: (key: keyof GranularApproval, value: boolean) => void;
@@ -1045,6 +1200,16 @@ function renderForm(options: FormRenderOptions): ReactElement {
   const allowedWindowsSandboxes = stringSet(requirements?.allowedWindowsSandboxImplementations);
   const issueSummary = renderIssueSummary(issues);
 
+  const usageSection = renderUsageSection(
+    options.usage,
+    options.usageError,
+    options.usageRefreshing,
+    options.onRefreshUsage,
+    options.bankedResetsExpanded,
+    options.resetNotice,
+    options.onToggleBankedResets,
+    options.onChooseBankedReset,
+  );
   const runtime = snapshot.runtime;
   const runtimeComponents = [
     ["Config", runtime.config],
@@ -1461,6 +1626,7 @@ function renderForm(options: FormRenderOptions): ReactElement {
       h(
         "div",
         { className: "sectionStack" },
+        usageSection,
         runtimeSection,
         telexSection,
         modelSection,
@@ -1499,6 +1665,364 @@ function renderForm(options: FormRenderOptions): ReactElement {
         )
       : undefined,
   );
+}
+
+function renderUsageSection(
+  usage: UsageLimits | undefined,
+  error: string | undefined,
+  refreshing: boolean,
+  onRefresh: () => Promise<void>,
+  bankedResetsExpanded: boolean,
+  resetNotice: string | undefined,
+  onToggleBankedResets: () => void,
+  onChooseBankedReset: (credit: BankedReset) => void,
+): ReactElement {
+  const windows = [
+    usage?.weekly === null || usage?.weekly === undefined
+      ? undefined
+      : (["Weekly", usage.weekly] as const),
+    usage?.fiveHour === null || usage?.fiveHour === undefined
+      ? undefined
+      : (["5 hours", usage.fiveHour] as const),
+  ].filter(isDefined);
+  let body: ReactElement;
+  if (usage === undefined && error === undefined) {
+    body = h(
+      "div",
+      { className: "usageLoading", "aria-live": "polite" },
+      h(Spinner, { size: "m" }),
+      h(Caption, null, "Checking Codex usage…"),
+    );
+  } else if (usage === undefined) {
+    body = h(
+      "div",
+      { className: "usageUnavailable", role: "status" },
+      h("strong", null, "Usage unavailable"),
+      h(Caption, null, error),
+    );
+  } else if (windows.length === 0) {
+    body = h(
+      "div",
+      { className: "usageUnavailable", role: "status" },
+      h("strong", null, "No active limits"),
+      h(Caption, null, "Codex is not reporting a weekly or five-hour usage window."),
+    );
+  } else {
+    body = h(
+      "div",
+      { className: "usageWindows", "aria-live": "polite" },
+      ...windows.map(([label, window]) => renderUsageWindow(label, window)),
+      usage.bankedResets !== null && usage.bankedResets.availableCount > 0
+        ? renderBankedResets(
+            usage.bankedResets,
+            bankedResetsExpanded,
+            resetNotice,
+            onToggleBankedResets,
+            onChooseBankedReset,
+          )
+        : undefined,
+      error === undefined
+        ? undefined
+        : h(Caption, { className: "usageStale" }, `Could not refresh: ${error}`),
+    );
+  }
+  return h(
+    Section,
+    {
+      header: h(
+        "div",
+        { className: "usageHeader" },
+        h("span", null, "Usage limits"),
+        h(
+          Button,
+          {
+            type: "button",
+            mode: "plain",
+            size: "s",
+            className: "usageRefresh",
+            loading: refreshing,
+            disabled: refreshing,
+            onClick: () => void onRefresh(),
+            "aria-label": "Refresh usage limits",
+          },
+          "Refresh",
+        ),
+      ),
+      footer:
+        "Refreshes automatically. The five-hour limit appears only while Codex reports that window.",
+    },
+    body,
+  );
+}
+
+function renderBankedResets(
+  resets: BankedResets,
+  expanded: boolean,
+  notice: string | undefined,
+  onToggle: () => void,
+  onChoose: (credit: BankedReset) => void,
+): ReactElement {
+  const count = resets.availableCount;
+  const credits = resets.credits ?? [];
+  return h(
+    "div",
+    { className: "bankedResets" },
+    h(
+      "button",
+      {
+        type: "button",
+        className: "bankedResetsSummary",
+        "aria-expanded": expanded,
+        "aria-controls": "banked-reset-details",
+        onClick: onToggle,
+      },
+      h(
+        "span",
+        { className: "bankedResetsSummaryCopy" },
+        h("strong", null, `You have ${count} banked reset${count === 1 ? "" : "s"}`),
+        h(Caption, null, "Use one to restore every currently eligible Codex usage window."),
+      ),
+      h(
+        "span",
+        { className: `bankedResetsChevron ${expanded ? "bankedResetsChevronOpen" : ""}` },
+        "⌄",
+      ),
+    ),
+    expanded
+      ? h(
+          "div",
+          { id: "banked-reset-details", className: "bankedResetDetails" },
+          notice === undefined
+            ? undefined
+            : h(Caption, { className: "bankedResetNotice", role: "status" }, notice),
+          credits.length === 0
+            ? h(
+                "div",
+                { className: "bankedResetEmpty" },
+                h("strong", null, "Reset details unavailable"),
+                h(
+                  Caption,
+                  null,
+                  "Codex reported the banked count without individual reset details.",
+                ),
+              )
+            : credits.map((credit) => renderBankedReset(credit, onChoose)),
+          credits.length > 0 && credits.length < count
+            ? h(
+                Caption,
+                { className: "bankedResetPartial" },
+                `Codex returned details for ${credits.length} of ${count} banked resets.`,
+              )
+            : undefined,
+        )
+      : undefined,
+  );
+}
+
+function renderBankedReset(
+  credit: BankedReset,
+  onChoose: (credit: BankedReset) => void,
+): ReactElement {
+  const available = credit.status === "available";
+  return h(
+    "article",
+    { className: "bankedReset", key: credit.id },
+    h(
+      "div",
+      { className: "bankedResetHeader" },
+      h("strong", null, credit.title ?? resetTypeLabel(credit.resetType)),
+      h(
+        "span",
+        { className: `bankedResetStatus bankedResetStatus-${credit.status}` },
+        resetStatusLabel(credit.status),
+      ),
+    ),
+    h(
+      "dl",
+      { className: "bankedResetFacts" },
+      h("div", null, h("dt", null, "Type"), h("dd", null, resetTypeLabel(credit.resetType))),
+      h("div", null, h("dt", null, "Expiration"), h("dd", null, formatExpiry(credit.expiresAt))),
+    ),
+    credit.description === null
+      ? undefined
+      : h(Caption, { className: "bankedResetDescription" }, credit.description),
+    h(
+      Button,
+      {
+        type: "button",
+        mode: "bezeled",
+        size: "s",
+        stretched: true,
+        disabled: !available,
+        onClick: () => onChoose(credit),
+      },
+      available ? "Apply this reset" : resetStatusLabel(credit.status),
+    ),
+  );
+}
+
+interface ResetConfirmationDialogProps {
+  readonly confirmation: ResetConfirmation;
+  readonly applying: boolean;
+  readonly error: string | undefined;
+  readonly onCancel: () => void;
+  readonly onApply: () => Promise<void>;
+}
+
+function ResetConfirmationDialog(props: ResetConfirmationDialogProps): ReactElement {
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent): void => {
+      if (event.key === "Escape" && !props.applying) props.onCancel();
+    };
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    window.addEventListener("keydown", onKeyDown);
+    return () => {
+      document.body.style.overflow = previousOverflow;
+      window.removeEventListener("keydown", onKeyDown);
+    };
+  }, [props.applying, props.onCancel]);
+
+  const credit = props.confirmation.credit;
+  const dismissBackdrop = (event: MouseEvent<HTMLDivElement>): void => {
+    if (event.target === event.currentTarget && !props.applying) props.onCancel();
+  };
+  return h(
+    "div",
+    { className: "resetDialogBackdrop", onMouseDown: dismissBackdrop },
+    h(
+      "section",
+      {
+        className: "resetDialog",
+        role: "dialog",
+        "aria-modal": "true",
+        "aria-labelledby": "reset-dialog-title",
+        "aria-describedby": "reset-dialog-description",
+      },
+      h("h2", { id: "reset-dialog-title" }, "Apply banked reset?"),
+      h(
+        "p",
+        { id: "reset-dialog-description" },
+        "This immediately spends one banked reset and restores every eligible Codex usage window. It cannot be undone.",
+      ),
+      h(
+        "dl",
+        { className: "resetDialogFacts" },
+        h("div", null, h("dt", null, "Type"), h("dd", null, resetTypeLabel(credit.resetType))),
+        h("div", null, h("dt", null, "Expiration"), h("dd", null, formatExpiry(credit.expiresAt))),
+      ),
+      props.error === undefined
+        ? undefined
+        : h(Caption, { className: "resetDialogError", role: "alert" }, props.error),
+      h(
+        "div",
+        { className: "resetDialogActions" },
+        h(
+          Button,
+          {
+            type: "button",
+            mode: "bezeled",
+            disabled: props.applying,
+            onClick: props.onCancel,
+          },
+          "Cancel",
+        ),
+        h(
+          Button,
+          {
+            type: "button",
+            className: "resetConfirmApply",
+            loading: props.applying,
+            autoFocus: true,
+            onClick: () => void props.onApply(),
+          },
+          "Apply reset",
+        ),
+      ),
+    ),
+  );
+}
+
+function resetTypeLabel(type: BankedReset["resetType"]): string {
+  return type === "codexRateLimits" ? "Codex usage limits" : "Unknown reset type";
+}
+
+function resetStatusLabel(status: BankedReset["status"]): string {
+  switch (status) {
+    case "available":
+      return "Available";
+    case "redeeming":
+      return "Applying";
+    case "redeemed":
+      return "Applied";
+    default:
+      return "Unavailable";
+  }
+}
+
+function formatExpiry(expiresAt: number | null): string {
+  if (expiresAt === null) return "Does not expire";
+  const expiration = new Date(expiresAt * 1_000);
+  if (Number.isNaN(expiration.getTime())) return "Unavailable";
+  return new Intl.DateTimeFormat(undefined, {
+    weekday: "short",
+    month: "short",
+    day: "numeric",
+    year: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+  }).format(expiration);
+}
+
+function renderUsageWindow(label: string, window: UsageLimitWindow): ReactElement {
+  const percent = Math.max(0, Math.min(100, window.remainingPercent));
+  const percentText = formatRemainingPercent(percent);
+  const level = percent <= 20 ? "low" : percent <= 50 ? "medium" : "healthy";
+  return h(
+    "div",
+    { className: "usageWindow", key: label },
+    h(
+      "div",
+      { className: "usageWindowHeader" },
+      h("strong", null, label),
+      h("span", { className: `usageRemaining usageRemaining-${level}` }, percentText),
+    ),
+    h(
+      "div",
+      {
+        className: "usageTrack",
+        role: "progressbar",
+        "aria-label": `${label} usage remaining`,
+        "aria-valuemin": 0,
+        "aria-valuemax": 100,
+        "aria-valuenow": Math.round(percent),
+      },
+      h("span", {
+        className: `usageFill usageFill-${level}`,
+        style: { width: `${percent}%` },
+      }),
+    ),
+    h(Caption, { className: "usageReset" }, formatResetTime(window.resetsAt)),
+  );
+}
+
+function formatRemainingPercent(percent: number): string {
+  if (percent > 0 && percent < 1) return "<1% left";
+  return `${Math.round(percent)}% left`;
+}
+
+function formatResetTime(resetsAt: number | null): string {
+  if (resetsAt === null) return "Reset time unavailable";
+  const reset = new Date(resetsAt * 1_000);
+  if (Number.isNaN(reset.getTime())) return "Reset time unavailable";
+  const formatted = new Intl.DateTimeFormat(undefined, {
+    weekday: "short",
+    month: "short",
+    day: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+  }).format(reset);
+  return `Resets ${formatted}`;
 }
 
 function listField(props: FieldProps): ReactElement {
@@ -1871,6 +2395,32 @@ async function requestSkills(): Promise<readonly AvailableSkill[]> {
   return skills as AvailableSkill[];
 }
 
+async function requestUsage(): Promise<UsageLimits> {
+  return parseUsageLimits(await requestJson("/api/usage", { method: "GET" }));
+}
+
+async function requestApplyBankedReset(
+  confirmation: ResetConfirmation,
+): Promise<ApplyResetOutcome> {
+  const value = await requestJson("/api/usage/reset", {
+    method: "POST",
+    body: JSON.stringify({
+      creditId: confirmation.credit.id,
+      idempotencyKey: confirmation.idempotencyKey,
+    }),
+  });
+  const outcome = recordValue(value)?.outcome;
+  if (
+    outcome !== "reset" &&
+    outcome !== "nothingToReset" &&
+    outcome !== "noCredit" &&
+    outcome !== "alreadyRedeemed"
+  ) {
+    throw new Error("The bridge returned an invalid banked reset result.");
+  }
+  return outcome;
+}
+
 async function requestSkillResource(skill: string, path: string): Promise<SkillResource> {
   const query = new URLSearchParams({ skill, path });
   const value = await requestJson(`/api/skills/resource?${query.toString()}`, { method: "GET" });
@@ -1961,6 +2511,114 @@ function parseAvailableSkill(value: unknown): AvailableSkill | undefined {
     typeof record.description === "string"
     ? { name: record.name, description: record.description }
     : undefined;
+}
+
+function parseUsageLimits(value: unknown): UsageLimits {
+  const record = recordValue(value);
+  if (record === undefined) throw new Error("The bridge returned invalid usage limits.");
+  const weekly = parseUsageLimitWindow(record.weekly);
+  const fiveHour = parseUsageLimitWindow(record.fiveHour);
+  const bankedResets = parseBankedResets(record.bankedResets);
+  if (weekly === undefined || fiveHour === undefined || bankedResets === undefined) {
+    throw new Error("The bridge returned invalid usage limits.");
+  }
+  return { weekly, fiveHour, bankedResets };
+}
+
+function parseUsageLimitWindow(value: unknown): UsageLimitWindow | null | undefined {
+  if (value === null) return null;
+  const record = recordValue(value);
+  if (record === undefined) return undefined;
+  const remainingPercent = record.remainingPercent;
+  const resetsAt = record.resetsAt;
+  if (
+    typeof remainingPercent !== "number" ||
+    !Number.isFinite(remainingPercent) ||
+    (resetsAt !== null && (typeof resetsAt !== "number" || !Number.isFinite(resetsAt)))
+  ) {
+    return undefined;
+  }
+  return { remainingPercent, resetsAt };
+}
+
+function parseBankedResets(value: unknown): BankedResets | null | undefined {
+  if (value === null) return null;
+  const record = recordValue(value);
+  if (record === undefined) return undefined;
+  const availableCount = record.availableCount;
+  if (
+    typeof availableCount !== "number" ||
+    !Number.isSafeInteger(availableCount) ||
+    availableCount < 0
+  ) {
+    return undefined;
+  }
+  if (record.credits === null) return { availableCount, credits: null };
+  const credits = arrayValue(record.credits)?.map(parseBankedReset);
+  if (credits === undefined || !credits.every(isDefined)) return undefined;
+  return { availableCount, credits };
+}
+
+function parseBankedReset(value: unknown): BankedReset | undefined {
+  const record = recordValue(value);
+  if (record === undefined) return undefined;
+  const resetType = record.resetType;
+  const status = record.status;
+  const grantedAt = record.grantedAt;
+  const expiresAt = record.expiresAt;
+  const title = record.title;
+  const description = record.description;
+  if (
+    typeof record.id !== "string" ||
+    (resetType !== "codexRateLimits" && resetType !== "unknown") ||
+    (status !== "available" &&
+      status !== "redeeming" &&
+      status !== "redeemed" &&
+      status !== "unknown") ||
+    typeof grantedAt !== "number" ||
+    !Number.isFinite(grantedAt) ||
+    (expiresAt !== null && (typeof expiresAt !== "number" || !Number.isFinite(expiresAt))) ||
+    (title !== null && typeof title !== "string") ||
+    (description !== null && typeof description !== "string")
+  ) {
+    return undefined;
+  }
+  return {
+    id: record.id,
+    resetType,
+    status,
+    grantedAt,
+    expiresAt,
+    title,
+    description,
+  };
+}
+
+function removeAppliedReset(
+  usage: UsageLimits | undefined,
+  creditId: string,
+): UsageLimits | undefined {
+  if (usage?.bankedResets === null || usage === undefined) return usage;
+  return {
+    ...usage,
+    bankedResets: {
+      availableCount: Math.max(0, usage.bankedResets.availableCount - 1),
+      credits: usage.bankedResets.credits?.filter((credit) => credit.id !== creditId) ?? null,
+    },
+  };
+}
+
+function clearUnavailableResets(usage: UsageLimits | undefined): UsageLimits | undefined {
+  return usage === undefined
+    ? usage
+    : { ...usage, bankedResets: { availableCount: 0, credits: [] } };
+}
+
+function resetAttemptId(): string {
+  return (
+    globalThis.crypto?.randomUUID?.() ??
+    `reset-${Date.now()}-${Math.random().toString(16).slice(2)}`
+  );
 }
 
 function parseSkillResource(value: unknown): SkillResource | undefined {

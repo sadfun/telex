@@ -6,8 +6,15 @@ import type { ConfigBatchWriteParams } from "../generated/codex/v2/ConfigBatchWr
 import type { ConfigLayer } from "../generated/codex/v2/ConfigLayer.js";
 import type { ConfigLayerSource } from "../generated/codex/v2/ConfigLayerSource.js";
 import type { ConfigReadResponse } from "../generated/codex/v2/ConfigReadResponse.js";
+import type { ConsumeAccountRateLimitResetCreditParams } from "../generated/codex/v2/ConsumeAccountRateLimitResetCreditParams.js";
+import type { ConsumeAccountRateLimitResetCreditResponse } from "../generated/codex/v2/ConsumeAccountRateLimitResetCreditResponse.js";
 import type { FsChangedNotification } from "../generated/codex/v2/FsChangedNotification.js";
 import type { FsWatchResponse } from "../generated/codex/v2/FsWatchResponse.js";
+import type { GetAccountRateLimitsResponse } from "../generated/codex/v2/GetAccountRateLimitsResponse.js";
+import type { RateLimitResetCredit } from "../generated/codex/v2/RateLimitResetCredit.js";
+import type { RateLimitResetCreditsSummary } from "../generated/codex/v2/RateLimitResetCreditsSummary.js";
+import type { RateLimitSnapshot } from "../generated/codex/v2/RateLimitSnapshot.js";
+import type { RateLimitWindow } from "../generated/codex/v2/RateLimitWindow.js";
 import type { SkillMetadata } from "../generated/codex/v2/SkillMetadata.js";
 import type { SkillsListResponse } from "../generated/codex/v2/SkillsListResponse.js";
 import { BridgeError, errorMessage } from "../shared/errors.js";
@@ -49,6 +56,34 @@ export interface AvailableSkill {
   readonly name: string;
   readonly description: string;
 }
+
+export interface CodexUsageLimitWindow {
+  readonly remainingPercent: number;
+  readonly resetsAt: number | null;
+}
+
+export interface CodexBankedReset {
+  readonly id: string;
+  readonly resetType: "codexRateLimits" | "unknown";
+  readonly status: "available" | "redeeming" | "redeemed" | "unknown";
+  readonly grantedAt: number;
+  readonly expiresAt: number | null;
+  readonly title: string | null;
+  readonly description: string | null;
+}
+
+export interface CodexBankedResets {
+  readonly availableCount: number;
+  readonly credits: readonly CodexBankedReset[] | null;
+}
+
+export interface CodexUsageLimits {
+  readonly weekly: CodexUsageLimitWindow | null;
+  readonly fiveHour: CodexUsageLimitWindow | null;
+  readonly bankedResets: CodexBankedResets | null;
+}
+
+export type ApplyBankedResetOutcome = "reset" | "nothingToReset" | "noCredit" | "alreadyRedeemed";
 
 export interface CodexRuntimeServiceOptions {
   readonly rpc: CodexAppServer;
@@ -168,6 +203,28 @@ export class CodexRuntimeService {
     return [...this.#skills.values()]
       .map((skill) => ({ name: skill.name, description: skill.description }))
       .sort((left, right) => left.name.localeCompare(right.name));
+  }
+
+  public async usageLimits(): Promise<CodexUsageLimits> {
+    const response = await this.#rpc.request<GetAccountRateLimitsResponse>({
+      method: "account/rateLimits/read",
+      params: undefined,
+    });
+    return usageLimitsFromSnapshot(response.rateLimits, response.rateLimitResetCredits ?? null);
+  }
+
+  public async applyBankedReset(
+    creditId: string,
+    idempotencyKey: string,
+  ): Promise<ApplyBankedResetOutcome> {
+    const response = await this.#rpc.request<ConsumeAccountRateLimitResetCreditResponse>({
+      method: "account/rateLimitResetCredit/consume",
+      params: {
+        creditId,
+        idempotencyKey,
+      } satisfies ConsumeAccountRateLimitResetCreditParams,
+    });
+    return response.outcome;
   }
 
   public async browseSkill(name: string, path: string): Promise<SkillResource> {
@@ -623,6 +680,53 @@ export class CodexRuntimeService {
     );
     return result;
   }
+}
+
+function usageLimitsFromSnapshot(
+  snapshot: RateLimitSnapshot,
+  resetCredits: RateLimitResetCreditsSummary | null,
+): CodexUsageLimits {
+  let weekly: CodexUsageLimitWindow | null = null;
+  let fiveHour: CodexUsageLimitWindow | null = null;
+  for (const window of [snapshot.primary, snapshot.secondary]) {
+    if (window?.windowDurationMins === 7 * 24 * 60 && weekly === null) {
+      weekly = usageLimitWindow(window);
+    }
+    if (window?.windowDurationMins === 5 * 60 && fiveHour === null) {
+      fiveHour = usageLimitWindow(window);
+    }
+  }
+  return { weekly, fiveHour, bankedResets: bankedResets(resetCredits) };
+}
+
+function usageLimitWindow(window: RateLimitWindow): CodexUsageLimitWindow {
+  return {
+    remainingPercent: Math.max(0, Math.min(100, 100 - window.usedPercent)),
+    resetsAt: window.resetsAt,
+  };
+}
+
+function bankedResets(summary: RateLimitResetCreditsSummary | null): CodexBankedResets | null {
+  if (summary === null) return null;
+  const count = Number(summary.availableCount);
+  const availableCount =
+    Number.isSafeInteger(count) && count >= 0 ? count : Math.max(0, Math.trunc(count));
+  return {
+    availableCount,
+    credits: summary.credits?.map(bankedReset) ?? null,
+  };
+}
+
+function bankedReset(credit: RateLimitResetCredit): CodexBankedReset {
+  return {
+    id: credit.id,
+    resetType: credit.resetType,
+    status: credit.status,
+    grantedAt: credit.grantedAt,
+    expiresAt: credit.expiresAt ?? null,
+    title: credit.title ?? null,
+    description: credit.description ?? null,
+  };
 }
 
 function initialStatus(): CodexRuntimeStatus {

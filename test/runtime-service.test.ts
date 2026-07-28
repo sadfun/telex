@@ -64,6 +64,65 @@ describe("CodexRuntimeService", () => {
     await runtime.stop();
   });
 
+  it("reports remaining weekly and optional five-hour usage windows", async () => {
+    const rpc = new FakeRuntimeRpc();
+    const runtime = createRuntime(rpc, fakeCodex());
+
+    expect(await runtime.usageLimits()).toEqual({
+      weekly: { remainingPercent: 72.5, resetsAt: 1_800_604_800 },
+      fiveHour: { remainingPercent: 42, resetsAt: 1_800_018_000 },
+      bankedResets: {
+        availableCount: 2,
+        credits: [
+          {
+            id: "reset-1",
+            resetType: "codexRateLimits",
+            status: "available",
+            grantedAt: 1_799_000_000,
+            expiresAt: 1_801_000_000,
+            title: "Usage reset",
+            description: "Restores eligible Codex limits.",
+          },
+        ],
+      },
+    });
+    expect(rpc.requests.at(-1)).toEqual({
+      method: "account/rateLimits/read",
+      params: undefined,
+    });
+
+    rpc.rateLimits = {
+      rateLimits: {
+        primary: {
+          usedPercent: 27.5,
+          windowDurationMins: 10_080,
+          resetsAt: 1_800_604_800,
+        },
+        secondary: null,
+      },
+      rateLimitResetCredits: null,
+    };
+    expect(await runtime.usageLimits()).toEqual({
+      weekly: { remainingPercent: 72.5, resetsAt: 1_800_604_800 },
+      fiveHour: null,
+      bankedResets: null,
+    });
+  });
+
+  it("applies a specific banked reset with the native idempotent RPC", async () => {
+    const rpc = new FakeRuntimeRpc();
+    const runtime = createRuntime(rpc, fakeCodex());
+
+    expect(await runtime.applyBankedReset("reset-1", "attempt-1")).toBe("reset");
+    expect(rpc.requests.at(-1)).toEqual({
+      method: "account/rateLimitResetCredit/consume",
+      params: {
+        creditId: "reset-1",
+        idempotencyKey: "attempt-1",
+      },
+    });
+  });
+
   it("runs the native config, MCP, and skill reload cascade", async () => {
     const rpc = new FakeRuntimeRpc();
     const runtime = createRuntime(rpc, fakeCodex());
@@ -323,6 +382,61 @@ class FakeRuntimeRpc {
   readonly #exits = new Set<ExitListener>();
   public config = configResponse("user-v1");
   public skills: SkillsListResponse = skillsResponse();
+  public rateLimits: {
+    rateLimits: {
+      primary: {
+        usedPercent: number;
+        windowDurationMins: number;
+        resetsAt: number;
+      };
+      secondary: {
+        usedPercent: number;
+        windowDurationMins: number;
+        resetsAt: number;
+      } | null;
+    };
+    rateLimitResetCredits: {
+      availableCount: bigint;
+      credits: [
+        {
+          id: string;
+          resetType: "codexRateLimits";
+          status: "available";
+          grantedAt: number;
+          expiresAt: number;
+          title: string;
+          description: string;
+        },
+      ];
+    } | null;
+  } = {
+    rateLimits: {
+      primary: {
+        usedPercent: 58,
+        windowDurationMins: 300,
+        resetsAt: 1_800_018_000,
+      },
+      secondary: {
+        usedPercent: 27.5,
+        windowDurationMins: 10_080,
+        resetsAt: 1_800_604_800,
+      },
+    },
+    rateLimitResetCredits: {
+      availableCount: 2n,
+      credits: [
+        {
+          id: "reset-1",
+          resetType: "codexRateLimits",
+          status: "available",
+          grantedAt: 1_799_000_000,
+          expiresAt: 1_801_000_000,
+          title: "Usage reset",
+          description: "Restores eligible Codex limits.",
+        },
+      ],
+    },
+  };
   public failNextConfigRead: Error | undefined;
   public startError: Error | undefined;
   public readonly start = vi.fn(async () => {
@@ -365,6 +479,10 @@ class FakeRuntimeRpc {
         return this.config as Result;
       case "skills/list":
         return this.skills as Result;
+      case "account/rateLimits/read":
+        return this.rateLimits as Result;
+      case "account/rateLimitResetCredit/consume":
+        return { outcome: "reset" } as Result;
       case "fs/watch":
         return { path: (request.params as { readonly path: string }).path } as Result;
       case "config/batchWrite":

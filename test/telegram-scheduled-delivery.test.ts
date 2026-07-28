@@ -1,6 +1,10 @@
 import type { Api } from "grammy";
 import { describe, expect, it, vi } from "vitest";
-import { TelegramChannel, telegramMenuButton } from "../src/channels/telegram/channel.js";
+import {
+  reconcileTelegramMenuButton,
+  TelegramChannel,
+  telegramMenuButton,
+} from "../src/channels/telegram/channel.js";
 import {
   parseTelegramDeliveryTarget,
   parseTelegramMessageReference,
@@ -22,6 +26,67 @@ describe("Telegram scheduled delivery", () => {
 
   it("restores the commands menu when the Mini App is unavailable", () => {
     expect(telegramMenuButton(undefined)).toEqual({ type: "commands" });
+  });
+
+  it("overwrites chat-specific menu buttons that would mask the Mini App default", async () => {
+    const expected = telegramMenuButton("https://telex.example/miniapp");
+    const setChatMenuButton = vi.fn(
+      async (_parameters: {
+        chat_id?: number;
+        menu_button?: ReturnType<typeof telegramMenuButton>;
+      }) => true as const,
+    );
+    const getChatMenuButton = vi.fn(async (_parameters: { chat_id?: number }) => expected);
+
+    await reconcileTelegramMenuButton(
+      { setChatMenuButton, getChatMenuButton } as unknown as Pick<
+        Api,
+        "getChatMenuButton" | "setChatMenuButton"
+      >,
+      new Set([42, 7]),
+      "https://telex.example/miniapp",
+      new Logger("error"),
+    );
+
+    expect(setChatMenuButton.mock.calls.map(([parameters]) => parameters)).toEqual([
+      { menu_button: expected },
+      { chat_id: 7, menu_button: expected },
+      { chat_id: 42, menu_button: expected },
+    ]);
+    expect(getChatMenuButton.mock.calls.map(([parameters]) => parameters)).toEqual([
+      {},
+      { chat_id: 7 },
+      { chat_id: 42 },
+    ]);
+  });
+
+  it("continues reconciling other menu-button scopes after a Telegram API failure", async () => {
+    const expected = telegramMenuButton("https://telex.example/miniapp");
+    const setChatMenuButton = vi.fn(async (parameters: { chat_id?: number }) => {
+      if (parameters.chat_id === 7) throw new Error("chat not found");
+      return true as const;
+    });
+    const getChatMenuButton = vi.fn(async (_parameters: { chat_id?: number }) => expected);
+
+    await reconcileTelegramMenuButton(
+      { setChatMenuButton, getChatMenuButton } as unknown as Pick<
+        Api,
+        "getChatMenuButton" | "setChatMenuButton"
+      >,
+      new Set([7, 42]),
+      "https://telex.example/miniapp",
+      new Logger("error"),
+    );
+
+    expect(setChatMenuButton.mock.calls.map(([parameters]) => parameters.chat_id)).toEqual([
+      undefined,
+      7,
+      42,
+    ]);
+    expect(getChatMenuButton.mock.calls.map(([parameters]) => parameters.chat_id)).toEqual([
+      undefined,
+      42,
+    ]);
   });
 
   it("keeps provider routing details inside opaque versioned references", () => {
