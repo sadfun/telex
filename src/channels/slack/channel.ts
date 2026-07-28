@@ -41,6 +41,7 @@ import {
   type SlackChoiceRequester,
   type SlackMessagingApi,
   SlackResponder,
+  truncateForLog,
 } from "./reply.js";
 
 export const slackSlashCommandHelp = [
@@ -234,6 +235,13 @@ export class SlackChannel implements MessagingChannel {
     const command =
       inbound.command ??
       (inbound.attachments.length === 0 ? parseTextCommand(inbound.text) : undefined);
+    this.#logger.info("Slack message received", {
+      userId,
+      userName: inbound.sender.displayName,
+      conversation: inbound.address.key,
+      ...(command === undefined ? {} : { command: command.name }),
+      text: truncateForLog(inbound.text, 1_000),
+    });
     if (command !== undefined && adminCommands.has(command.name) && !this.isAdmin(userId)) {
       await inbound.responder.sendText(
         "This command changes Telex for everyone using it and is limited to its admins.",
@@ -381,13 +389,18 @@ export class SlackChannel implements MessagingChannel {
       this.rememberEngagedThread(threadKey);
     }
     const contextualText = await this.withThreadContext(event, botUserId, threadWasEngaged, text);
+    const senderName = await this.displayName(sender);
     const responder = new SlackResponder(
       this.#api,
       event.channel,
       route.replyThreadTs,
       sender,
       this.requestChoice,
-      this.#logger,
+      this.#logger.child({
+        userId: sender,
+        userName: senderName,
+        conversation: `slack:${event.channel}:${route.conversationSuffix}`,
+      }),
     );
     const inbound: InboundMessage = {
       id: event.ts,
@@ -413,7 +426,7 @@ export class SlackChannel implements MessagingChannel {
           }),
       sender: {
         id: sender,
-        displayName: await this.displayName(sender),
+        displayName: senderName,
       },
       text: contextualText,
       attachments,
@@ -514,13 +527,18 @@ export class SlackChannel implements MessagingChannel {
       return;
     }
     const command = { name, args: restParts.join(" ") };
+    const commandSenderName = payload.user_name ?? (await this.displayName(userId));
     const responder = new SlackResponder(
       this.#api,
       channelId,
       undefined,
       userId,
       this.requestChoice,
-      this.#logger,
+      this.#logger.child({
+        userId,
+        userName: commandSenderName,
+        conversation: `slack:${channelId}:main`,
+      }),
       payload.response_url,
     );
     const inbound: InboundMessage = {
@@ -533,7 +551,7 @@ export class SlackChannel implements MessagingChannel {
       },
       sender: {
         id: userId,
-        displayName: payload.user_name ?? (await this.displayName(userId)),
+        displayName: commandSenderName,
       },
       text: `/${command.name}${command.args.length === 0 ? "" : ` ${command.args}`}`,
       command,
@@ -637,13 +655,18 @@ export class SlackChannel implements MessagingChannel {
     const conversationSuffix = isDirect ? "main" : threadRoot;
     const replyThreadTs = isDirect ? undefined : threadRoot;
     if (!isDirect) this.rememberEngagedThread(`${channelId}:${conversationSuffix}`);
+    const actorName = await this.displayName(userId);
     const responder = new SlackResponder(
       this.#api,
       channelId,
       replyThreadTs,
       userId,
       this.requestChoice,
-      this.#logger,
+      this.#logger.child({
+        userId,
+        userName: actorName,
+        conversation: `slack:${channelId}:${conversationSuffix}`,
+      }),
     );
     const inbound: InboundMessage = {
       id: `action:${crypto.randomUUID()}`,
@@ -657,7 +680,7 @@ export class SlackChannel implements MessagingChannel {
       reference: slackMessageReference(channelId, messageTs),
       sender: {
         id: userId,
-        displayName: await this.displayName(userId),
+        displayName: actorName,
       },
       text: `/${command.name}${command.args.length === 0 ? "" : ` ${command.args}`}`,
       command,

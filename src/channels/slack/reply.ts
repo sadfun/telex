@@ -166,6 +166,11 @@ function threadOption(threadTs: string | undefined): ThreadOption {
   return threadTs === undefined ? {} : { threadTs };
 }
 
+export function truncateForLog(text: string, limit = 1_500): string {
+  const compact = text.trim();
+  return compact.length <= limit ? compact : `${compact.slice(0, limit - 1)}…`;
+}
+
 export async function publishSlackMessage(
   api: SlackMessagingApi,
   target: SlackDeliveryTarget,
@@ -234,6 +239,7 @@ export class SlackResponder implements MessageResponder {
   }
 
   public async sendText(text: string, options?: SendOptions): Promise<void> {
+    this.#logger.info("Slack reply", { text: truncateForLog(text) });
     const chunks = splitMessageText(markdownToMrkdwn(text), slackTextLimit);
     let posted = 0;
     try {
@@ -297,6 +303,8 @@ export class SlackReplyStream implements OutboundStream {
   #closing = false;
   #completing: Promise<void> | undefined;
   #completed = false;
+  #loggedActions = 0;
+  #lastReasoning = "";
   readonly #api: SlackMessagingApi;
   readonly #channel: string;
   readonly #threadTs: string | undefined;
@@ -346,6 +354,17 @@ export class SlackReplyStream implements OutboundStream {
 
   public setProgress(progress: ProgressSnapshot): void {
     if (this.#closing || this.#completed) return;
+    // Mirror the run into stdout: every tool call once, and reasoning
+    // summaries as they change.
+    for (const action of progress.actions.slice(this.#loggedActions)) {
+      this.#logger.info("Codex tool call", { action: action.label });
+    }
+    this.#loggedActions = Math.max(this.#loggedActions, progress.actions.length);
+    const reasoning = (progress.summary ?? progress.message)?.trim();
+    if (reasoning !== undefined && reasoning.length > 0 && reasoning !== this.#lastReasoning) {
+      this.#lastReasoning = reasoning;
+      this.#logger.info("Codex reasoning", { text: truncateForLog(reasoning, 600) });
+    }
     this.#progress = progress;
     this.scheduleDraft();
   }
@@ -383,6 +402,12 @@ export class SlackReplyStream implements OutboundStream {
     this.clearTimer();
     await this.#starting?.catch(() => undefined);
     await this.#draftInFlight?.catch(() => undefined);
+    if (text.length > 0) {
+      this.#logger.info("Codex answer delivered", {
+        chars: text.length,
+        text: truncateForLog(text),
+      });
+    }
     const chunks =
       text.length === 0 ? [] : splitMessageText(markdownToMrkdwn(text), slackTextLimit);
     // Freeze the progress message without the streaming cursor. The answer
