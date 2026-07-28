@@ -39,13 +39,13 @@ const handledSubtypes = new Set([undefined, "file_share", "thread_broadcast"]);
 /**
  * Decide whether and where to handle a message event.
  *
- * DMs are always handled. In channels and group DMs the bot answers when it
- * is mentioned, or when the message continues a thread it already works in.
+ * DMs are always handled. In channels and group DMs every message for the
+ * bot needs an explicit mention — including follow-ups in a thread it
+ * already answered in — so human discussion in the thread stays untouched.
  */
 export function routeSlackMessage(
   event: SlackMessageEvent,
   botUserId: string,
-  isThreadActive: (conversationSuffix: string) => boolean,
 ): SlackIncomingRoute | undefined {
   if (!handledSubtypes.has(event.subtype)) return undefined;
   if (event.bot_id !== undefined || event.user === undefined || event.user === botUserId) {
@@ -54,11 +54,8 @@ export function routeSlackMessage(
   if (event.channel_type === "im") {
     return { conversationSuffix: "main", replyThreadTs: undefined };
   }
+  if (event.text?.includes(`<@${botUserId}>`) !== true) return undefined;
   const threadRoot = event.thread_ts ?? event.ts;
-  const mentioned = event.text?.includes(`<@${botUserId}>`) === true;
-  if (!mentioned && !(event.thread_ts !== undefined && isThreadActive(event.thread_ts))) {
-    return undefined;
-  }
   return { conversationSuffix: threadRoot, replyThreadTs: threadRoot };
 }
 

@@ -101,7 +101,7 @@ interface PendingChoice {
 }
 
 const recentEventLimit = 500;
-const activeThreadLimit = 500;
+const engagedThreadLimit = 500;
 const displayNameCacheLimit = 500;
 const membershipCacheLimit = 1_000;
 /** Deactivations and role changes must take effect without a restart. */
@@ -136,7 +136,8 @@ export class SlackChannel implements MessagingChannel {
   readonly #attachmentDirectory: string;
   readonly #logger: Logger;
   readonly #pendingChoices = new Map<string, PendingChoice>();
-  readonly #activeThreads = new Set<string>();
+  /** Threads the bot already answered in — first mentions there skip the history fetch. */
+  readonly #engagedThreads = new Set<string>();
   readonly #recentEvents = new Set<string>();
   readonly #displayNames = new Map<string, string>();
   /**
@@ -292,15 +293,11 @@ export class SlackChannel implements MessagingChannel {
     message: OutboundMessage,
   ): Promise<DeliveryReceipt> {
     const target = parseSlackDeliveryTarget(targetReference);
-    // Keep threads that receive scheduled results routable without a mention.
-    if (target.channelType !== "im" && target.threadTs !== undefined) {
-      this.rememberActiveThread(`${target.channel}:${target.threadTs}`);
-    }
     const published = await publishSlackMessage(this.#api, target, message, this.#logger);
     const primary = published[0];
     if (target.threadTs !== undefined && primary !== undefined) {
       this.#threadNotifications.set(`${target.channel}:${target.threadTs}`, primary.ts);
-      trimInsertionOrderedMap(this.#threadNotifications, activeThreadLimit);
+      trimInsertionOrderedMap(this.#threadNotifications, engagedThreadLimit);
     }
     return {
       publishedMessages: published.map((entry) => slackMessageReference(entry.channel, entry.ts)),
@@ -335,9 +332,7 @@ export class SlackChannel implements MessagingChannel {
     if (typeof event.channel !== "string" || typeof event.ts !== "string") return;
     if (this.wasRecentlyProcessed(`message:${event.channel}:${event.ts}`)) return;
 
-    const route = routeSlackMessage(event, botUserId, (threadRoot) =>
-      this.#activeThreads.has(`${event.channel}:${threadRoot}`),
-    );
+    const route = routeSlackMessage(event, botUserId);
     const sender = event.user;
     if (route === undefined || sender === undefined) return;
     if (!(await this.isUserAllowed(sender))) {
@@ -381,11 +376,11 @@ export class SlackChannel implements MessagingChannel {
         : attachments.map((attachment) => `[Attached: ${attachment.description}]`).join("\n");
     if (text.length === 0) return;
     const threadKey = `${event.channel}:${route.conversationSuffix}`;
-    const threadWasActive = this.#activeThreads.has(threadKey);
+    const threadWasEngaged = this.#engagedThreads.has(threadKey);
     if (event.channel_type !== "im") {
-      this.rememberActiveThread(threadKey);
+      this.rememberEngagedThread(threadKey);
     }
-    const contextualText = await this.withThreadContext(event, botUserId, threadWasActive, text);
+    const contextualText = await this.withThreadContext(event, botUserId, threadWasEngaged, text);
     const responder = new SlackResponder(
       this.#api,
       event.channel,
@@ -440,12 +435,12 @@ export class SlackChannel implements MessagingChannel {
   private async withThreadContext(
     event: SlackMessageEvent,
     botUserId: string,
-    threadWasActive: boolean,
+    threadWasEngaged: boolean,
     text: string,
   ): Promise<string> {
     if (
       event.channel_type === "im" ||
-      threadWasActive ||
+      threadWasEngaged ||
       event.thread_ts === undefined ||
       event.thread_ts === event.ts ||
       event.text?.includes(`<@${botUserId}>`) !== true ||
@@ -641,7 +636,7 @@ export class SlackChannel implements MessagingChannel {
     const threadRoot = payload.message?.thread_ts ?? messageTs;
     const conversationSuffix = isDirect ? "main" : threadRoot;
     const replyThreadTs = isDirect ? undefined : threadRoot;
-    if (!isDirect) this.rememberActiveThread(`${channelId}:${conversationSuffix}`);
+    if (!isDirect) this.rememberEngagedThread(`${channelId}:${conversationSuffix}`);
     const responder = new SlackResponder(
       this.#api,
       channelId,
@@ -761,10 +756,10 @@ export class SlackChannel implements MessagingChannel {
     return false;
   }
 
-  private rememberActiveThread(key: string): void {
-    this.#activeThreads.delete(key);
-    this.#activeThreads.add(key);
-    trimInsertionOrdered(this.#activeThreads, activeThreadLimit);
+  private rememberEngagedThread(key: string): void {
+    this.#engagedThreads.delete(key);
+    this.#engagedThreads.add(key);
+    trimInsertionOrdered(this.#engagedThreads, engagedThreadLimit);
   }
 }
 

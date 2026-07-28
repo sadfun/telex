@@ -10,11 +10,12 @@ What works in Slack:
 - Direct messages with the bot: send a message, watch live progress, get the
   final answer, exchange file attachments.
 - Channels and group DMs: mention the bot (`@Telex fix the build`) and it
-  answers in a thread. Follow-ups inside that thread need no further mention;
-  each thread is its own Codex conversation. When first mentioned inside an
-  existing thread, the bot reads the earlier thread messages (up to 100,
-  newest-biased) as context, so it understands the discussion it was called
-  into.
+  answers in a thread. Every message addressed to the bot needs a mention —
+  including follow-ups in the same thread — so human discussion around it
+  stays untouched. Each thread is its own Codex conversation with persistent
+  context. When first mentioned inside an existing thread, the bot reads the
+  earlier thread messages (up to 100, newest-biased) as context, so it
+  understands the discussion it was called into.
 - Approvals: when Codex asks for confirmation, the question arrives as Slack
   buttons.
 - Scheduled runs: results are delivered to the channel or thread that created
@@ -137,8 +138,9 @@ App stay off). Restart Telex and check the log for
   commands and messages from the messages tab* (the manifest above enables it,
   but workspaces occasionally need a re-toggle), then reload Slack.
 - **Channel**: invite the bot (`/invite @Telex`), then mention it:
-  `@Telex what does this repo do?`. The reply opens a thread; keep chatting in
-  the thread without mentioning it again.
+  `@Telex what does this repo do?`. The reply opens a thread; address it
+  there with a mention each time (`@Telex and now check the tests`) — the
+  thread's Codex conversation continues across mentions.
 - **Commands**: `/telex help` anywhere, or prefix a command in a mention:
   `@Telex /new`. In the bot DM, plain `/new` will not reach Telex — Slack
   intercepts everything that starts with `/` — so use `/telex new`.
@@ -154,10 +156,9 @@ App stay off). Restart Telex and check the log for
 - **Authorization**: messages, commands, and button clicks from users outside
   `SLACK_ALLOWED_USER_IDS` are ignored (and logged). Scheduled runs re-check
   the owner against the allowlist before every unattended execution.
-- **Threads after a restart**: the "this thread is active" memory is
-  in-process. After a Telex restart, mention the bot once in an existing
-  thread to reattach it; the Codex conversation itself is persisted and
-  continues.
+- **Thread context after a restart**: the "already read this thread" memory
+  is in-process, so the first mention after a Telex restart re-reads the
+  thread history. The Codex conversation itself is persisted and continues.
 - **Attachments**: inbound files are downloaded through Slack's private file
   URLs with the bot token (never sent to third-party hosts); generated files
   are uploaded back with `files.uploadV2`. Slack voice clips are transcribed
