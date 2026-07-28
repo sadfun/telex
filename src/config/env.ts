@@ -43,7 +43,10 @@ const envSchema = z.object({
 export interface SlackConfig {
   readonly botToken: string;
   readonly appToken: string;
+  /** Empty when {@link allowAllWorkspaceMembers} is on. */
   readonly allowedUserIds: ReadonlySet<string>;
+  /** `SLACK_ALLOWED_USER_IDS=*`: every regular member of the workspace. */
+  readonly allowAllWorkspaceMembers: boolean;
 }
 
 export interface TelegramConfig {
@@ -132,11 +135,22 @@ function slackConfigFromParsed(parsed: z.infer<typeof envSchema>): SlackConfig |
       "The Slack connector needs SLACK_BOT_TOKEN, SLACK_APP_TOKEN, and SLACK_ALLOWED_USER_IDS set together",
     );
   }
+  if ((parsed.SLACK_ALLOWED_USER_IDS ?? "").trim() === "*") {
+    return {
+      botToken: parsed.SLACK_BOT_TOKEN ?? "",
+      appToken: parsed.SLACK_APP_TOKEN ?? "",
+      allowedUserIds: new Set(),
+      allowAllWorkspaceMembers: true,
+    };
+  }
   const allowedUserIds = new Set(
     (parsed.SLACK_ALLOWED_USER_IDS ?? "").split(",").map((part) =>
       z
         .string()
-        .regex(/^[UW][A-Z0-9]{2,}$/u, "Slack user IDs look like U0123ABCDEF")
+        .regex(
+          /^[UW][A-Z0-9]{2,}$/u,
+          "Slack user IDs look like U0123ABCDEF, or * for every workspace member",
+        )
         .parse(part.trim().toUpperCase()),
     ),
   );
@@ -144,6 +158,7 @@ function slackConfigFromParsed(parsed: z.infer<typeof envSchema>): SlackConfig |
     botToken: parsed.SLACK_BOT_TOKEN ?? "",
     appToken: parsed.SLACK_APP_TOKEN ?? "",
     allowedUserIds,
+    allowAllWorkspaceMembers: false,
   };
 }
 

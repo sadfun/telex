@@ -85,11 +85,22 @@ settings:
   click **Install to Workspace**, and approve. Copy the **Bot User OAuth
   Token** — this is `SLACK_BOT_TOKEN`.
 
-## 3. Find your Slack user ID
+## 3. Decide who is allowed
 
-Telex answers only allowlisted users. In Slack, open your profile → **⋯ (More)**
-→ **Copy member ID**. It looks like `U0123ABCDEF`. Collect one per teammate you
-want to allow.
+Telex answers only authorized users. Two modes:
+
+- **Allowlist**: comma-separated member IDs. In Slack, open a profile →
+  **⋯ (More)** → **Copy member ID**; it looks like `U0123ABCDEF`.
+- **Whole workspace**: `SLACK_ALLOWED_USER_IDS=*` authorizes every regular
+  member of the workspace the app is installed in. Bots, deactivated
+  accounts, single/multi-channel guests, and Slack Connect participants from
+  other workspaces are still rejected (membership is verified through
+  `users.info` and cached for ten minutes, so deactivating someone in Slack
+  locks them out without a restart).
+
+Everyone shares one Telex: the same Codex account, the same workspace
+directory on the host, and the same conversation state per channel/thread.
+Open it to the whole workspace only if that is acceptable.
 
 ## 4. Configure Telex
 

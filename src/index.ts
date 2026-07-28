@@ -216,9 +216,7 @@ export async function runTelex(): Promise<TelexRunResult> {
       config.slack === undefined
         ? undefined
         : new SlackChannel(
-            config.slack.botToken,
-            config.slack.appToken,
-            config.slack.allowedUserIds,
+            config.slack,
             join(config.workspace, ".telex", "attachments"),
             logger.child({ component: "slack" }),
           );

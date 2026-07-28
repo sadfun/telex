@@ -1,6 +1,7 @@
 import { join } from "node:path";
 import { SocketModeClient } from "@slack/socket-mode";
 import { LogLevel, WebClient } from "@slack/web-api";
+import type { SlackConfig } from "../../config/env.js";
 import type {
   ChoiceOption,
   DeliveryReceipt,
@@ -14,6 +15,7 @@ import type {
 import { type Deferred, deferred } from "../../shared/async.js";
 import { errorMessage } from "../../shared/errors.js";
 import type { Logger } from "../../shared/logger.js";
+import { isWorkspaceMember } from "./authorization.js";
 import { downloadSlackFile, SlackFileDownloadError } from "./file.js";
 import { escapeSlackEntities } from "./format.js";
 import {
@@ -98,6 +100,9 @@ interface PendingChoice {
 const recentEventLimit = 500;
 const activeThreadLimit = 500;
 const displayNameCacheLimit = 500;
+const membershipCacheLimit = 1_000;
+/** Deactivations and role changes must take effect without a restart. */
+const membershipCacheTtlMs = 10 * 60 * 1_000;
 
 /** Commands that act on one conversation and therefore need a thread in channels. */
 const conversationScopedCommands = new Set(["new", "back", "stop", "schedules", "continue"]);
@@ -108,6 +113,9 @@ export class SlackChannel implements MessagingChannel {
   readonly #socket: SocketModeClient;
   readonly #api: SlackMessagingApi;
   readonly #allowedUserIds: ReadonlySet<string>;
+  readonly #allowAllWorkspaceMembers: boolean;
+  readonly #membership = new Map<string, Readonly<{ allowed: boolean; checkedAt: number }>>();
+  #botTeamId: string | undefined;
   readonly #botToken: string;
   readonly #attachmentDirectory: string;
   readonly #logger: Logger;
@@ -124,19 +132,14 @@ export class SlackChannel implements MessagingChannel {
   #handler: MessageHandler | undefined;
   #botUserId: string | undefined;
 
-  public constructor(
-    botToken: string,
-    appToken: string,
-    allowedUserIds: ReadonlySet<string>,
-    attachmentDirectory: string,
-    logger: Logger,
-  ) {
-    this.#botToken = botToken;
-    this.#allowedUserIds = allowedUserIds;
+  public constructor(config: SlackConfig, attachmentDirectory: string, logger: Logger) {
+    this.#botToken = config.botToken;
+    this.#allowedUserIds = config.allowedUserIds;
+    this.#allowAllWorkspaceMembers = config.allowAllWorkspaceMembers;
     this.#attachmentDirectory = attachmentDirectory;
     this.#logger = logger;
-    this.#web = new WebClient(botToken, { logLevel: LogLevel.ERROR });
-    this.#socket = new SocketModeClient({ appToken, logLevel: LogLevel.ERROR });
+    this.#web = new WebClient(config.botToken, { logLevel: LogLevel.ERROR });
+    this.#socket = new SocketModeClient({ appToken: config.appToken, logLevel: LogLevel.ERROR });
     this.#api = webMessagingApi(this.#web);
     this.#socket.on("message", (envelope: SocketEnvelope) => {
       void this.withAck(envelope, async () => {
@@ -162,19 +165,56 @@ export class SlackChannel implements MessagingChannel {
       throw new Error("Slack auth.test did not identify the bot user");
     }
     this.#botUserId = auth.user_id;
+    this.#botTeamId = auth.team_id;
+    if (this.#allowAllWorkspaceMembers && this.#botTeamId === undefined) {
+      throw new Error("Slack auth.test did not identify the workspace for member authorization");
+    }
     this.#logger.info("Slack bot connected through Socket Mode", {
       botUserId: auth.user_id,
       team: auth.team ?? "unknown",
+      authorization: this.#allowAllWorkspaceMembers ? "workspace-members" : "allowlist",
     });
     await this.#socket.start();
   }
 
-  public isAuthorized(principal: ProviderReference): boolean {
-    return (
-      principal.provider === this.name &&
-      principal.resource === "user" &&
-      this.#allowedUserIds.has(principal.id)
-    );
+  public isAuthorized(principal: ProviderReference): boolean | Promise<boolean> {
+    if (principal.provider !== this.name || principal.resource !== "user") return false;
+    return this.isUserAllowed(principal.id);
+  }
+
+  private isUserAllowed(userId: string): boolean | Promise<boolean> {
+    if (!this.#allowAllWorkspaceMembers) return this.#allowedUserIds.has(userId);
+    const cached = this.#membership.get(userId);
+    if (cached !== undefined && Date.now() - cached.checkedAt < membershipCacheTtlMs) {
+      return cached.allowed;
+    }
+    return this.checkWorkspaceMembership(userId);
+  }
+
+  private async checkWorkspaceMembership(userId: string): Promise<boolean> {
+    const botTeamId = this.#botTeamId;
+    if (botTeamId === undefined) return false;
+    let allowed = false;
+    try {
+      const response = await this.#web.users.info({ user: userId });
+      allowed = isWorkspaceMember(response.user, botTeamId);
+    } catch (error) {
+      // Fail closed: an unknown user (e.g. a Slack Connect outsider the bot
+      // token cannot see) is not a workspace member.
+      this.#logger.debug("Slack membership lookup failed", {
+        userId,
+        error: errorMessage(error),
+      });
+      return false;
+    }
+    this.#membership.delete(userId);
+    this.#membership.set(userId, { allowed, checkedAt: Date.now() });
+    while (this.#membership.size > membershipCacheLimit) {
+      const oldest = this.#membership.keys().next().value;
+      if (oldest === undefined) break;
+      this.#membership.delete(oldest);
+    }
+    return allowed;
   }
 
   public async stop(): Promise<void> {
@@ -241,7 +281,7 @@ export class SlackChannel implements MessagingChannel {
     );
     const sender = event.user;
     if (route === undefined || sender === undefined) return;
-    if (!this.#allowedUserIds.has(sender)) {
+    if (!(await this.isUserAllowed(sender))) {
       this.#logger.warn("Ignored Slack message from unauthorized user", { userId: sender });
       return;
     }
@@ -340,7 +380,7 @@ export class SlackChannel implements MessagingChannel {
         await this.respondThroughWebhook(payload.response_url, text);
       });
     };
-    if (!this.#allowedUserIds.has(userId)) {
+    if (!(await this.isUserAllowed(userId))) {
       this.#logger.warn("Ignored Slack slash command from unauthorized user", { userId });
       await this.respondThroughWebhook(
         payload.response_url,
@@ -409,7 +449,7 @@ export class SlackChannel implements MessagingChannel {
     const actionId = action?.action_id;
     if (action === undefined || actionId === undefined || userId === undefined) return;
     if (actionId === "telex_link") return;
-    if (!this.#allowedUserIds.has(userId)) {
+    if (!(await this.isUserAllowed(userId))) {
       this.#logger.warn("Ignored Slack interaction from unauthorized user", { userId });
       return;
     }

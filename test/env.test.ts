@@ -69,6 +69,26 @@ describe("loadAppConfig", () => {
     expect(config.slack).toBeDefined();
   });
 
+  it("supports * to allow every workspace member on Slack", () => {
+    const config = loadAppConfig({
+      SLACK_BOT_TOKEN: "xoxb-123",
+      SLACK_APP_TOKEN: "xapp-1",
+      SLACK_ALLOWED_USER_IDS: "*",
+    });
+    expect(config.slack?.allowAllWorkspaceMembers).toBe(true);
+    expect([...(config.slack?.allowedUserIds ?? ["sentinel"])]).toEqual([]);
+  });
+
+  it("rejects mixing * with explicit Slack user IDs", () => {
+    expect(() =>
+      loadAppConfig({
+        SLACK_BOT_TOKEN: "xoxb-123",
+        SLACK_APP_TOKEN: "xapp-1",
+        SLACK_ALLOWED_USER_IDS: "*,U0123ABC",
+      }),
+    ).toThrow();
+  });
+
   it("rejects a configuration with no connectors at all", () => {
     expect(() => loadAppConfig({})).toThrow(/at least one connector/);
   });
