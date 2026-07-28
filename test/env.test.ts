@@ -54,4 +54,47 @@ describe("loadAppConfig", () => {
       }),
     ).toThrow();
   });
+
+  it("leaves the Slack connector disabled by default", () => {
+    expect(loadAppConfig(required).slack).toBeUndefined();
+  });
+
+  it("parses complete Slack settings", () => {
+    const config = loadAppConfig({
+      ...required,
+      SLACK_BOT_TOKEN: "xoxb-123",
+      SLACK_APP_TOKEN: "xapp-1-A1-123-abc",
+      SLACK_ALLOWED_USER_IDS: "U0123ABC, w0999xyz",
+    });
+    expect(config.slack).toMatchObject({
+      botToken: "xoxb-123",
+      appToken: "xapp-1-A1-123-abc",
+    });
+    expect([...(config.slack?.allowedUserIds ?? [])]).toEqual(["U0123ABC", "W0999XYZ"]);
+  });
+
+  it("rejects partial Slack settings", () => {
+    expect(() => loadAppConfig({ ...required, SLACK_BOT_TOKEN: "xoxb-123" })).toThrow(
+      /set together/,
+    );
+  });
+
+  it("rejects Slack tokens with the wrong prefix and malformed user IDs", () => {
+    expect(() =>
+      loadAppConfig({
+        ...required,
+        SLACK_BOT_TOKEN: "xoxp-user-token",
+        SLACK_APP_TOKEN: "xapp-1",
+        SLACK_ALLOWED_USER_IDS: "U0123ABC",
+      }),
+    ).toThrow();
+    expect(() =>
+      loadAppConfig({
+        ...required,
+        SLACK_BOT_TOKEN: "xoxb-123",
+        SLACK_APP_TOKEN: "xapp-1",
+        SLACK_ALLOWED_USER_IDS: "not-a-user",
+      }),
+    ).toThrow();
+  });
 });

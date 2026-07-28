@@ -12,6 +12,7 @@ Telex supports private conversations, scheduled runs, automatic Telegram voice-m
 - A Telegram bot token from [@BotFather](https://t.me/BotFather)
 - The numeric Telegram user IDs allowed to use the bot
 - Optionally, a public HTTPS URL for the settings Mini App; without one, Telex exposes it through an automatic quick tunnel
+- Optionally, a Slack app for the [Slack connector](docs/slack.md)
 
 In BotFather, enable guest mode if the bot should answer mentions in group chats. Guest replies are intentionally one-shot: they do not persist a thread, cannot answer interactive approval prompts, and cannot upload newly generated local files. When a guest result includes a file, Telex explains that file attachments require a direct bot chat instead of silently omitting it.
 
@@ -169,6 +170,12 @@ Every turn also carries connector-derived application context separately from th
 In the other direction, Telex uploads completed Codex image-generation results and regular workspace files explicitly linked in the final answer. JPEG and PNG images, GIF animations, MP4 videos, and MP3 or M4A audio use Telegram's native media methods; everything else is sent as a document. Native-media failures retry as documents, individual upload failures remain visible, and Telex snapshots canonically validated files before upload. Markdown links are limited to the configured workspace; structured image-generation outputs are also accepted from Codex's dedicated generated-image directory. Ordinary source edits, code examples, arbitrary paths, and unlinked files are never uploaded automatically.
 
 Telegram's hosted Bot API only allows bots to download files up to 20 MB and upload general files up to 50 MB. Telex still forwards the file metadata and a clear limitation notice when a download or upload is unavailable. Set `TELEGRAM_API_BASE` to a [local Bot API server](https://core.telegram.org/bots/api#using-a-local-bot-api-server) to remove the download limit and support larger uploads.
+
+## Slack connector
+
+Telex can additionally bridge Codex into Slack over [Socket Mode](https://docs.slack.dev/apis/events-api/using-socket-mode) — no public URL required. Direct messages stream progress like the Telegram private chat; in channels the bot answers mentions in threads, with each thread acting as its own Codex conversation. Approvals arrive as buttons, files flow in both directions, and commands are available as `/telex <subcommand>` (Slack reserves bare `/new`-style messages for its own slash-command system). Scheduled runs created from Slack notify back into the originating channel or thread.
+
+Set `SLACK_BOT_TOKEN`, `SLACK_APP_TOKEN`, and `SLACK_ALLOWED_USER_IDS` together to enable it. [docs/slack.md](docs/slack.md) walks through creating the Slack app from a pasteable manifest, collecting both tokens, and first steps. The settings Mini App stays Telegram-only because it authenticates through Telegram `initData`.
 
 ## Scheduled runs
 

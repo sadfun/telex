@@ -24,6 +24,9 @@ const envSchema = z.object({
   TELEGRAM_ALLOWED_USER_IDS: z.string().min(1),
   TELEGRAM_API_BASE: z.url().default("https://api.telegram.org"),
   TELEGRAM_POLL_TIMEOUT: z.coerce.number().int().min(1).max(50).default(30),
+  SLACK_BOT_TOKEN: z.string().startsWith("xoxb-").optional(),
+  SLACK_APP_TOKEN: z.string().startsWith("xapp-").optional(),
+  SLACK_ALLOWED_USER_IDS: z.string().min(1).optional(),
   PUBLIC_URL: z
     .url()
     .refine((value) => new URL(value).protocol === "https:", "PUBLIC_URL must use HTTPS")
@@ -37,11 +40,18 @@ const envSchema = z.object({
   LOG_LEVEL: z.enum(["debug", "info", "warn", "error"]).default("info"),
 });
 
+export interface SlackConfig {
+  readonly botToken: string;
+  readonly appToken: string;
+  readonly allowedUserIds: ReadonlySet<string>;
+}
+
 export interface AppConfig {
   readonly telegramToken: string;
   readonly allowedUserIds: ReadonlySet<number>;
   readonly telegramApiBase: string;
   readonly telegramPollTimeout: number;
+  readonly slack: SlackConfig | undefined;
   readonly publicUrl: string | undefined;
   readonly tunnelMode: "auto" | "off";
   readonly dataDirectory: string;
@@ -77,6 +87,7 @@ export function loadAppConfig(environment: NodeJS.ProcessEnv = process.env): App
     allowedUserIds,
     telegramApiBase: parsed.TELEGRAM_API_BASE.replace(/\/$/, ""),
     telegramPollTimeout: parsed.TELEGRAM_POLL_TIMEOUT,
+    slack: slackConfigFromParsed(parsed),
     publicUrl: parsed.PUBLIC_URL?.replace(/\/$/, ""),
     tunnelMode: parsed.TELEX_TUNNEL,
     dataDirectory: resolve(parsed.TELEX_DATA_DIR),
@@ -90,6 +101,29 @@ export function loadAppConfig(environment: NodeJS.ProcessEnv = process.env): App
 
 export function loadUpdateConfig(environment: NodeJS.ProcessEnv = process.env): UpdateConfig {
   return updateConfigFromParsed(updateEnvSchema.parse(environment));
+}
+
+function slackConfigFromParsed(parsed: z.infer<typeof envSchema>): SlackConfig | undefined {
+  const fields = [parsed.SLACK_BOT_TOKEN, parsed.SLACK_APP_TOKEN, parsed.SLACK_ALLOWED_USER_IDS];
+  if (fields.every((field) => field === undefined)) return undefined;
+  if (fields.some((field) => field === undefined)) {
+    throw new Error(
+      "The Slack connector needs SLACK_BOT_TOKEN, SLACK_APP_TOKEN, and SLACK_ALLOWED_USER_IDS set together",
+    );
+  }
+  const allowedUserIds = new Set(
+    (parsed.SLACK_ALLOWED_USER_IDS ?? "").split(",").map((part) =>
+      z
+        .string()
+        .regex(/^[UW][A-Z0-9]{2,}$/u, "Slack user IDs look like U0123ABCDEF")
+        .parse(part.trim().toUpperCase()),
+    ),
+  );
+  return {
+    botToken: parsed.SLACK_BOT_TOKEN ?? "",
+    appToken: parsed.SLACK_APP_TOKEN ?? "",
+    allowedUserIds,
+  };
 }
 
 function updateConfigFromParsed(parsed: z.infer<typeof updateEnvSchema>): UpdateConfig {

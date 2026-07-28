@@ -2,6 +2,7 @@ import { access, readFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { AutomationStore, ScheduledRunsEngine } from "./automations/index.js";
+import { SlackChannel } from "./channels/slack/channel.js";
 import { TelegramChannel } from "./channels/telegram/channel.js";
 import { CodexConfigService } from "./codex/config-service.js";
 import { CodexAppServer } from "./codex/rpc.js";
@@ -204,10 +205,20 @@ export async function runTelex(): Promise<TelexRunResult> {
       logger.child({ component: "telegram" }),
       publicUrl === undefined ? undefined : `${publicUrl}/miniapp`,
     );
+    const slack =
+      config.slack === undefined
+        ? undefined
+        : new SlackChannel(
+            config.slack.botToken,
+            config.slack.appToken,
+            config.slack.allowedUserIds,
+            join(config.workspace, ".telex", "attachments"),
+            logger.child({ component: "slack" }),
+          );
     const scheduledRuns = new ScheduledRunsEngine({
       store: automations,
       codex,
-      channels: [telegram],
+      channels: slack === undefined ? [telegram] : [telegram, slack],
       workspace: config.workspace,
       logger: logger.child({ component: "scheduled-runs" }),
     });
@@ -236,6 +247,10 @@ export async function runTelex(): Promise<TelexRunResult> {
     );
     resources.push(telegram);
     await telegram.start(bridge.handleMessage);
+    if (slack !== undefined) {
+      resources.push(slack);
+      await slack.start(bridge.handleMessage);
+    }
     resources.push(scheduledRuns);
     await scheduledRuns.start();
 
@@ -244,6 +259,7 @@ export async function runTelex(): Promise<TelexRunResult> {
       codexVersion: pinnedVersion,
       workspace: config.workspace,
       miniApp: `${config.host}:${config.port}`,
+      slack: slack === undefined ? "disabled" : "enabled",
     });
 
     if (config.updateMode !== "off") {
