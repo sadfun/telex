@@ -1,9 +1,11 @@
 import { describe, expect, it } from "vitest";
 import {
   describeSlackFile,
+  formatThreadContext,
   normalizeSlackMessage,
   routeSlackMessage,
   type SlackMessageEvent,
+  type SlackThreadMessage,
   slackAttachmentKind,
 } from "../src/channels/slack/message.js";
 
@@ -112,6 +114,46 @@ describe("normalizeSlackMessage", () => {
   it("keeps other user mentions readable", () => {
     const normalized = normalizeSlackMessage(event({ text: "ask <@U999>" }), botUserId);
     expect(normalized.text).toBe("ask @U999");
+  });
+});
+
+describe("formatThreadContext", () => {
+  const nameOf = (message: SlackThreadMessage): string => message.user ?? "bot";
+
+  it("renders earlier messages and excludes the trigger", () => {
+    const context = formatThreadContext(
+      [
+        { ts: "1", user: "U1", text: "refund request from &lt;user&gt;" },
+        {
+          ts: "2",
+          user: "U2",
+          text: "checking mixpanel",
+          files: [{ id: "F1", name: "report.csv" }],
+        },
+        { ts: "3", user: "U3", text: "<@U0BOT> collect the facts" },
+      ],
+      "3",
+      nameOf,
+    );
+    expect(context).toBe(
+      "U1: refund request from <user>\nU2: checking mixpanel [attached: report.csv]",
+    );
+  });
+
+  it("returns undefined when nothing besides the trigger exists", () => {
+    expect(formatThreadContext([{ ts: "3", user: "U1", text: "hi" }], "3", nameOf)).toBeUndefined();
+  });
+
+  it("drops the oldest messages over the character budget", () => {
+    const messages: SlackThreadMessage[] = [
+      { ts: "1", user: "U1", text: "x".repeat(80) },
+      { ts: "2", user: "U2", text: "y".repeat(80) },
+      { ts: "3", user: "U3", text: "z".repeat(80) },
+    ];
+    const context = formatThreadContext(messages, "9", nameOf, 200);
+    expect(context).toContain("[1 earlier messages omitted]");
+    expect(context).not.toContain("x".repeat(80));
+    expect(context).toContain("z".repeat(80));
   });
 });
 

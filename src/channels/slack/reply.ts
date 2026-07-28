@@ -11,6 +11,7 @@ import type {
 import type { Logger } from "../../shared/logger.js";
 import { formatThinkingBlock, splitMessageText } from "../progress.js";
 import { escapeSlackEntities, markdownToMrkdwn } from "./format.js";
+import type { SlackThreadMessage } from "./message.js";
 import type { SlackDeliveryTarget } from "./references.js";
 
 /**
@@ -69,6 +70,11 @@ export interface SlackMessagingApi {
   updateMessage(options: SlackUpdateOptions): Promise<void>;
   uploadFile(options: SlackUploadOptions): Promise<void>;
   postEphemeral(options: SlackEphemeralOptions): Promise<void>;
+  fetchThreadReplies(
+    channel: string,
+    threadTs: string,
+    limit: number,
+  ): Promise<readonly SlackThreadMessage[]>;
 }
 
 export type SlackChoiceRequester = (

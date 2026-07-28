@@ -11,7 +11,10 @@ What works in Slack:
   final answer, exchange file attachments.
 - Channels and group DMs: mention the bot (`@Telex fix the build`) and it
   answers in a thread. Follow-ups inside that thread need no further mention;
-  each thread is its own Codex conversation.
+  each thread is its own Codex conversation. When first mentioned inside an
+  existing thread, the bot reads the earlier thread messages (up to 100,
+  newest-biased) as context, so it understands the discussion it was called
+  into.
 - Approvals: when Codex asks for confirmation, the question arrives as Slack
   buttons.
 - Scheduled runs: results are delivered to the channel or thread that created

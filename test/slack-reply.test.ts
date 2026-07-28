@@ -46,6 +46,9 @@ function fakeApi(overrides: Partial<SlackMessagingApi> = {}): {
     async postEphemeral(options) {
       calls.ephemerals.push(options);
     },
+    async fetchThreadReplies() {
+      return [];
+    },
     ...overrides,
   };
   return { api, calls };

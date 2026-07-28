@@ -21,9 +21,11 @@ import { downloadSlackFile, SlackFileDownloadError } from "./file.js";
 import { escapeSlackEntities } from "./format.js";
 import {
   describeSlackFile,
+  formatThreadContext,
   normalizeSlackMessage,
   routeSlackMessage,
   type SlackMessageEvent,
+  type SlackThreadMessage,
   slackAttachmentKind,
 } from "./message.js";
 import {
@@ -378,9 +380,12 @@ export class SlackChannel implements MessagingChannel {
         ? caption
         : attachments.map((attachment) => `[Attached: ${attachment.description}]`).join("\n");
     if (text.length === 0) return;
+    const threadKey = `${event.channel}:${route.conversationSuffix}`;
+    const threadWasActive = this.#activeThreads.has(threadKey);
     if (event.channel_type !== "im") {
-      this.rememberActiveThread(`${event.channel}:${route.conversationSuffix}`);
+      this.rememberActiveThread(threadKey);
     }
+    const contextualText = await this.withThreadContext(event, botUserId, threadWasActive, text);
     const responder = new SlackResponder(
       this.#api,
       event.channel,
@@ -415,7 +420,7 @@ export class SlackChannel implements MessagingChannel {
         id: sender,
         displayName: await this.displayName(sender),
       },
-      text,
+      text: contextualText,
       attachments,
       responder,
     };
@@ -424,6 +429,56 @@ export class SlackChannel implements MessagingChannel {
     } catch (error) {
       this.#logger.error("Slack message handler failed", error, { messageTs: inbound.id });
       await responder.sendText(`Bridge error: ${errorMessage(error)}`).catch(() => undefined);
+    }
+  }
+
+  /**
+   * A first mention inside an existing thread calls the bot into a running
+   * discussion; fetch the earlier messages so Codex sees what it is about.
+   * Commands stay bare — a context prefix would defeat command parsing.
+   */
+  private async withThreadContext(
+    event: SlackMessageEvent,
+    botUserId: string,
+    threadWasActive: boolean,
+    text: string,
+  ): Promise<string> {
+    if (
+      event.channel_type === "im" ||
+      threadWasActive ||
+      event.thread_ts === undefined ||
+      event.thread_ts === event.ts ||
+      event.text?.includes(`<@${botUserId}>`) !== true ||
+      parseTextCommand(text) !== undefined
+    ) {
+      return text;
+    }
+    try {
+      const replies = await this.#api.fetchThreadReplies(event.channel, event.thread_ts, 100);
+      const names = new Map<string, string>();
+      for (const message of replies) {
+        if (message.user !== undefined && !names.has(message.user)) {
+          names.set(
+            message.user,
+            message.user === botUserId ? "Telex (this bot)" : await this.displayName(message.user),
+          );
+        }
+      }
+      const context = formatThreadContext(replies, event.ts, (message) =>
+        message.user !== undefined
+          ? (names.get(message.user) ?? message.user)
+          : message.bot_id !== undefined
+            ? "bot"
+            : "unknown",
+      );
+      if (context === undefined) return text;
+      return `[Context — earlier messages in this Slack thread:]\n${context}\n[End of thread context]\n\n${text}`;
+    } catch (error) {
+      this.#logger.warn("Could not fetch Slack thread context", {
+        threadTs: event.thread_ts,
+        error: errorMessage(error),
+      });
+      return text;
     }
   }
 
@@ -755,6 +810,10 @@ function webMessagingApi(web: WebClient): SlackMessagingApi {
         user: options.user,
         text: options.text,
       });
+    },
+    async fetchThreadReplies(channel, threadTs, limit) {
+      const result = await web.conversations.replies({ channel, ts: threadTs, limit });
+      return (result.messages ?? []) as unknown as readonly SlackThreadMessage[];
     },
   };
 }

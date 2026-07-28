@@ -92,6 +92,9 @@ function fakeUi(read = vi.fn(async () => snapshot()), update = vi.fn(async () =>
     },
     async uploadFile() {},
     async postEphemeral() {},
+    async fetchThreadReplies() {
+      return [];
+    },
   };
   const ui = new SlackConfigUi(api, { read, update }, new Logger("error"));
   return { ui, posts, updates, read, update };

@@ -80,6 +80,47 @@ export function normalizeSlackMessage(
   };
 }
 
+/** Subset of a `conversations.replies` entry relevant to thread context. */
+export interface SlackThreadMessage {
+  readonly user?: string;
+  readonly bot_id?: string;
+  readonly text?: string;
+  readonly ts: string;
+  readonly files?: readonly SlackFile[];
+}
+
+/**
+ * Render the earlier messages of a thread as context for Codex, oldest first.
+ * The triggering message itself is excluded; when the thread exceeds the
+ * character budget the oldest messages are dropped.
+ */
+export function formatThreadContext(
+  messages: readonly SlackThreadMessage[],
+  triggerTs: string,
+  nameOf: (message: SlackThreadMessage) => string,
+  characterBudget = 8_000,
+): string | undefined {
+  const lines: string[] = [];
+  for (const message of messages) {
+    if (message.ts === triggerTs) continue;
+    const text = mrkdwnToPlainText(message.text ?? "").trim();
+    const attachments = (message.files ?? [])
+      .map((file) => `[attached: ${file.name ?? file.title ?? "file"}]`)
+      .join(" ");
+    const body = [text, attachments].filter((part) => part.length > 0).join(" ");
+    if (body.length === 0) continue;
+    lines.push(`${nameOf(message)}: ${body}`);
+  }
+  if (lines.length === 0) return undefined;
+  let dropped = 0;
+  while (lines.length > 1 && lines.join("\n").length > characterBudget) {
+    lines.shift();
+    dropped += 1;
+  }
+  const parts = dropped === 0 ? lines : [`[${dropped} earlier messages omitted]`, ...lines];
+  return parts.join("\n");
+}
+
 export function describeSlackFile(file: SlackFile): string {
   const name = file.name ?? file.title ?? "attachment";
   const metadata = [
