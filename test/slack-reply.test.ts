@@ -7,6 +7,7 @@ import type {
   SlackUploadOptions,
 } from "../src/channels/slack/reply.js";
 import {
+  choicePromptText,
   publishSlackMessage,
   SlackReplyStream,
   SlackResponder,
@@ -114,6 +115,26 @@ describe("SlackResponder", () => {
       text: "hello",
     });
   });
+
+  it("sends only unposted chunks through the webhook fallback", async () => {
+    let attempts = 0;
+    const { api, calls } = fakeApi({
+      postMessage: async (options) => {
+        attempts += 1;
+        if (attempts > 1) throw new Error("rate_limited");
+        calls.posts.push(options);
+        return "1700.1";
+      },
+    });
+    const fetchMock = vi.fn<typeof fetch>(async () => new Response("ok", { status: 200 }));
+    const text = `${"a".repeat(12_500)}\n${"b".repeat(300)}`;
+    await responder(api, "https://hooks.slack.com/respond", fetchMock).sendText(text);
+    expect(calls.posts).toHaveLength(1);
+    expect(calls.posts[0]?.text).toBe("a".repeat(12_000));
+    const [, init] = fetchMock.mock.calls[0] ?? [];
+    const body = JSON.parse(String(init?.body)) as { text: string };
+    expect(body.text).toBe(`${"a".repeat(500)}\n${"b".repeat(300)}`);
+  });
 });
 
 describe("SlackReplyStream", () => {
@@ -189,6 +210,23 @@ describe("SlackReplyStream", () => {
     expect(calls.uploads[0]).toMatchObject({ filename: "good.txt", threadTs: "1699.5" });
     const notice = calls.posts.at(-1);
     expect(notice?.text).toContain("bad.bin");
+  });
+});
+
+describe("choicePromptText", () => {
+  it("escapes Slack entities in the prompt and option details", () => {
+    const text = choicePromptText("Codex wants to run: sort data.txt > out.txt", [
+      { id: "approve", label: "Approve", description: "runs cat <file> & more" },
+    ]);
+    expect(text).toBe(
+      "Codex wants to run: sort data.txt &gt; out.txt\n\nApprove: runs cat &lt;file&gt; &amp; more",
+    );
+  });
+
+  it("truncates very long prompts to Slack's section limit", () => {
+    const text = choicePromptText("p".repeat(4_000), []);
+    expect(text.length).toBeLessThanOrEqual(3_000);
+    expect(text.endsWith("…")).toBe(true);
   });
 });
 

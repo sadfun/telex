@@ -15,6 +15,7 @@ import { type Deferred, deferred } from "../../shared/async.js";
 import { errorMessage } from "../../shared/errors.js";
 import type { Logger } from "../../shared/logger.js";
 import { downloadSlackFile, SlackFileDownloadError } from "./file.js";
+import { escapeSlackEntities } from "./format.js";
 import {
   describeSlackFile,
   normalizeSlackMessage,
@@ -28,6 +29,7 @@ import {
   slackMessageReference,
 } from "./references.js";
 import {
+  choicePromptText,
   decodeSlackCommandValue,
   publishSlackMessage,
   type SlackBlock,
@@ -51,6 +53,7 @@ export const slackSlashCommandHelp = [
 
 interface SocketEnvelope {
   readonly ack: (response?: unknown) => Promise<void>;
+  readonly envelope_id?: string;
   readonly body?: unknown;
   readonly event?: unknown;
 }
@@ -96,6 +99,9 @@ const recentEventLimit = 500;
 const activeThreadLimit = 500;
 const displayNameCacheLimit = 500;
 
+/** Commands that act on one conversation and therefore need a thread in channels. */
+const conversationScopedCommands = new Set(["new", "back", "stop", "schedules", "continue"]);
+
 export class SlackChannel implements MessagingChannel {
   public readonly name = "slack";
   readonly #web: WebClient;
@@ -109,6 +115,12 @@ export class SlackChannel implements MessagingChannel {
   readonly #activeThreads = new Set<string>();
   readonly #recentEvents = new Set<string>();
   readonly #displayNames = new Map<string, string>();
+  /**
+   * Thread root → ts of the latest scheduled-run notification published there.
+   * Slack replies in a thread reference only the root, so this restores the
+   * notification message for reply-context lookups.
+   */
+  readonly #threadNotifications = new Map<string, string>();
   #handler: MessageHandler | undefined;
   #botUserId: string | undefined;
 
@@ -181,7 +193,16 @@ export class SlackChannel implements MessagingChannel {
     message: OutboundMessage,
   ): Promise<DeliveryReceipt> {
     const target = parseSlackDeliveryTarget(targetReference);
+    // Keep threads that receive scheduled results routable without a mention.
+    if (target.channelType !== "im" && target.threadTs !== undefined) {
+      this.rememberActiveThread(`${target.channel}:${target.threadTs}`);
+    }
     const published = await publishSlackMessage(this.#api, target, message, this.#logger);
+    const primary = published[0];
+    if (target.threadTs !== undefined && primary !== undefined) {
+      this.#threadNotifications.set(`${target.channel}:${target.threadTs}`, primary.ts);
+      trimInsertionOrderedMap(this.#threadNotifications, activeThreadLimit);
+    }
     return {
       publishedMessages: published.map((entry) => slackMessageReference(entry.channel, entry.ts)),
     };
@@ -197,6 +218,10 @@ export class SlackChannel implements MessagingChannel {
         error: errorMessage(error),
       });
     }
+    // A dropped connection can redeliver an envelope whose ack was lost;
+    // slash commands and button clicks must not execute twice.
+    const envelopeId = envelope.envelope_id;
+    if (envelopeId !== undefined && this.wasRecentlyProcessed(`envelope:${envelopeId}`)) return;
     try {
       await work();
     } catch (error) {
@@ -248,7 +273,13 @@ export class SlackChannel implements MessagingChannel {
       }
     }
 
-    const text = [normalized.text, ...failures].filter((part) => part.length > 0).join("\n\n");
+    const caption = [normalized.text, ...failures].filter((part) => part.length > 0).join("\n\n");
+    // A bare file upload has no text; describe the attachments so the message
+    // still reaches Codex instead of being dropped after the download.
+    const text =
+      caption.length > 0
+        ? caption
+        : attachments.map((attachment) => `[Attached: ${attachment.description}]`).join("\n");
     if (text.length === 0) return;
     if (event.channel_type !== "im") {
       this.rememberActiveThread(`${event.channel}:${route.conversationSuffix}`);
@@ -271,9 +302,18 @@ export class SlackChannel implements MessagingChannel {
         deliveryTarget: slackDeliveryTarget(event.channel, event.channel_type, route.replyThreadTs),
       },
       reference: slackMessageReference(event.channel, event.ts),
+      // Slack threads are flat: a reply references the thread root, not the
+      // message being answered. When a scheduled-run notification lives in
+      // this thread, point replyTo at it so its stored context resolves.
       ...(event.thread_ts === undefined || event.thread_ts === event.ts
         ? {}
-        : { replyTo: slackMessageReference(event.channel, event.thread_ts) }),
+        : {
+            replyTo: slackMessageReference(
+              event.channel,
+              this.#threadNotifications.get(`${event.channel}:${event.thread_ts}`) ??
+                event.thread_ts,
+            ),
+          }),
       sender: {
         id: sender,
         displayName: await this.displayName(sender),
@@ -311,8 +351,19 @@ export class SlackChannel implements MessagingChannel {
 
     const [first, ...restParts] = (payload.text ?? "").trim().split(/\s+/u);
     const name = (first ?? "").toLowerCase();
-    if (name.length === 0 || !/^[a-z][a-z0-9_]*$/u.test(name)) {
+    if (name.length === 0 || name === "help" || !/^[a-z][a-z0-9_]*$/u.test(name)) {
+      // The bridge's generic help lists bare /commands, which Slack reserves
+      // for its own slash-command system; answer with Slack-shaped help.
       await respondEphemerally(`Telex commands:\n${slackSlashCommandHelp}`);
+      return;
+    }
+    const isDirect = payload.channel_name === "directmessage";
+    if (!isDirect && conversationScopedCommands.has(name)) {
+      // In channels every thread is its own conversation, and a slash command
+      // carries no thread information, so these commands cannot pick a target.
+      await respondEphemerally(
+        `In channels each thread is its own Codex conversation, so \`/telex ${name}\` cannot tell which one you mean. Mention the bot inside the thread instead (\`@Telex /${name}\`), or run it in a direct message with the bot.`,
+      );
       return;
     }
     const command = { name, args: restParts.join(" ") };
@@ -330,7 +381,7 @@ export class SlackChannel implements MessagingChannel {
       address: {
         channel: this.name,
         key: `slack:${channelId}:main`,
-        isPrivate: payload.channel_name === "directmessage",
+        isPrivate: isDirect,
         isGuest: false,
       },
       sender: {
@@ -398,7 +449,7 @@ export class SlackChannel implements MessagingChannel {
       .updateMessage({
         channel: pending.channel,
         ts: pending.messageTs,
-        text: `${pending.baseText}\n\n→ ${selected.label}`,
+        text: `${pending.baseText}\n\n→ ${escapeSlackEntities(selected.label)}`,
         blocks: [],
       })
       .catch(() => undefined);
@@ -465,12 +516,7 @@ export class SlackChannel implements MessagingChannel {
   ): Promise<string> => {
     if (options.length === 0) return "decline";
     const token = crypto.randomUUID().replaceAll("-", "").slice(0, 16);
-    const details = options
-      .filter((option) => option.description !== undefined)
-      .map((option) => `${option.label}: ${option.description}`)
-      .join("\n");
-    const body = details.length === 0 ? prompt : `${prompt}\n\n${details}`;
-    const baseText = body.length <= 3_000 ? body : `${body.slice(0, 2_999)}…`;
+    const baseText = choicePromptText(prompt, options);
     const blocks: readonly SlackBlock[] = [
       { type: "section", text: { type: "mrkdwn", text: baseText } },
       {
@@ -610,5 +656,13 @@ function trimInsertionOrdered(set: Set<string>, limit: number): void {
     const oldest = set.values().next().value;
     if (oldest === undefined) return;
     set.delete(oldest);
+  }
+}
+
+function trimInsertionOrderedMap(map: Map<string, string>, limit: number): void {
+  while (map.size > limit) {
+    const oldest = map.keys().next().value;
+    if (oldest === undefined) return;
+    map.delete(oldest);
   }
 }

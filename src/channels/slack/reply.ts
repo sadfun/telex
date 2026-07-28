@@ -74,6 +74,20 @@ export type SlackChoiceRequester = (
   options: readonly ChoiceOption[],
 ) => Promise<string>;
 
+/**
+ * Render an approval prompt for a Slack section block. The prompt and option
+ * details are Codex-controlled free text, so Slack entities are escaped —
+ * otherwise `<command>` fragments vanish and `<!channel>` would ping everyone.
+ */
+export function choicePromptText(prompt: string, options: readonly ChoiceOption[]): string {
+  const details = options
+    .filter((option) => option.description !== undefined)
+    .map((option) => `${option.label}: ${option.description}`)
+    .join("\n");
+  const body = escapeSlackEntities(details.length === 0 ? prompt : `${prompt}\n\n${details}`);
+  return body.length <= 3_000 ? body : `${body.slice(0, 2_999)}…`;
+}
+
 export function decodeSlackCommandValue(
   value: string,
 ): Readonly<{ name: string; args: string }> | undefined {
@@ -210,6 +224,7 @@ export class SlackResponder implements MessageResponder {
 
   public async sendText(text: string, options?: SendOptions): Promise<void> {
     const chunks = splitMessageText(markdownToMrkdwn(text), slackTextLimit);
+    let posted = 0;
     try {
       for (const chunk of chunks) {
         await this.#api.postMessage({
@@ -217,12 +232,14 @@ export class SlackResponder implements MessageResponder {
           text: chunk,
           ...threadOption(this.#threadTs),
         });
+        posted += 1;
       }
     } catch (error) {
       if (this.#fallbackWebhookUrl === undefined) throw error;
       // Slash commands can arrive from channels the bot is not a member of;
-      // their response webhook still accepts an ephemeral reply.
-      await this.respondThroughWebhook(chunks.join("\n\n"));
+      // their response webhook still accepts an ephemeral reply. Deliver only
+      // what has not already been posted.
+      await this.respondThroughWebhook(chunks.slice(posted).join("\n\n"));
       return;
     }
     const blocks = urlButtonBlocks(options);
@@ -495,7 +512,9 @@ async function sendSlackAttachments(
   }
   if (failed.length === 0) return timestamps;
 
-  const notice = `Could not send ${failed.join(", ")} as ${failed.length === 1 ? "an attachment" : "attachments"}.`;
+  const notice = escapeSlackEntities(
+    `Could not send ${failed.join(", ")} as ${failed.length === 1 ? "an attachment" : "attachments"}.`,
+  );
   try {
     const ts = await api.postMessage({ channel, text: notice, ...threadOption(threadTs) });
     timestamps.push(ts);

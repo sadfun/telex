@@ -119,6 +119,10 @@ disabled. Restart Telex and check the log for
 - **Commands**: `/telex help` anywhere, or prefix a command in a mention:
   `@Telex /new`. In the bot DM, plain `/new` will not reach Telex — Slack
   intercepts everything that starts with `/` — so use `/telex new`.
+  Conversation-scoped commands (`new`, `back`, `stop`, `schedules`,
+  `continue`) only work as `/telex …` in the bot DM; in a channel each thread
+  is its own conversation, so run them inside the thread as a mention
+  (`@Telex /stop`).
 - **Sign-in**: if Codex is not signed in yet, `/telex login` in the bot DM
   returns the ChatGPT device-code link, exactly like `/login` on Telegram.
 
