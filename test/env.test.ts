@@ -84,9 +84,9 @@ describe("loadAppConfig", () => {
       SLACK_BOT_TOKEN: "xoxb-123",
       SLACK_APP_TOKEN: "xapp-1",
       SLACK_ALLOWED_USER_IDS: "*",
-      SLACK_ADMIN_USER_IDS: "U0AFAK0FB46",
+      SLACK_ADMIN_USER_IDS: "U0ADMIN0AAA",
     });
-    expect([...(config.slack?.adminUserIds ?? [])]).toEqual(["U0AFAK0FB46"]);
+    expect([...(config.slack?.adminUserIds ?? [])]).toEqual(["U0ADMIN0AAA"]);
     expect(
       loadAppConfig({
         SLACK_BOT_TOKEN: "xoxb-123",
@@ -97,7 +97,7 @@ describe("loadAppConfig", () => {
   });
 
   it("rejects an admin list without the Slack connector", () => {
-    expect(() => loadAppConfig({ ...required, SLACK_ADMIN_USER_IDS: "U0AFAK0FB46" })).toThrow(
+    expect(() => loadAppConfig({ ...required, SLACK_ADMIN_USER_IDS: "U0ADMIN0AAA" })).toThrow(
       /requires the Slack connector/,
     );
   });

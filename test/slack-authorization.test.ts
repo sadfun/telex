@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { isWorkspaceMember } from "../src/channels/slack/authorization.js";
 
-const team = "T0BRASK";
+const team = "T0EXAMPLE";
 
 describe("isWorkspaceMember", () => {
   it("accepts a regular member of the bot's workspace", () => {
