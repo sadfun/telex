@@ -57,6 +57,16 @@ describe("markdownToMrkdwn", () => {
   it("does not treat multi-line asterisk pairs as italic", () => {
     expect(markdownToMrkdwn("2 * 3\n4 * 5")).toBe("2 * 3\n4 * 5");
   });
+
+  it("renders markdown tables as aligned monospace blocks", () => {
+    const input = "| Result | Clicks |\n|---|---:|\n| Video | 107 |\n| Audio | 30 |";
+    expect(markdownToMrkdwn(input)).toBe("```\nResult  Clicks\nVideo   107\nAudio   30\n```");
+  });
+
+  it("keeps prose around tables intact", () => {
+    const input = "Downloads:\n\n| A | B |\n| - | - |\n| 1 | 2 |\n\nDone **ok**";
+    expect(markdownToMrkdwn(input)).toBe("Downloads:\n\n```\nA  B\n1  2\n```\n\nDone *ok*");
+  });
 });
 
 describe("escapeSlackEntities", () => {

@@ -46,6 +46,72 @@ function splitByCodeFence(text: string): readonly Segment[] {
 }
 
 function convertProse(text: string): string {
+  // Slack has no table rendering: markdown tables become aligned monospace
+  // blocks, and everything else flows through the inline conversions.
+  const lines = text.split("\n");
+  const parts: string[] = [];
+  let prose: string[] = [];
+  const flushProse = (): void => {
+    if (prose.length > 0) {
+      parts.push(convertRichProse(prose.join("\n")));
+      prose = [];
+    }
+  };
+  let index = 0;
+  while (index < lines.length) {
+    const line = lines[index];
+    if (line === undefined) break;
+    if (isTableLine(line) && isTableLine(lines[index + 1])) {
+      flushProse();
+      const tableLines: string[] = [];
+      for (; index < lines.length; index += 1) {
+        const candidate = lines[index];
+        if (candidate === undefined || !isTableLine(candidate)) break;
+        tableLines.push(candidate);
+      }
+      parts.push(renderTable(tableLines));
+      continue;
+    }
+    prose.push(line);
+    index += 1;
+  }
+  flushProse();
+  return parts.join("\n");
+}
+
+function isTableLine(line: string | undefined): boolean {
+  return line !== undefined && /^\s*\|.*\|\s*$/u.test(line);
+}
+
+function renderTable(tableLines: readonly string[]): string {
+  const rows = tableLines
+    .map((line) =>
+      line
+        .trim()
+        .replace(/^\|/u, "")
+        .replace(/\|$/u, "")
+        .split("|")
+        .map((cell) => cell.trim()),
+    )
+    .filter((cells) => !cells.every((cell) => cell.length === 0 || /^:?-+:?$/u.test(cell)));
+  const widths: number[] = [];
+  for (const row of rows) {
+    row.forEach((cell, column) => {
+      widths[column] = Math.max(widths[column] ?? 0, cell.length);
+    });
+  }
+  const body = rows
+    .map((row) =>
+      row
+        .map((cell, column) => cell.padEnd(widths[column] ?? 0))
+        .join("  ")
+        .trimEnd(),
+    )
+    .join("\n");
+  return `\`\`\`\n${escapeSlackEntities(body)}\n\`\`\``;
+}
+
+function convertRichProse(text: string): string {
   const spans = splitByInlineCode(text);
   return spans
     .map((span) =>

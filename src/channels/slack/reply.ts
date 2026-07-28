@@ -13,8 +13,13 @@ import { formatThinkingBlock, splitMessageText } from "../progress.js";
 import { escapeSlackEntities, markdownToMrkdwn } from "./format.js";
 import type { SlackDeliveryTarget } from "./references.js";
 
-/** Slack truncates around 40k characters; shorter chunks stay readable. */
-export const slackTextLimit = 12_000;
+/**
+ * Slack's documented ceiling is 40k characters, but chat.update and
+ * chat.postMessage reject far shorter payloads with msg_too_long in practice
+ * (observed at 12k on 2026-07-28). 3,900 stays under the reliable 4k mark and
+ * matches what Slack renders without collapsing.
+ */
+export const slackTextLimit = 3_900;
 
 export type SlackBlock =
   | {
@@ -374,43 +379,46 @@ export class SlackReplyStream implements OutboundStream {
     await this.#draftInFlight?.catch(() => undefined);
     const chunks =
       text.length === 0 ? [] : splitMessageText(markdownToMrkdwn(text), slackTextLimit);
-    const [first, ...rest] = chunks;
-    try {
-      if (first === undefined) {
-        // Nothing to say: freeze the progress message without the cursor.
-        if (this.#messageTs !== undefined) {
-          await this.#api.updateMessage({
-            channel: this.#channel,
-            ts: this.#messageTs,
-            text: escapeSlackEntities(formatThinkingBlock(this.#progress)),
-          });
-        }
-      } else if (this.#messageTs === undefined) {
-        for (const chunk of chunks) {
-          await this.#api.postMessage({
-            channel: this.#channel,
-            text: chunk,
-            ...threadOption(this.#threadTs),
-          });
-        }
-      } else {
-        await this.#api.updateMessage({
+    // Freeze the progress message without the streaming cursor. The answer
+    // itself arrives as separate messages below: a silent edit of the
+    // thinking message never notifies anyone, and a failed edit must not
+    // take the answer down with it.
+    if (this.#messageTs !== undefined) {
+      await this.#api
+        .updateMessage({
           channel: this.#channel,
           ts: this.#messageTs,
-          text: first,
-        });
-        for (const chunk of rest) {
-          await this.#api.postMessage({
-            channel: this.#channel,
-            text: chunk,
-            ...threadOption(this.#threadTs),
+          text: escapeSlackEntities(formatThinkingBlock(this.#progress)),
+        })
+        .catch((error: unknown) => {
+          this.#logger.debug("Slack progress freeze failed", {
+            error: error instanceof Error ? error.message : String(error),
           });
-        }
+        });
+    }
+    let undelivered = 0;
+    for (const chunk of chunks) {
+      try {
+        await this.#api.postMessage({
+          channel: this.#channel,
+          text: chunk,
+          ...threadOption(this.#threadTs),
+        });
+      } catch (error) {
+        undelivered += 1;
+        this.#logger.warn("Slack final text delivery failed", {
+          error: error instanceof Error ? error.message : String(error),
+        });
       }
-    } catch (error) {
-      this.#logger.warn("Slack final text delivery failed", {
-        error: error instanceof Error ? error.message : String(error),
-      });
+    }
+    if (undelivered > 0) {
+      await this.#api
+        .postMessage({
+          channel: this.#channel,
+          text: `⚠️ ${undelivered} part${undelivered === 1 ? "" : "s"} of the reply could not be delivered.`,
+          ...threadOption(this.#threadTs),
+        })
+        .catch(() => undefined);
     }
     await sendSlackAttachments(this.#api, this.#channel, this.#threadTs, attachments, this.#logger);
   }

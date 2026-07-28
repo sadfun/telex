@@ -130,10 +130,11 @@ describe("SlackResponder", () => {
     const text = `${"a".repeat(12_500)}\n${"b".repeat(300)}`;
     await responder(api, "https://hooks.slack.com/respond", fetchMock).sendText(text);
     expect(calls.posts).toHaveLength(1);
-    expect(calls.posts[0]?.text).toBe("a".repeat(12_000));
+    expect(calls.posts[0]?.text).toBe("a".repeat(3_900));
     const [, init] = fetchMock.mock.calls[0] ?? [];
     const body = JSON.parse(String(init?.body)) as { text: string };
-    expect(body.text).toBe(`${"a".repeat(500)}\n${"b".repeat(300)}`);
+    // The ephemeral webhook fallback carries at most one message worth of text.
+    expect(body.text).toBe("a".repeat(3_900));
   });
 });
 
@@ -142,7 +143,7 @@ describe("SlackReplyStream", () => {
     return new SlackReplyStream(api, "C1", "1699.5", new Logger("error"));
   }
 
-  it("posts a progress message and replaces it with the final text", async () => {
+  it("freezes the progress message and posts the answer separately", async () => {
     const { api, calls } = fakeApi();
     const reply = stream(api);
     await reply.start({ summary: "Reading files", actions: [], plan: [] });
@@ -151,7 +152,28 @@ describe("SlackReplyStream", () => {
     expect(calls.posts[0]?.text).toContain("▌");
     await reply.complete("All **done**");
     expect(calls.updates).toHaveLength(1);
-    expect(calls.updates[0]).toMatchObject({ channel: "C1", text: "All *done*" });
+    expect(calls.updates[0]?.text).toContain("Reading files");
+    expect(calls.updates[0]?.text.endsWith("▌")).toBe(false);
+    expect(calls.posts).toHaveLength(2);
+    expect(calls.posts[1]).toMatchObject({ channel: "C1", threadTs: "1699.5", text: "All *done*" });
+  });
+
+  it("delivers the remaining chunks even when one post fails", async () => {
+    let posted = 0;
+    const { api, calls } = fakeApi({
+      postMessage: async (options) => {
+        posted += 1;
+        if (posted === 2) throw new Error("msg_too_long");
+        calls.posts.push(options);
+        return `1700.${posted}`;
+      },
+    });
+    const reply = stream(api);
+    await reply.start();
+    await reply.complete(`${"a".repeat(4_000)}\n${"b".repeat(4_000)}\n${"c".repeat(300)}`);
+    const texts = calls.posts.map((post) => post.text);
+    expect(texts.some((text) => text.includes("c".repeat(300)))).toBe(true);
+    expect(texts.at(-1)).toContain("could not be delivered");
   });
 
   it("throttles draft updates", async () => {
