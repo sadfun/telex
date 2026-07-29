@@ -2,6 +2,13 @@
 
 All notable changes to Telex are documented in this file.
 
+## [0.0.24] - 2026-07-29
+
+### Fixed
+
+- Reconciled successor turns even when Codex reports their start before the previous terminal notification.
+- Retried an explicit interrupt once with Codex's authoritative active turn ID when lifecycle notifications arrive out of order.
+
 ## [0.0.23] - 2026-07-29
 
 ### Fixed
@@ -90,6 +97,7 @@ All notable changes to Telex are documented in this file.
 - Fixed cached ephemeral command replies so they remain private and removed unsupported ephemeral command declarations.
 - Fixed commands addressed to another bot being handled by Telex.
 
+[0.0.24]: https://github.com/sadfun/telex/compare/v0.0.23...v0.0.24
 [0.0.23]: https://github.com/sadfun/telex/compare/v0.0.22...v0.0.23
 [0.0.22]: https://github.com/sadfun/telex/compare/v0.0.21...v0.0.22
 [0.0.20]: https://github.com/sadfun/telex/compare/v0.0.19...v0.0.20

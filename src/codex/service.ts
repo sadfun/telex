@@ -452,8 +452,7 @@ export class CodexService {
       }
       active.turnId = response.turn.id;
       if (this.#interruptingScheduledTurns && request.invocation.automationId !== undefined) {
-        active.interruptRequested = true;
-        await this.requestTurnInterrupt(active, active.turnId);
+        await this.interruptActiveTurn(active);
       }
       const turn = await active.completion.promise;
       if (turn.status === "failed") {
@@ -569,16 +568,7 @@ export class CodexService {
 
   public async interrupt(conversationKey: string): Promise<boolean> {
     const active = this.#activeByConversation.get(conversationKey);
-    if (active?.turnId === undefined) return false;
-    active.interruptRequested = true;
-    const requestedTurnId = active.turnId;
-    try {
-      await this.requestTurnInterrupt(active, requestedTurnId);
-    } catch (error) {
-      if (active.turnId === requestedTurnId || active.turnId === undefined) throw error;
-      await this.requestTurnInterrupt(active, active.turnId);
-    }
-    return true;
+    return active === undefined ? false : await this.interruptActiveTurn(active);
   }
 
   public async interruptScheduledTurns(): Promise<void> {
@@ -590,9 +580,7 @@ export class CodexService {
     );
     await Promise.allSettled(
       [...activeTurns].map(async (active) => {
-        if (active.turnId === undefined) return;
-        active.interruptRequested = true;
-        await this.requestTurnInterrupt(active, active.turnId);
+        await this.interruptActiveTurn(active);
       }),
     );
   }
@@ -774,32 +762,12 @@ export class CodexService {
     const active = this.#activeByThread.get(notification.threadId);
     if (active === undefined) return;
     if (active.turnId !== undefined && active.turnId !== notification.turn.id) {
-      if (active.terminalTurn?.id !== active.turnId) {
-        this.#logger.warn("Ignoring overlapping Codex turn", {
-          threadId: notification.threadId,
-          trackedTurnId: active.turnId,
-          observedTurnId: notification.turn.id,
-        });
-        return;
-      }
-      this.clearTurnSettlement(active);
-      active.terminalTurn = undefined;
-      active.phases.clear();
-      active.actions.clear();
-      active.reasoning.clear();
-      active.progressMessage = "";
-      active.plan = [];
-      active.finalText = "";
-      active.stream.setProgress({ summary: "Thinking…", actions: [], plan: [] });
-      this.#logger.info("Following successor Codex turn", {
-        threadId: notification.threadId,
-        previousTurnId: active.turnId,
-        turnId: notification.turn.id,
-      });
+      this.followTurn(active, notification.turn.id, "turn/started notification");
+    } else {
+      active.turnId = notification.turn.id;
     }
-    active.turnId = notification.turn.id;
     if (active.interruptRequested) {
-      void this.requestTurnInterrupt(active, notification.turn.id).catch((error) => {
+      void this.interruptActiveTurn(active).catch((error) => {
         this.#logger.error("Failed to interrupt successor Codex turn", error, {
           threadId: active.threadId,
           turnId: notification.turn.id,
@@ -930,6 +898,45 @@ export class CodexService {
     if (active.settlementTimer === undefined) return;
     clearTimeout(active.settlementTimer);
     active.settlementTimer = undefined;
+  }
+
+  private followTurn(active: ActiveTurn, turnId: string, source: string): void {
+    if (active.turnId === turnId) return;
+    const previousTurnId = active.turnId;
+    this.clearTurnSettlement(active);
+    active.terminalTurn = undefined;
+    active.phases.clear();
+    active.actions.clear();
+    active.reasoning.clear();
+    active.progressMessage = "";
+    active.plan = [];
+    active.finalText = "";
+    active.turnId = turnId;
+    active.stream.setProgress({ summary: "Thinking…", actions: [], plan: [] });
+    this.#logger.info("Following successor Codex turn", {
+      threadId: active.threadId,
+      previousTurnId,
+      turnId,
+      source,
+    });
+  }
+
+  private async interruptActiveTurn(active: ActiveTurn): Promise<boolean> {
+    if (active.turnId === undefined) return false;
+    active.interruptRequested = true;
+    const requestedTurnId = active.turnId;
+    try {
+      await this.requestTurnInterrupt(active, requestedTurnId);
+    } catch (error) {
+      const actualTurnId =
+        active.turnId !== requestedTurnId
+          ? active.turnId
+          : activeTurnIdFromInterruptError(errorMessage(error));
+      if (actualTurnId === undefined || actualTurnId === requestedTurnId) throw error;
+      this.followTurn(active, actualTurnId, "turn/interrupt mismatch");
+      await this.requestTurnInterrupt(active, actualTurnId);
+    }
+    return true;
   }
 
   private requestTurnInterrupt(active: ActiveTurn, turnId: string): Promise<void> {
@@ -1147,6 +1154,10 @@ const silentStream: OutboundStream = {
 
 function matchesTurn(active: ActiveTurn, turnId: string): boolean {
   return active.turnId === turnId;
+}
+
+function activeTurnIdFromInterruptError(message: string): string | undefined {
+  return /^expected active turn id `?[^`\s]+`? but found `?([^`\s]+)`?$/u.exec(message)?.[1];
 }
 
 function appendAttachmentWarning(text: string, unavailable: readonly string[]): string {

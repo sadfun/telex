@@ -73,6 +73,61 @@ describe("CodexService lifecycle", () => {
     expect(output.stream.fail).not.toHaveBeenCalled();
   });
 
+  it("follows a successor announced before the original terminal notification", async () => {
+    const { rpc, service } = await testService();
+    const output = responder();
+    const run = service.runTurn(
+      "telegram:reordered-successor",
+      "telegram",
+      "delegate",
+      output.responder,
+      true,
+    );
+    await rpc.waitForRequests("turn/start", 1);
+
+    rpc.startSuccessor("thread-1", "mailbox-turn");
+    rpc.completeNextTurn();
+    rpc.completeTurn("thread-1", "mailbox-turn", "completed", [agentMessage("Reordered result")]);
+    await run;
+
+    expect(output.stream.complete).toHaveBeenCalledWith("Reordered result", []);
+    expect(output.stream.fail).not.toHaveBeenCalled();
+  });
+
+  it("reconciles and retries an interrupt from Codex's authoritative active turn", async () => {
+    const { rpc, service } = await testService();
+    const output = responder();
+    const run = service.runTurn(
+      "telegram:interrupt-mismatch",
+      "telegram",
+      "delegate",
+      output.responder,
+      true,
+    );
+    await rpc.waitForRequests("turn/start", 1);
+    rpc.interruptActiveTurnId = "80432e00-b82b-4cbd-9de3-f4d846ace12c";
+
+    await expect(service.interrupt("telegram:interrupt-mismatch")).resolves.toBe(true);
+    expect(rpc.requests.filter((request) => request.method === "turn/interrupt")).toEqual([
+      {
+        method: "turn/interrupt",
+        params: { threadId: "thread-1", turnId: "turn-1" },
+      },
+      {
+        method: "turn/interrupt",
+        params: {
+          threadId: "thread-1",
+          turnId: "80432e00-b82b-4cbd-9de3-f4d846ace12c",
+        },
+      },
+    ]);
+
+    rpc.completeNextTurn();
+    rpc.completeTurn("thread-1", "80432e00-b82b-4cbd-9de3-f4d846ace12c", "interrupted");
+    await run;
+    expect(output.stream.complete).toHaveBeenCalledWith("Stopped.", []);
+  });
+
   it("interrupts the automatic successor instead of the stale original turn", async () => {
     const { rpc, service } = await testService();
     const output = responder();
@@ -316,6 +371,7 @@ class ControlledRpc {
   #nextTurn = 1;
   public threadStartGate: Deferred<void> | undefined;
   public resumeError: BridgeError | undefined;
+  public interruptActiveTurnId: string | undefined;
 
   public onNotification(listener: NotificationListener): () => void {
     this.#notificationListeners.add(listener);
@@ -348,6 +404,13 @@ class ControlledRpc {
       return { turn: { id: turnId } } as Result;
     }
     if (request.method === "turn/interrupt") {
+      const { turnId } = request.params as { readonly turnId: string };
+      if (this.interruptActiveTurnId !== undefined && turnId !== this.interruptActiveTurnId) {
+        throw new BridgeError(
+          `expected active turn id ${turnId} but found ${this.interruptActiveTurnId}`,
+          "CODEX_RPC_ERROR",
+        );
+      }
       return {} as Result;
     }
     throw new Error(`Unexpected request ${request.method}`);
