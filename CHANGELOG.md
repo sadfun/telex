@@ -2,6 +2,13 @@
 
 All notable changes to Telex are documented in this file.
 
+## [0.0.23] - 2026-07-29
+
+### Fixed
+
+- Followed Codex mailbox-triggered successor turns instead of dropping their lifecycle and output after the initiating turn completed.
+- Kept `/stop`, `/new`, and shutdown interruption intent attached to the current successor turn so stale turn IDs no longer surface as Codex errors.
+
 ## [0.0.22] - 2026-07-26
 
 ### Fixed
@@ -83,6 +90,7 @@ All notable changes to Telex are documented in this file.
 - Fixed cached ephemeral command replies so they remain private and removed unsupported ephemeral command declarations.
 - Fixed commands addressed to another bot being handled by Telex.
 
+[0.0.23]: https://github.com/sadfun/telex/compare/v0.0.22...v0.0.23
 [0.0.22]: https://github.com/sadfun/telex/compare/v0.0.21...v0.0.22
 [0.0.20]: https://github.com/sadfun/telex/compare/v0.0.19...v0.0.20
 [0.0.17]: https://github.com/sadfun/telex/compare/v0.0.16...v0.0.17

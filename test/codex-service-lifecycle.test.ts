@@ -12,6 +12,7 @@ import { CodexService, type EffectiveCodexSettings } from "../src/codex/service.
 import type { MessageResponder, OutboundStream } from "../src/core/channel.js";
 import { ConversationStore } from "../src/core/conversation-store.js";
 import type { ServerNotification } from "../src/generated/codex/ServerNotification.js";
+import type { ThreadItem } from "../src/generated/codex/v2/ThreadItem.js";
 import type { Turn } from "../src/generated/codex/v2/Turn.js";
 import { type Deferred, deferred } from "../src/shared/async.js";
 import { BridgeError } from "../src/shared/errors.js";
@@ -41,11 +42,96 @@ describe("CodexService lifecycle", () => {
       expect(rpc.requests.filter((request) => request.method === "turn/interrupt")).toHaveLength(0);
       expect(output.stream.fail).not.toHaveBeenCalled();
       rpc.completeNextTurn();
+      await vi.advanceTimersByTimeAsync(100);
       await run;
       expect(output.stream.complete).toHaveBeenCalled();
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it("follows an automatic successor turn and returns its final output", async () => {
+    const { rpc, service } = await testService();
+    const output = responder();
+    const run = service.runTurn(
+      "telegram:successor",
+      "telegram",
+      "delegate",
+      output.responder,
+      true,
+    );
+    await rpc.waitForRequests("turn/start", 1);
+
+    rpc.completeNextTurn();
+    rpc.startSuccessor("thread-1", "mailbox-turn");
+    expect(output.stream.complete).not.toHaveBeenCalled();
+
+    rpc.completeTurn("thread-1", "mailbox-turn", "completed", [agentMessage("Successor result")]);
+    await run;
+
+    expect(output.stream.complete).toHaveBeenCalledWith("Successor result", []);
+    expect(output.stream.fail).not.toHaveBeenCalled();
+  });
+
+  it("interrupts the automatic successor instead of the stale original turn", async () => {
+    const { rpc, service } = await testService();
+    const output = responder();
+    const run = service.runTurn(
+      "telegram:successor-stop",
+      "telegram",
+      "delegate",
+      output.responder,
+      true,
+    );
+    await rpc.waitForRequests("turn/start", 1);
+
+    rpc.completeNextTurn();
+    rpc.startSuccessor("thread-1", "mailbox-turn");
+
+    await expect(service.interrupt("telegram:successor-stop")).resolves.toBe(true);
+    expect(rpc.requests.filter((request) => request.method === "turn/interrupt")).toEqual([
+      {
+        method: "turn/interrupt",
+        params: { threadId: "thread-1", turnId: "mailbox-turn" },
+      },
+    ]);
+
+    rpc.completeTurn("thread-1", "mailbox-turn", "interrupted");
+    await run;
+    expect(output.stream.complete).toHaveBeenCalledWith("Stopped.", []);
+  });
+
+  it("propagates an earlier stop request to a successor turn", async () => {
+    const { rpc, service } = await testService();
+    const output = responder();
+    const run = service.runTurn(
+      "telegram:stop-chain",
+      "telegram",
+      "delegate",
+      output.responder,
+      true,
+    );
+    await rpc.waitForRequests("turn/start", 1);
+
+    await expect(service.interrupt("telegram:stop-chain")).resolves.toBe(true);
+    rpc.completeNextTurn("interrupted");
+    rpc.startSuccessor("thread-1", "mailbox-turn");
+    await rpc.waitForRequests("turn/interrupt", 2);
+
+    expect(rpc.requests.filter((request) => request.method === "turn/interrupt")).toEqual([
+      {
+        method: "turn/interrupt",
+        params: { threadId: "thread-1", turnId: "turn-1" },
+      },
+      {
+        method: "turn/interrupt",
+        params: { threadId: "thread-1", turnId: "mailbox-turn" },
+      },
+    ]);
+
+    rpc.completeTurn("thread-1", "mailbox-turn", "interrupted");
+    await run;
+    expect(output.stream.complete).toHaveBeenCalledWith("Stopped.", []);
   });
 
   it("gates queued jobs while paused and drains only jobs that passed the gate", async () => {
@@ -261,6 +347,9 @@ class ControlledRpc {
       this.#pendingTurns.push({ threadId, turnId });
       return { turn: { id: turnId } } as Result;
     }
+    if (request.method === "turn/interrupt") {
+      return {} as Result;
+    }
     throw new Error(`Unexpected request ${request.method}`);
   }
 
@@ -270,12 +359,31 @@ class ControlledRpc {
     });
   }
 
-  public completeNextTurn(): void {
+  public completeNextTurn(status: Turn["status"] = "completed"): void {
     const pending = this.#pendingTurns.shift();
     if (pending === undefined) throw new Error("No pending turn");
+    this.completeTurn(pending.threadId, pending.turnId, status);
+  }
+
+  public startSuccessor(threadId: string, turnId: string): void {
+    this.notify({
+      method: "turn/started",
+      params: {
+        threadId,
+        turn: completedTurn(turnId, [], "inProgress"),
+      },
+    } as ServerNotification);
+  }
+
+  public completeTurn(
+    threadId: string,
+    turnId: string,
+    status: Turn["status"],
+    items: readonly ThreadItem[] = [],
+  ): void {
     this.notify({
       method: "turn/completed",
-      params: { threadId: pending.threadId, turn: completedTurn(pending.turnId) },
+      params: { threadId, turn: completedTurn(turnId, items, status) },
     } as ServerNotification);
   }
 
@@ -313,12 +421,26 @@ function responder(): Readonly<{ responder: MessageResponder; stream: OutboundSt
   };
 }
 
-function completedTurn(id: string): Turn {
+function agentMessage(text: string): ThreadItem {
+  return {
+    type: "agentMessage",
+    id: "message-1",
+    text,
+    phase: "final_answer",
+    memoryCitation: null,
+  };
+}
+
+function completedTurn(
+  id: string,
+  items: readonly ThreadItem[] = [],
+  status: Turn["status"] = "completed",
+): Turn {
   return {
     id,
-    items: [],
+    items: [...items],
     itemsView: "notLoaded",
-    status: "completed",
+    status,
     error: null,
     startedAt: null,
     completedAt: null,

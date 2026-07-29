@@ -59,6 +59,7 @@ interface ActiveTurn {
   readonly stream: OutboundStream;
   readonly invocation: CodexInvocationContext;
   readonly completion: Deferred<Turn>;
+  readonly interruptRequests: Map<string, Promise<void>>;
   readonly phases: Map<string, "commentary" | "final_answer" | null>;
   readonly actions: Map<string, readonly ProgressAction[]>;
   readonly reasoning: Map<string, readonly string[]>;
@@ -66,6 +67,9 @@ interface ActiveTurn {
   progressMessage: string;
   plan: readonly ProgressPlanStep[];
   finalText: string;
+  terminalTurn: Turn | undefined;
+  settlementTimer: ReturnType<typeof setTimeout> | undefined;
+  interruptRequested: boolean;
   turnId: string | undefined;
 }
 
@@ -182,6 +186,7 @@ export interface CodexServiceProviders {
 
 export class CodexService {
   static readonly #backgroundQuietPeriodMs = 30_000;
+  static readonly #turnSettlementDelayMs = 100;
   readonly #queue = new KeyedSerialQueue();
   readonly #activeByThread = new Map<string, ActiveTurn>();
   readonly #activeByConversation = new Map<string, ActiveTurn>();
@@ -409,6 +414,7 @@ export class CodexService {
       stream: request.stream,
       invocation: request.invocation,
       completion: deferred<Turn>(),
+      interruptRequests: new Map(),
       phases: new Map(),
       actions: new Map(),
       reasoning: new Map(),
@@ -416,6 +422,9 @@ export class CodexService {
       progressMessage: "",
       plan: [],
       finalText: "",
+      terminalTurn: undefined,
+      settlementTimer: undefined,
+      interruptRequested: false,
       turnId: undefined,
     };
     void active.completion.promise.catch(() => undefined);
@@ -443,10 +452,8 @@ export class CodexService {
       }
       active.turnId = response.turn.id;
       if (this.#interruptingScheduledTurns && request.invocation.automationId !== undefined) {
-        await this.#rpc.request<TurnInterruptResponse>({
-          method: "turn/interrupt",
-          params: { threadId: active.threadId, turnId: active.turnId },
-        });
+        active.interruptRequested = true;
+        await this.requestTurnInterrupt(active, active.turnId);
       }
       const turn = await active.completion.promise;
       if (turn.status === "failed") {
@@ -486,6 +493,7 @@ export class CodexService {
       await rm(stagingDirectory, { recursive: true, force: true }).catch(() => undefined);
       throw error;
     } finally {
+      this.clearTurnSettlement(active);
       if (this.#activeByThread.get(request.threadId) === active) {
         this.#activeByThread.delete(request.threadId);
       }
@@ -562,10 +570,14 @@ export class CodexService {
   public async interrupt(conversationKey: string): Promise<boolean> {
     const active = this.#activeByConversation.get(conversationKey);
     if (active?.turnId === undefined) return false;
-    await this.#rpc.request<TurnInterruptResponse>({
-      method: "turn/interrupt",
-      params: { threadId: active.threadId, turnId: active.turnId },
-    });
+    active.interruptRequested = true;
+    const requestedTurnId = active.turnId;
+    try {
+      await this.requestTurnInterrupt(active, requestedTurnId);
+    } catch (error) {
+      if (active.turnId === requestedTurnId || active.turnId === undefined) throw error;
+      await this.requestTurnInterrupt(active, active.turnId);
+    }
     return true;
   }
 
@@ -579,10 +591,8 @@ export class CodexService {
     await Promise.allSettled(
       [...activeTurns].map(async (active) => {
         if (active.turnId === undefined) return;
-        await this.#rpc.request<TurnInterruptResponse>({
-          method: "turn/interrupt",
-          params: { threadId: active.threadId, turnId: active.turnId },
-        });
+        active.interruptRequested = true;
+        await this.requestTurnInterrupt(active, active.turnId);
       }),
     );
   }
@@ -715,7 +725,10 @@ export class CodexService {
 
   private handleTransportExit(error: BridgeError): void {
     this.#loadedThreads.clear();
-    for (const active of this.#activeByThread.values()) active.completion.reject(error);
+    for (const active of this.#activeByThread.values()) {
+      this.clearTurnSettlement(active);
+      active.completion.reject(error);
+    }
   }
 
   private handleNotification(notification: ServerNotification): void {
@@ -760,8 +773,39 @@ export class CodexService {
   private handleTurnStarted(notification: TurnStartedNotification): void {
     const active = this.#activeByThread.get(notification.threadId);
     if (active === undefined) return;
-    if (active.turnId !== undefined && active.turnId !== notification.turn.id) return;
+    if (active.turnId !== undefined && active.turnId !== notification.turn.id) {
+      if (active.terminalTurn?.id !== active.turnId) {
+        this.#logger.warn("Ignoring overlapping Codex turn", {
+          threadId: notification.threadId,
+          trackedTurnId: active.turnId,
+          observedTurnId: notification.turn.id,
+        });
+        return;
+      }
+      this.clearTurnSettlement(active);
+      active.terminalTurn = undefined;
+      active.phases.clear();
+      active.actions.clear();
+      active.reasoning.clear();
+      active.progressMessage = "";
+      active.plan = [];
+      active.finalText = "";
+      active.stream.setProgress({ summary: "Thinking…", actions: [], plan: [] });
+      this.#logger.info("Following successor Codex turn", {
+        threadId: notification.threadId,
+        previousTurnId: active.turnId,
+        turnId: notification.turn.id,
+      });
+    }
     active.turnId = notification.turn.id;
+    if (active.interruptRequested) {
+      void this.requestTurnInterrupt(active, notification.turn.id).catch((error) => {
+        this.#logger.error("Failed to interrupt successor Codex turn", error, {
+          threadId: active.threadId,
+          turnId: notification.turn.id,
+        });
+      });
+    }
   }
 
   private handleItemStarted(notification: ItemStartedNotification): void {
@@ -869,7 +913,41 @@ export class CodexService {
   private handleTurnCompleted(notification: TurnCompletedNotification): void {
     const active = this.#activeByThread.get(notification.threadId);
     if (active === undefined || !matchesTurn(active, notification.turn.id)) return;
-    active.completion.resolve(notification.turn);
+    active.terminalTurn = notification.turn;
+    this.clearTurnSettlement(active);
+    active.settlementTimer = setTimeout(() => {
+      active.settlementTimer = undefined;
+      if (
+        active.turnId === notification.turn.id &&
+        active.terminalTurn?.id === notification.turn.id
+      ) {
+        active.completion.resolve(notification.turn);
+      }
+    }, CodexService.#turnSettlementDelayMs);
+  }
+
+  private clearTurnSettlement(active: ActiveTurn): void {
+    if (active.settlementTimer === undefined) return;
+    clearTimeout(active.settlementTimer);
+    active.settlementTimer = undefined;
+  }
+
+  private requestTurnInterrupt(active: ActiveTurn, turnId: string): Promise<void> {
+    const pending = active.interruptRequests.get(turnId);
+    if (pending !== undefined) return pending;
+    const request = this.#rpc
+      .request<TurnInterruptResponse>({
+        method: "turn/interrupt",
+        params: { threadId: active.threadId, turnId },
+      })
+      .then(() => undefined);
+    active.interruptRequests.set(turnId, request);
+    void request.catch(() => {
+      if (active.interruptRequests.get(turnId) === request) {
+        active.interruptRequests.delete(turnId);
+      }
+    });
+    return request;
   }
 
   private handleLoginCompleted(notification: AccountLoginCompletedNotification): void {
