@@ -329,8 +329,9 @@ describe("CodexBridge updates", () => {
     expect(updateCommand.onInstalled).not.toHaveBeenCalled();
   });
 
-  it("installs the latest release and requests a restart", async () => {
+  it("installs the latest release and requests a restart after the handler returns", async () => {
     const { codex } = createCodex();
+    let handlerReturned = false;
     const updateCommand: TelexUpdateCommand = {
       canInstall: true,
       run: vi.fn(
@@ -340,15 +341,20 @@ describe("CodexBridge updates", () => {
           version: "1.3.0",
         }),
       ),
-      onInstalled: vi.fn(),
+      onInstalled: vi.fn(() => {
+        expect(handlerReturned).toBe(true);
+      }),
     };
     const bridge = new CodexBridge(codex, undefined, logger, updateCommand);
     const responder = createResponder();
 
     await bridge.handleMessage(createMessage("/update", responder));
+    handlerReturned = true;
 
     expect(responder.sendText.mock.calls[1]?.[0]).toContain("Installed Telex 1.3.0");
     expect(responder.sendText.mock.calls[1]?.[0]).toContain("Restarting");
+    expect(updateCommand.onInstalled).not.toHaveBeenCalled();
+    await new Promise<void>((resolve) => setImmediate(resolve));
     expect(updateCommand.onInstalled).toHaveBeenCalledWith("1.3.0");
   });
 

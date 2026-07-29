@@ -344,7 +344,10 @@ export class CodexBridge {
           `✅ Installed Telex ${result.version} (previously ${result.previousVersion}). Restarting now…`,
         );
       } finally {
-        updateCommand.onInstalled(result.version);
+        // Let the Telegram runner finish this middleware before shutdown waits
+        // for all in-flight middleware. Resolving inline would make runner.stop()
+        // wait for the /update handler that initiated the shutdown.
+        setImmediate(() => updateCommand.onInstalled(result.version));
       }
     } catch (error) {
       this.#logger.warn("Manual Telex update failed", { error: errorMessage(error) });
