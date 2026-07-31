@@ -1,9 +1,11 @@
 import { createWriteStream } from "node:fs";
 import { mkdir, unlink } from "node:fs/promises";
 import { basename, extname, join } from "node:path";
-import { Readable } from "node:stream";
+import { Readable, Transform } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import { describeSlackFile, type SlackFile } from "./message.js";
+
+const slackFileSizeLimit = 100 * 1_024 * 1_024;
 
 export class SlackFileDownloadError extends Error {
   public readonly userMessage: string;
@@ -42,6 +44,12 @@ export async function downloadSlackFile(
       "its download URL does not point at Slack",
     );
   }
+  if ((file.size ?? 0) > slackFileSizeLimit) {
+    throw new SlackFileDownloadError(
+      `${description} exceeds the download size limit`,
+      `it is larger than the ${Math.round(slackFileSizeLimit / (1_024 * 1_024))} MB download limit`,
+    );
+  }
 
   await mkdir(options.directory, { recursive: true, mode: 0o700 });
   const target = join(
@@ -76,8 +84,27 @@ export async function downloadSlackFile(
   }
 
   try {
+    // Slack's reported size is advisory; count the actual bytes so a
+    // mismatched or missing size cannot exhaust the disk.
+    let received = 0;
+    const limitGuard = new Transform({
+      transform(chunk: Buffer, _encoding, callback): void {
+        received += chunk.length;
+        if (received > slackFileSizeLimit) {
+          callback(
+            new SlackFileDownloadError(
+              `${description} exceeded the download size limit mid-stream`,
+              `it is larger than the ${Math.round(slackFileSizeLimit / (1_024 * 1_024))} MB download limit`,
+            ),
+          );
+          return;
+        }
+        callback(null, chunk);
+      },
+    });
     await pipeline(
       Readable.from(response.body),
+      limitGuard,
       createWriteStream(target, { flags: "wx", mode: 0o600 }),
     );
     return target;
@@ -89,7 +116,11 @@ export async function downloadSlackFile(
 
 function isSlackFileHost(url: string): boolean {
   try {
-    const hostname = new URL(url).hostname;
+    const parsed = new URL(url);
+    // The bot token rides in the Authorization header; never send it over
+    // plaintext, even to a Slack hostname.
+    if (parsed.protocol !== "https:") return false;
+    const hostname = parsed.hostname;
     return (
       hostname === "slack.com" ||
       hostname.endsWith(".slack.com") ||

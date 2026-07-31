@@ -47,8 +47,10 @@ describe("markdownToMrkdwn", () => {
   });
 
   it("leaves fenced code untouched apart from entity escaping", () => {
-    const input = "```ts\nconst a = b ** 2; // **not bold**\n```";
-    expect(markdownToMrkdwn(input)).toBe("```ts\nconst a = b ** 2; // **not bold**\n```");
+    const input = "```ts\nif (a < b && c) { /* **not bold** */ }\n```";
+    expect(markdownToMrkdwn(input)).toBe(
+      "```ts\nif (a &lt; b &amp;&amp; c) { /* **not bold** */ }\n```",
+    );
   });
 
   it("converts list markers and strikethrough", () => {

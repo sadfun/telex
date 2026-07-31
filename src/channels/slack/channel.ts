@@ -107,6 +107,7 @@ const displayNameCacheLimit = 500;
 const membershipCacheLimit = 1_000;
 /** Deactivations and role changes must take effect without a restart. */
 const membershipCacheTtlMs = 10 * 60 * 1_000;
+const webhookTimeoutMs = 10_000;
 
 /** Commands that act on one conversation and therefore need a thread in channels. */
 const conversationScopedCommands = new Set(["new", "back", "stop", "schedules", "continue"]);
@@ -463,15 +464,23 @@ export class SlackChannel implements MessagingChannel {
     }
     try {
       const replies = await this.#api.fetchThreadReplies(event.channel, event.thread_ts, 100);
-      const names = new Map<string, string>();
-      for (const message of replies) {
-        if (message.user !== undefined && !names.has(message.user)) {
-          names.set(
-            message.user,
-            message.user === botUserId ? "Telex (this bot)" : await this.displayName(message.user),
-          );
-        }
-      }
+      const uniqueUsers = [
+        ...new Set(
+          replies
+            .map((message) => message.user)
+            .filter((user): user is string => user !== undefined),
+        ),
+      ];
+      const names = new Map<string, string>(
+        await Promise.all(
+          uniqueUsers.map(
+            async (user): Promise<[string, string]> => [
+              user,
+              user === botUserId ? "Telex (this bot)" : await this.displayName(user),
+            ],
+          ),
+        ),
+      );
       const context = formatThreadContext(replies, event.ts, (message) =>
         message.user !== undefined
           ? (names.get(message.user) ?? message.user)
@@ -517,7 +526,9 @@ export class SlackChannel implements MessagingChannel {
       await respondEphemerally(`Telex commands:\n${slackSlashCommandHelp}`);
       return;
     }
-    const isDirect = payload.channel_name === "directmessage";
+    // Conversation IDs starting with D are direct messages; channel_name is
+    // spoofable (a channel can literally be named "directmessage").
+    const isDirect = channelId.startsWith("D");
     if (!isDirect && conversationScopedCommands.has(name)) {
       // In channels every thread is its own conversation, and a slash command
       // carries no thread information, so these commands cannot pick a target.
@@ -747,18 +758,19 @@ export class SlackChannel implements MessagingChannel {
   private async displayName(userId: string): Promise<string> {
     const cached = this.#displayNames.get(userId);
     if (cached !== undefined) return cached;
-    let name = userId;
     try {
       const response = await this.#web.users.info({ user: userId });
       const profile = response.user?.profile;
-      name =
+      const name =
         firstNonEmpty(profile?.display_name, profile?.real_name, response.user?.name) ?? userId;
+      if (this.#displayNames.size >= displayNameCacheLimit) this.#displayNames.clear();
+      this.#displayNames.set(userId, name);
+      return name;
     } catch (error) {
+      // A transient lookup failure must not pin the raw ID until a restart.
       this.#logger.debug("Slack user lookup failed", { userId, error: errorMessage(error) });
+      return userId;
     }
-    if (this.#displayNames.size >= displayNameCacheLimit) this.#displayNames.clear();
-    this.#displayNames.set(userId, name);
-    return name;
   }
 
   private async respondThroughWebhook(url: string | undefined, text: string): Promise<void> {
@@ -767,6 +779,7 @@ export class SlackChannel implements MessagingChannel {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ response_type: "ephemeral", text }),
+      signal: AbortSignal.timeout(webhookTimeoutMs),
     }).catch((error: unknown) => {
       this.#logger.debug("Slack response webhook failed", { error: errorMessage(error) });
     });

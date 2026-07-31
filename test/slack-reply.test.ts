@@ -206,16 +206,19 @@ describe("SlackReplyStream", () => {
   });
 
   it("posts the final text directly when no progress message exists", async () => {
-    const { api, calls } = fakeApi({
-      postMessage: vi
-        .fn<SlackMessagingApi["postMessage"]>()
-        .mockRejectedValueOnce(new Error("temporarily unavailable"))
-        .mockResolvedValue("1700.1"),
-    });
+    let attempts = 0;
+    const { api, calls } = fakeApi();
+    api.postMessage = async (options) => {
+      attempts += 1;
+      if (attempts === 1) throw new Error("temporarily unavailable");
+      calls.posts.push(options);
+      return "1700.1";
+    };
     const reply = stream(api);
     await reply.start();
     await reply.complete("result");
     expect(calls.updates).toHaveLength(0);
+    expect(calls.posts.map((post) => post.text)).toContain("result");
   });
 
   it("uploads attachments and reports failures", async () => {

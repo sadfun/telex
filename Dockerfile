@@ -13,7 +13,7 @@ RUN apt-get update \
   && apt-get install -y --no-install-recommends ca-certificates curl git ripgrep \
   && curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
     -o /usr/share/keyrings/githubcli-archive-keyring.gpg \
-  && echo "deb [arch=amd64 signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
+  && echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
     > /etc/apt/sources.list.d/github-cli.list \
   && apt-get update \
   && apt-get install -y --no-install-recommends gh \
@@ -28,6 +28,7 @@ RUN chmod 0755 /usr/local/bin/telex-entrypoint
 ENV TELEX_DATA_DIR=/data/telex \
     CODEX_WORKSPACE=/data/workspace
 VOLUME /data
-USER telex
+# The entrypoint starts as root only to take ownership of freshly created
+# volumes, then drops to the unprivileged telex user before running Telex.
 ENTRYPOINT ["telex-entrypoint"]
 CMD ["node", "dist/index.js"]

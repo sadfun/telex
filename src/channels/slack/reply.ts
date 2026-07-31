@@ -22,6 +22,8 @@ import type { SlackDeliveryTarget } from "./references.js";
  */
 export const slackTextLimit = 3_900;
 
+const webhookTimeoutMs = 10_000;
+
 export type SlackBlock =
   | {
       readonly type: "section";
@@ -140,22 +142,31 @@ function urlButtonBlocks(options: SendOptions | undefined): readonly SlackBlock[
   ];
 }
 
-function commandButtonBlocks(message: OutboundMessage): readonly SlackBlock[] | undefined {
+function commandButtonBlocks(
+  message: OutboundMessage,
+  logger: Logger,
+): readonly SlackBlock[] | undefined {
   const actions = message.actions;
   if (actions === undefined || actions.length === 0) return undefined;
-  return [
-    {
-      type: "actions",
-      elements: actions.map(
-        (action, index): SlackButtonElement => ({
-          type: "button",
-          text: { type: "plain_text", text: action.label.slice(0, 75) },
-          action_id: `telex_cmd_${index}`,
-          value: encodeSlackCommandValue(action.command.name, action.command.args),
-        }),
-      ),
-    },
-  ];
+  // One unencodable action must not take down the whole delivery.
+  const elements: SlackButtonElement[] = [];
+  for (const [index, action] of actions.entries()) {
+    try {
+      elements.push({
+        type: "button",
+        text: { type: "plain_text", text: action.label.slice(0, 75) },
+        action_id: `telex_cmd_${index}`,
+        value: encodeSlackCommandValue(action.command.name, action.command.args),
+      });
+    } catch (error) {
+      logger.warn("Dropped a Slack command action", {
+        command: action.command.name,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+  if (elements.length === 0) return undefined;
+  return [{ type: "actions", elements }];
 }
 
 interface ThreadOption {
@@ -183,7 +194,7 @@ export async function publishSlackMessage(
     const ts = await api.postMessage({ channel: target.channel, text: chunk, ...thread });
     published.push({ channel: target.channel, ts });
   }
-  const blocks = commandButtonBlocks(message);
+  const blocks = commandButtonBlocks(message, logger);
   if (blocks !== undefined) {
     const ts = await api.postMessage({
       channel: target.channel,
@@ -282,6 +293,7 @@ export class SlackResponder implements MessageResponder {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ response_type: "ephemeral", text: text.slice(0, slackTextLimit) }),
+      signal: AbortSignal.timeout(webhookTimeoutMs),
     });
     if (!response.ok) {
       throw new Error(`Slack's response webhook returned HTTP ${response.status}`);
@@ -419,7 +431,7 @@ export class SlackReplyStream implements OutboundStream {
         .updateMessage({
           channel: this.#channel,
           ts: this.#messageTs,
-          text: escapeSlackEntities(formatThinkingBlock(this.#progress)),
+          text: escapeSlackEntities(formatThinkingBlock(this.#progress)).slice(0, slackTextLimit),
         })
         .catch((error: unknown) => {
           this.#logger.debug("Slack progress freeze failed", {
@@ -509,7 +521,12 @@ export class SlackReplyStream implements OutboundStream {
   }
 
   private preview(): string {
-    const progress = escapeSlackEntities(formatThinkingBlock(this.#progress));
+    // Entity escaping can expand the progress block past the message limit,
+    // so clamp it before budgeting the final-text tail.
+    const progress = escapeSlackEntities(formatThinkingBlock(this.#progress)).slice(
+      0,
+      slackTextLimit - 3,
+    );
     if (this.#finalText.length === 0) return `${progress}\n\n▌`;
     const available = Math.max(0, slackTextLimit - progress.length - 3);
     const finalText = available === 0 ? "" : markdownToMrkdwn(this.#finalText).slice(-available);

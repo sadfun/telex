@@ -6,6 +6,15 @@ set -e
 
 data_dir="${TELEX_DATA_DIR:-/data/telex}"
 workspace="${CODEX_WORKSPACE:-/data/workspace}"
+
+# Fresh named volumes are created owned by root; take ownership of the state
+# roots (non-recursively), then continue as the unprivileged telex user.
+if [ "$(id -u)" = "0" ]; then
+  mkdir -p "${data_dir}" "${workspace}"
+  chown telex:telex /data "${data_dir}" "${workspace}" 2>/dev/null || true
+  exec env HOME=/home/telex runuser -u telex -- "$0" "$@"
+fi
+
 mkdir -p "${data_dir}/codex-home" "${workspace}"
 
 config="${data_dir}/codex-home/config.toml"
