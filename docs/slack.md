@@ -24,6 +24,13 @@ What works in Slack:
   `/new`-style messages for its own slash commands, so Telex registers a single
   `/telex` command with subcommands).
 
+When Codex creates a report, archive, image, or another deliverable, Telex can
+upload it into the same Slack DM or thread. The connector-aware system context
+instructs Codex to link the workspace-local deliverable in its final answer;
+Telex validates and snapshots that file before uploading it with Slack's
+`files:write` permission. Local links used only as code references are not
+uploaded.
+
 The settings Mini App remains Telegram-only because it authenticates through
 Telegram. Everything else — including `/telex login` for the ChatGPT sign-in —
 works from Slack.

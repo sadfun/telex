@@ -96,9 +96,19 @@ describe("createRemoteClientContext", () => {
     expect(discord["telex.remote-client"]?.value).not.toContain("Telegram");
   });
 
-  it("tells Codex not to link local filesystem paths in replies", () => {
+  it("teaches Codex how to deliver files through Slack", () => {
     const value = createRemoteClientContext("slack")["telex.remote-client"]?.value ?? "";
-    expect(value).toContain("Never format a local filesystem path as a markdown link target");
+    expect(value).toContain("Slack can receive files as native attachments through Telex");
+    expect(value).toContain("[Download report](artifacts/report.pdf)");
+    expect(value).toContain("Telex resolves that link and uploads the file");
+    expect(value).toContain("Never attach secrets, credentials, environment files");
+  });
+
+  it("reserves local Markdown links for deliberate attachments", () => {
+    const value = createRemoteClientContext("slack")["telex.remote-client"]?.value ?? "";
+    expect(value).toContain(
+      "Except for deliberate attachment links described above, never format a local filesystem path as a Markdown link target",
+    );
     expect(value).toContain("repository-relative path and line number");
   });
 });
