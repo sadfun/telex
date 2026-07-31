@@ -156,11 +156,7 @@ function normalizeRelativePath(path: string): string {
 
 function isTextFile(path: string, contents: Buffer): boolean {
   if (contents.includes(0)) return false;
-  return textExtensions.has(extname(path).toLowerCase()) || isValidUtf8(contents);
-}
-
-function isValidUtf8(contents: Buffer): boolean {
-  return Buffer.from(contents.toString("utf8"), "utf8").equals(contents);
+  return textExtensions.has(extname(path).toLowerCase());
 }
 
 function mediaTypeFor(path: string): string {
@@ -168,16 +164,12 @@ function mediaTypeFor(path: string): string {
 }
 
 const mediaTypes = new Map<string, string>([
-  [".avif", "image/avif"],
-  [".css", "text/css"],
   [".gif", "image/gif"],
-  [".html", "text/html"],
   [".jpeg", "image/jpeg"],
   [".jpg", "image/jpeg"],
   [".js", "text/javascript"],
   [".json", "application/json"],
   [".md", "text/markdown"],
-  [".mjs", "text/javascript"],
   [".png", "image/png"],
   [".py", "text/x-python"],
   [".sh", "text/x-shellscript"],
@@ -192,26 +184,16 @@ const mediaTypes = new Map<string, string>([
 ]);
 
 const textExtensions = new Set([
-  ".css",
-  ".csv",
-  ".html",
-  ".ini",
   ".js",
   ".json",
-  ".jsx",
   ".md",
-  ".mjs",
   ".py",
-  ".rb",
-  ".rs",
   ".sh",
-  ".sql",
   ".svg",
   ".toml",
   ".ts",
   ".tsx",
   ".txt",
-  ".xml",
   ".yaml",
   ".yml",
 ]);

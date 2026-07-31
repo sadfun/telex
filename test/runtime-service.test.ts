@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type {
   CodexAppServer,
   CodexAppServerExit,
@@ -9,37 +9,29 @@ import { CodexRuntimeService } from "../src/codex/runtime-service.js";
 import type { CodexService } from "../src/codex/service.js";
 import type { ServerNotification } from "../src/generated/codex/ServerNotification.js";
 import type { ConfigReadResponse } from "../src/generated/codex/v2/ConfigReadResponse.js";
+import type { SkillMetadata } from "../src/generated/codex/v2/SkillMetadata.js";
 import type { SkillsListResponse } from "../src/generated/codex/v2/SkillsListResponse.js";
 import { BridgeError } from "../src/shared/errors.js";
 import type { Logger } from "../src/shared/logger.js";
 
 const workspace = "/workspace";
 
-afterEach(() => {
-  vi.useRealTimers();
-});
-
 describe("CodexRuntimeService", () => {
-  it("primes effective settings, config watches, and explicit skill inputs", async () => {
+  it("primes effective settings and explicit skill inputs", async () => {
     const rpc = new FakeRuntimeRpc();
     const codex = fakeCodex();
     const runtime = createRuntime(rpc, codex);
 
     const status = await runtime.start();
 
-    expect(status).toMatchObject({
+    expect(status).toEqual({
       state: "ready",
+      restartRequired: false,
+      lastError: null,
+      lastAppliedAt: expect.any(String),
       configPath: "/tmp/codex/config.toml",
-      config: { state: "ready" },
-      mcp: { state: "ready" },
-      skills: { state: "ready" },
     });
-    expect(rpc.requests.map((request) => request.method)).toEqual([
-      "config/read",
-      "fs/watch",
-      "fs/watch",
-      "skills/list",
-    ]);
+    expect(rpc.requests.map((request) => request.method)).toEqual(["config/read", "skills/list"]);
     expect(runtime.settings()).toMatchObject({
       thread: {
         model: "gpt-test",
@@ -150,10 +142,7 @@ describe("CodexRuntimeService", () => {
     expect(status).toMatchObject({
       state: "ready",
       restartRequired: false,
-      mcp: {
-        state: "queued",
-        message: expect.stringContaining("next turn"),
-      },
+      lastError: null,
     });
 
     await runtime.stop();
@@ -188,7 +177,6 @@ describe("CodexRuntimeService", () => {
       state: "ready",
       restartRequired: true,
       lastAppliedAt: initial.lastAppliedAt,
-      config: { message: expect.stringContaining("app-server restart") },
     });
     expect(runtime.settings().thread?.modelProvider).toBe("azure");
     expect((await runtime.reload()).restartRequired).toBe(true);
@@ -199,49 +187,33 @@ describe("CodexRuntimeService", () => {
     await runtime.stop();
   });
 
-  it("suppresses self-write watch events but reconciles a changed layer", async () => {
-    vi.useFakeTimers();
+  it("refreshes skills when Codex announces a skills change", async () => {
     const rpc = new FakeRuntimeRpc();
     const runtime = createRuntime(rpc, fakeCodex());
     await runtime.start();
-    const watch = rpc.requests.find((request) => request.method === "fs/watch");
-    const watchId = (watch?.params as { readonly watchId?: string } | undefined)?.watchId;
-    expect(watchId).toBeTypeOf("string");
-    rpc.requests.length = 0;
-
-    rpc.emitNotification({
-      method: "fs/changed",
-      params: { watchId, changedPaths: ["/tmp/codex/auth.json"] },
-    } as ServerNotification);
-    await vi.advanceTimersByTimeAsync(301);
-    expect(rpc.requests).toEqual([]);
-
-    rpc.emitNotification({
-      method: "fs/changed",
-      params: { watchId, changedPaths: ["/tmp/codex/config.toml"] },
-    } as ServerNotification);
-    await vi.advanceTimersByTimeAsync(301);
-    expect(rpc.requests.map((request) => request.method)).toEqual(["config/read"]);
-
-    rpc.config = configResponse("user-v2");
-    rpc.requests.length = 0;
-    rpc.emitNotification({
-      method: "fs/changed",
-      params: { watchId, changedPaths: ["/tmp/codex/config.toml"] },
-    } as ServerNotification);
-    await vi.advanceTimersByTimeAsync(301);
-    expect(rpc.requests.map((request) => request.method)).toEqual([
-      "config/read",
-      "config/batchWrite",
-      "config/read",
-      "config/mcpServer/reload",
-      "skills/list",
+    rpc.skills = skillsResponse([
+      {
+        name: "fresh-skill",
+        description: "Fresh",
+        path: "/skills/fresh/SKILL.md",
+        scope: "user",
+        enabled: true,
+      },
     ]);
+    rpc.requests.length = 0;
+
+    rpc.emitNotification({ method: "skills/changed", params: {} } as ServerNotification);
+
+    await vi.waitFor(() => {
+      expect(runtime.skills().map((skill) => skill.name)).toEqual(["fresh-skill"]);
+    });
+    expect(rpc.requests.map((request) => request.method)).toEqual(["skills/list"]);
+    expect(runtime.status()).toMatchObject({ state: "ready", lastError: null });
 
     await runtime.stop();
   });
 
-  it("drains turns, restarts the child, and reinstalls connection-scoped watches", async () => {
+  it("drains turns and restarts the child app-server", async () => {
     const rpc = new FakeRuntimeRpc();
     const codex = fakeCodex();
     const runtime = createRuntime(rpc, codex);
@@ -258,56 +230,9 @@ describe("CodexRuntimeService", () => {
     expect(rpc.requests.map((request) => request.method)).toEqual([
       "config/read",
       "config/read",
-      "fs/watch",
-      "fs/watch",
       "skills/list",
     ]);
-    expect(status).toMatchObject({ state: "ready", mcp: { state: "ready" } });
-
-    await runtime.stop();
-  });
-
-  it("tracks MCP startup state independently for each loaded thread", async () => {
-    const rpc = new FakeRuntimeRpc();
-    const runtime = createRuntime(rpc, fakeCodex());
-    await runtime.start();
-
-    rpc.emitNotification({
-      method: "mcpServer/startupStatus/updated",
-      params: {
-        threadId: "thread-a",
-        name: "github",
-        status: "failed",
-        error: "authentication failed",
-        failureReason: null,
-      },
-    });
-    rpc.emitNotification({
-      method: "mcpServer/startupStatus/updated",
-      params: {
-        threadId: "thread-b",
-        name: "github",
-        status: "ready",
-        error: null,
-        failureReason: null,
-      },
-    });
-    expect(runtime.status()).toMatchObject({
-      state: "degraded",
-      mcp: { state: "error", message: expect.stringContaining("thread-a") },
-    });
-
-    rpc.emitNotification({
-      method: "mcpServer/startupStatus/updated",
-      params: {
-        threadId: "thread-a",
-        name: "github",
-        status: "ready",
-        error: null,
-        failureReason: null,
-      },
-    });
-    expect(runtime.status()).toMatchObject({ state: "ready", mcp: { state: "ready" } });
+    expect(status).toMatchObject({ state: "ready", restartRequired: false });
 
     await runtime.stop();
   });
@@ -483,11 +408,8 @@ class FakeRuntimeRpc {
         return this.rateLimits as Result;
       case "account/rateLimitResetCredit/consume":
         return { outcome: "reset" } as Result;
-      case "fs/watch":
-        return { path: (request.params as { readonly path: string }).path } as Result;
       case "config/batchWrite":
       case "config/mcpServer/reload":
-      case "fs/unwatch":
         return {} as Result;
       default:
         throw new Error(`Unexpected runtime request: ${request.method}`);
@@ -546,45 +468,47 @@ function configResponse(userVersion: string, modelProvider = "openai"): ConfigRe
   } as unknown as ConfigReadResponse;
 }
 
-function skillsResponse(): SkillsListResponse {
+function skillsResponse(
+  skills: SkillMetadata[] = [
+    {
+      name: "go-code-review",
+      description: "Review Go code",
+      path: "/skills/go/SKILL.md",
+      scope: "user",
+      enabled: true,
+    },
+    {
+      name: "disabled-skill",
+      description: "Disabled",
+      path: "/skills/disabled/SKILL.md",
+      scope: "user",
+      enabled: false,
+    },
+    {
+      name: "github",
+      description: "GitHub routing",
+      path: "/skills/github/SKILL.md",
+      scope: "user",
+      enabled: true,
+    },
+    {
+      name: "github:yeet",
+      description: "Publish changes",
+      path: "/skills/github-yeet/SKILL.md",
+      scope: "user",
+      enabled: true,
+    },
+  ],
+): SkillsListResponse {
   return {
     data: [
       {
         cwd: workspace,
-        skills: [
-          {
-            name: "go-code-review",
-            description: "Review Go code",
-            path: "/skills/go/SKILL.md",
-            scope: "user",
-            enabled: true,
-          },
-          {
-            name: "disabled-skill",
-            description: "Disabled",
-            path: "/skills/disabled/SKILL.md",
-            scope: "user",
-            enabled: false,
-          },
-          {
-            name: "github",
-            description: "GitHub routing",
-            path: "/skills/github/SKILL.md",
-            scope: "user",
-            enabled: true,
-          },
-          {
-            name: "github:yeet",
-            description: "Publish changes",
-            path: "/skills/github-yeet/SKILL.md",
-            scope: "user",
-            enabled: true,
-          },
-        ],
+        skills,
         errors: [],
       },
     ],
-  } as SkillsListResponse;
+  };
 }
 
 function testLogger(): Logger {

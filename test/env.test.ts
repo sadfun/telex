@@ -11,7 +11,6 @@ describe("loadAppConfig", () => {
     const config = loadAppConfig(required);
     expect([...config.allowedUserIds]).toEqual([42, 9001]);
     expect(config.telegramApiBase).toBe("https://api.telegram.org");
-    expect(config.checkCodexUpdates).toBe(true);
     expect(config.updateMode).toBe("notify");
     expect(config.updateIntervalMs).toBe(6 * 60 * 60 * 1_000);
     expect(config.updateRepository).toBe("sadfun/telex");

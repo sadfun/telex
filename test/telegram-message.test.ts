@@ -190,17 +190,22 @@ describe("normalizeTelegramMessage", () => {
     expect(result.text).toContain("proximity 0 m");
   });
 
-  it("uses a bounded generic fallback and redacts Passport data", () => {
+  it("uses a bounded generic remainder and redacts Passport data", () => {
     const result = normalizeTelegramMessage(
       message({
         new_chat_title: "A new title",
+        giveaway: { prize_description: "x".repeat(500) } as unknown as NonNullable<
+          Message["giveaway"]
+        >,
         passport_data: { secret: "must-not-leak" } as unknown as NonNullable<
           Message["passport_data"]
         >,
       }),
     );
 
-    expect(result.text).toContain("New chat title: A new title");
+    expect(result.text).toContain('New chat title: "A new title".');
+    expect(result.text).toContain("Giveaway: ");
+    expect(result.text).not.toContain("x".repeat(300));
     expect(result.text).toContain("Passport data received (redacted)");
     expect(result.text).not.toContain("must-not-leak");
   });

@@ -1,7 +1,8 @@
 import { access, readFile } from "node:fs/promises";
-import { join, resolve } from "node:path";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { AutomationStore, ScheduledRunsEngine } from "./automations/index.js";
+import { ScheduledRunsEngine } from "./automations/engine.js";
+import { AutomationStore } from "./automations/store.js";
 import { TelegramChannel } from "./channels/telegram/channel.js";
 import { CodexConfigService } from "./codex/config-service.js";
 import { CodexAppServer } from "./codex/rpc.js";
@@ -37,7 +38,7 @@ interface Stoppable {
   stop(): Promise<void>;
 }
 
-export interface TelexRunResult {
+interface TelexRunResult {
   readonly reason: "shutdown" | "updated";
   readonly version?: string;
 }
@@ -74,15 +75,6 @@ export async function runTelex(): Promise<TelexRunResult> {
       logger.child({ component: "toolchain" }),
     );
     const binaryPath = await toolchains.ensureVersion(pinnedVersion);
-    checkForCodexUpdate(
-      toolchains,
-      pinnedVersion,
-      config.checkCodexUpdates,
-      config.installDirectory === undefined
-        ? "npm run codex:update"
-        : "install a Telex release that includes the compatible Codex protocol",
-      logger,
-    );
 
     const rpc = new CodexAppServer(
       binaryPath,
@@ -256,14 +248,14 @@ export async function runTelex(): Promise<TelexRunResult> {
         signal: updateAbort.signal,
       });
     }
-    const automaticUpdate =
-      updateMonitor?.then((version): Promise<string> | string =>
-        version === undefined ? new Promise<string>(() => undefined) : version,
-      ) ?? new Promise<string>(() => undefined);
-    const update = Promise.race([automaticUpdate, manuallyInstalledUpdate.promise]);
+    const updateSources = [manuallyInstalledUpdate.promise];
+    if (updateMonitor !== undefined) {
+      // The monitor resolves undefined when it stops without installing; only real installs may win.
+      updateSources.push(updateMonitor.then((version) => version ?? pending<string>()));
+    }
     const completed = await Promise.race([
       shutdown.promise.then(() => ({ reason: "shutdown" }) as const),
-      update.then((version) => ({ reason: "updated", version }) as const),
+      Promise.race(updateSources).then((version) => ({ reason: "updated", version }) as const),
     ]);
     if (completed.reason === "updated") {
       logger.info("Restarting to run the installed Telex release", { version: completed.version });
@@ -304,54 +296,27 @@ async function ensureDefaultCodexConfig(path: string): Promise<void> {
   }
 }
 
-function checkForCodexUpdate(
-  toolchains: CodexToolchainManager,
-  pinnedVersion: string,
-  enabled: boolean,
-  updateAction: string,
-  logger: Logger,
-): void {
-  if (!enabled) return;
-  void toolchains
-    .latestVersion()
-    .then((latestVersion) => {
-      if (latestVersion === pinnedVersion) {
-        logger.debug("Codex CLI is current", { version: pinnedVersion });
-      } else {
-        logger.info("A newer Codex CLI is available", {
-          pinnedVersion,
-          latestVersion,
-          updateAction,
-        });
-      }
-    })
-    .catch((error: unknown) => {
-      logger.warn("Could not check for a Codex CLI update", { error: errorMessage(error) });
-    });
-}
-
 function shutdownSignal(logger: Logger): {
   readonly promise: Promise<void>;
   readonly dispose: () => void;
 } {
-  let onInterrupt: () => void;
-  let onTerminate: () => void;
-  const dispose = (): void => {
-    process.off("SIGINT", onInterrupt);
-    process.off("SIGTERM", onTerminate);
+  const shutdown = deferred<void>();
+  const handle = (signal: NodeJS.Signals): void => {
+    dispose();
+    logger.info("Shutting down", { signal });
+    shutdown.resolve();
   };
-  const promise = new Promise<void>((resolvePromise) => {
-    const handle = (signal: NodeJS.Signals): void => {
-      dispose();
-      logger.info("Shutting down", { signal });
-      resolvePromise();
-    };
-    onInterrupt = (): void => handle("SIGINT");
-    onTerminate = (): void => handle("SIGTERM");
-    process.once("SIGINT", onInterrupt);
-    process.once("SIGTERM", onTerminate);
-  });
-  return { promise, dispose };
+  const dispose = (): void => {
+    process.off("SIGINT", handle);
+    process.off("SIGTERM", handle);
+  };
+  process.once("SIGINT", handle);
+  process.once("SIGTERM", handle);
+  return { promise: shutdown.promise, dispose };
+}
+
+function pending<T>(): Promise<T> {
+  return new Promise<T>(() => undefined);
 }
 
 async function stopAll(resources: readonly Stoppable[], logger: Logger): Promise<void> {
@@ -362,16 +327,4 @@ async function stopAll(resources: readonly Stoppable[], logger: Logger): Promise
       logger.error("Shutdown step failed", error);
     }
   }
-}
-
-const invokedPath = process.argv[1];
-if (invokedPath !== undefined && fileURLToPath(import.meta.url) === resolve(invokedPath)) {
-  void runTelex()
-    .then((result) => {
-      if (result.reason === "updated") process.exitCode = 75;
-    })
-    .catch((error: unknown) => {
-      console.error(errorMessage(error));
-      process.exitCode = 1;
-    });
 }

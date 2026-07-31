@@ -1,4 +1,4 @@
-import { basename, extname } from "node:path";
+import { extname } from "node:path";
 import { type Api, InputFile } from "grammy";
 import type { Chat, InlineKeyboardMarkup, InputRichMessageWithoutUpload } from "grammy/types";
 import type {
@@ -11,7 +11,8 @@ import type {
   SendOptions,
 } from "../../core/channel.js";
 import type { Logger } from "../../shared/logger.js";
-import type { TelegramDestination, TelegramReplyRoute } from "./route.js";
+import { safeFileName } from "./message.js";
+import type { TelegramReplyRoute } from "./route.js";
 
 export type ChoiceRequester = (
   chat: Chat,
@@ -19,51 +20,27 @@ export type ChoiceRequester = (
   userId: number,
   prompt: string,
   options: readonly ChoiceOption[],
+  signal?: AbortSignal,
 ) => Promise<string>;
 
-interface TelegramDestinationParameters {
+interface TelegramSendParameters {
   readonly message_thread_id?: number;
   readonly direct_messages_topic_id?: number;
+  readonly reply_parameters?: { readonly message_id: number };
 }
 
-export interface TelegramSendParameters extends TelegramDestinationParameters {
-  readonly receiver_user_id?: number;
-  readonly reply_parameters?:
-    | { readonly message_id: number }
-    | { readonly ephemeral_message_id: number };
-}
-
-function destinationParameters(destination: TelegramDestination): TelegramDestinationParameters {
+export function telegramSendParameters(route: TelegramReplyRoute): TelegramSendParameters {
+  const destination = route.destination;
   switch (destination.kind) {
     case "topic":
       return { message_thread_id: destination.messageThreadId };
     case "directMessagesTopic":
       return { direct_messages_topic_id: destination.directMessagesTopicId };
-    case "chat":
     case "genericThread":
+      return { reply_parameters: { message_id: destination.replyToMessageId } };
+    case "chat":
       return {};
   }
-}
-
-function normalMessageParameters(route: TelegramReplyRoute): TelegramSendParameters {
-  const destination = destinationParameters(route.destination);
-  return route.destination.kind === "genericThread"
-    ? {
-        ...destination,
-        reply_parameters: { message_id: route.destination.replyToMessageId },
-      }
-    : destination;
-}
-
-export function telegramSendParameters(route: TelegramReplyRoute): TelegramSendParameters {
-  if (route.visibility.kind === "normal") return normalMessageParameters(route);
-  return {
-    ...destinationParameters(route.destination),
-    receiver_user_id: route.visibility.receiverUserId,
-    reply_parameters: {
-      ephemeral_message_id: route.visibility.incomingEphemeralMessageId,
-    },
-  };
 }
 
 function activityParameters(route: TelegramReplyRoute): Readonly<{ message_thread_id?: number }> {
@@ -115,19 +92,15 @@ export function decodeCommandCallback(
 }
 
 function encodeCommandCallback(name: string, args: string): string {
-  if (
-    !/^[a-z][a-z0-9_]*$/u.test(name) ||
-    [...args].some((character) => character === ":" || character.charCodeAt(0) < 32)
-  ) {
-    throw new Error("Provider command action is not safe for Telegram callback data");
-  }
-  const value = `tx:${name}:${args}`;
-  if (Buffer.byteLength(value, "utf8") > 64) {
-    throw new Error("Provider command action exceeds Telegram's callback-data limit");
-  }
-  return value;
+  // The only producer is the scheduled-run notification ("continue" plus a
+  // UUID, ~48 bytes), comfortably inside Telegram's 64-byte callback-data cap.
+  return `tx:${name}:${args}`;
 }
 
+/**
+ * Deliver a complete message: a rich-markdown attempt with a chunked
+ * plain-text fallback, the optional action keyboard, then attachments.
+ */
 export async function publishTelegramMessage(
   api: Api,
   chatId: number,
@@ -135,20 +108,17 @@ export async function publishTelegramMessage(
   message: OutboundMessage,
   logger: Logger,
 ): Promise<readonly number[]> {
-  if (route.visibility.kind !== "normal") {
-    throw new Error("Scheduled messages cannot use an ephemeral Telegram route");
-  }
   const messageIds: number[] = [];
-  const chunks = splitTelegramText(message.text);
-  const replyMarkup = commandKeyboard(message);
-  for (const [index, chunk] of chunks.entries()) {
-    const sent = await api.sendMessage(chatId, chunk, {
-      ...normalMessageParameters(route),
-      ...(index === chunks.length - 1 && replyMarkup !== undefined
-        ? { reply_markup: replyMarkup }
-        : {}),
-    });
-    messageIds.push(sent.message_id);
+  if (message.text.length > 0) {
+    const textIds = await sendFinalText(
+      api,
+      chatId,
+      route,
+      message.text,
+      commandKeyboard(message),
+      logger,
+    );
+    messageIds.push(...textIds);
   }
   const attachmentIds = await sendTelegramAttachments(
     api,
@@ -161,6 +131,39 @@ export async function publishTelegramMessage(
   return messageIds;
 }
 
+async function sendFinalText(
+  api: Api,
+  chatId: number,
+  route: TelegramReplyRoute,
+  text: string,
+  replyMarkup: InlineKeyboardMarkup | undefined,
+  logger: Logger,
+): Promise<readonly number[]> {
+  const markup = replyMarkup === undefined ? {} : { reply_markup: replyMarkup };
+  try {
+    const sent = await api.sendRichMessage(
+      chatId,
+      { markdown: text },
+      { ...telegramSendParameters(route), ...markup },
+    );
+    return [sent.message_id];
+  } catch (error) {
+    logger.debug("Rich Telegram message failed; using plain chunks", {
+      error: error instanceof Error ? error.message : String(error),
+    });
+  }
+  const messageIds: number[] = [];
+  const chunks = splitTelegramText(text);
+  for (const [index, chunk] of chunks.entries()) {
+    const sent = await api.sendMessage(chatId, chunk, {
+      ...telegramSendParameters(route),
+      ...(index === chunks.length - 1 ? markup : {}),
+    });
+    messageIds.push(sent.message_id);
+  }
+  return messageIds;
+}
+
 export class TelegramResponder implements MessageResponder {
   readonly #api: Api;
   readonly #chat: Chat;
@@ -168,7 +171,6 @@ export class TelegramResponder implements MessageResponder {
   readonly #userId: number;
   readonly #requestChoice: ChoiceRequester;
   readonly #logger: Logger;
-  #outgoingEphemeralMessageId: number | undefined;
 
   public constructor(
     api: Api,
@@ -192,44 +194,31 @@ export class TelegramResponder implements MessageResponder {
 
   public async sendText(text: string, options?: SendOptions): Promise<void> {
     const replyMarkup = keyboard(options);
-    const visibility = this.#route.visibility;
-    if (visibility.kind === "ephemeral" && this.#outgoingEphemeralMessageId !== undefined) {
-      await this.#api.editEphemeralMessageText(
-        this.#chat.id,
-        visibility.receiverUserId,
-        this.#outgoingEphemeralMessageId,
-        truncateTelegramText(text),
-        replyMarkup === undefined ? {} : { reply_markup: replyMarkup },
-      );
-      return;
-    }
-
     if (replyMarkup !== undefined) {
-      const sent = await this.#api.sendMessage(this.#chat.id, truncateTelegramText(text), {
+      await this.#api.sendMessage(this.#chat.id, truncateTelegramText(text), {
         ...telegramSendParameters(this.#route),
         reply_markup: replyMarkup,
       });
-      this.rememberEphemeralMessage(sent.ephemeral_message_id);
       return;
     }
     for (const chunk of splitTelegramText(text)) {
-      const sent = await this.#api.sendMessage(
-        this.#chat.id,
-        chunk,
-        telegramSendParameters(this.#route),
-      );
-      this.rememberEphemeralMessage(sent.ephemeral_message_id);
+      await this.#api.sendMessage(this.#chat.id, chunk, telegramSendParameters(this.#route));
     }
   }
 
-  public async askChoice(prompt: string, options: readonly ChoiceOption[]): Promise<string> {
-    return await this.#requestChoice(this.#chat, this.#route, this.#userId, prompt, options);
-  }
-
-  private rememberEphemeralMessage(ephemeralMessageId: number | undefined): void {
-    if (this.#route.visibility.kind === "ephemeral" && ephemeralMessageId !== undefined) {
-      this.#outgoingEphemeralMessageId = ephemeralMessageId;
-    }
+  public async askChoice(
+    prompt: string,
+    options: readonly ChoiceOption[],
+    signal?: AbortSignal,
+  ): Promise<string> {
+    return await this.#requestChoice(
+      this.#chat,
+      this.#route,
+      this.#userId,
+      prompt,
+      options,
+      signal,
+    );
   }
 }
 
@@ -254,7 +243,18 @@ export class TelegramGuestResponder implements MessageResponder {
   }
 
   public async sendText(text: string): Promise<void> {
-    await this.answer(text);
+    const existing = this.#answering === undefined ? this.#answer : await this.#answering;
+    if (existing === undefined) {
+      await this.answer(text);
+      return;
+    }
+    // Telegram accepts a single answer per guest query, so follow-up text
+    // (for example a bridge error) is appended to the inline message.
+    const combined = `${existing.text}\n\n${text}`;
+    this.#answer = {
+      inlineMessageId: existing.inlineMessageId,
+      text: await this.edit(existing.inlineMessageId, combined),
+    };
   }
 
   public async askChoice(_prompt: string, _options: readonly ChoiceOption[]): Promise<string> {
@@ -320,20 +320,98 @@ export class TelegramGuestResponder implements MessageResponder {
   }
 }
 
+/**
+ * Coalesces streaming updates into at most one in-flight flush per interval:
+ * `schedule` marks the latest content dirty, and the flush callback runs once
+ * the interval elapses and any previous flush has settled.
+ */
+class DraftThrottle {
+  readonly #intervalMs: number;
+  readonly #flush: () => Promise<void>;
+  readonly #onError: ((error: unknown) => void) | undefined;
+  readonly #immediateAfterFlush: () => boolean;
+  #lastFlushAt = 0;
+  #dirty = false;
+  #timer: NodeJS.Timeout | undefined;
+  #inFlight: Promise<void> | undefined;
+
+  public constructor(
+    intervalMs: number,
+    flush: () => Promise<void>,
+    options: {
+      readonly onError?: (error: unknown) => void;
+      /** Whether a pending update may skip the interval once a flush settles. */
+      readonly immediateAfterFlush?: () => boolean;
+    } = {},
+  ) {
+    this.#intervalMs = intervalMs;
+    this.#flush = flush;
+    this.#onError = options.onError;
+    this.#immediateAfterFlush = options.immediateAfterFlush ?? ((): boolean => false);
+  }
+
+  public get dirty(): boolean {
+    return this.#dirty;
+  }
+
+  public markDirty(): void {
+    this.#dirty = true;
+  }
+
+  /** Record an out-of-band publish so the next flush waits a full interval. */
+  public touch(): void {
+    this.#lastFlushAt = Date.now();
+  }
+
+  public schedule(immediate = false): void {
+    this.#dirty = true;
+    if (this.#inFlight !== undefined) return;
+    const wait = immediate ? 0 : Math.max(0, this.#intervalMs - (Date.now() - this.#lastFlushAt));
+    if (wait === 0) {
+      this.startFlush();
+      return;
+    }
+    if (this.#timer !== undefined) return;
+    this.#timer = setTimeout(() => {
+      this.#timer = undefined;
+      this.startFlush();
+    }, wait);
+    this.#timer.unref();
+  }
+
+  public clear(): void {
+    if (this.#timer !== undefined) clearTimeout(this.#timer);
+    this.#timer = undefined;
+    this.#dirty = false;
+  }
+
+  public async settle(): Promise<void> {
+    await this.#inFlight?.catch(() => undefined);
+  }
+
+  private startFlush(): void {
+    if (this.#inFlight !== undefined || !this.#dirty) return;
+    this.#dirty = false;
+    this.#lastFlushAt = Date.now();
+    const update = this.#flush().catch((error: unknown) => this.#onError?.(error));
+    this.#inFlight = update;
+    void update.finally(() => {
+      if (this.#inFlight === update) this.#inFlight = undefined;
+      if (this.#dirty) this.schedule(this.#immediateAfterFlush());
+    });
+  }
+}
+
 class TelegramGuestReplyStream implements OutboundStream {
-  static readonly #draftIntervalMs = 1_000;
   #progress: ProgressSnapshot = { actions: [], plan: [] };
   #finalText = "";
   #inlineMessageId: string | undefined;
-  #lastDraftAt = 0;
   #lastPublishedText = "";
-  #draftDirty = false;
-  #draftTimer: NodeJS.Timeout | undefined;
-  #draftInFlight: Promise<void> | undefined;
   #closing = false;
   #completing: Promise<void> | undefined;
   #completed = false;
   readonly #responder: TelegramGuestResponder;
+  readonly #throttle = new DraftThrottle(1_000, async () => await this.flushDraft());
 
   public constructor(responder: TelegramGuestResponder) {
     this.#responder = responder;
@@ -345,9 +423,9 @@ class TelegramGuestReplyStream implements OutboundStream {
     const preview = this.preview();
     const answer = await this.#responder.answer(preview);
     this.#inlineMessageId = answer.inlineMessageId;
-    this.#lastDraftAt = Date.now();
+    this.#throttle.touch();
     this.#lastPublishedText = answer.text;
-    if (this.#draftDirty) this.scheduleDraft(true);
+    if (this.#throttle.dirty) this.scheduleDraft(true);
   }
 
   public setProgress(progress: ProgressSnapshot): void {
@@ -386,13 +464,13 @@ class TelegramGuestReplyStream implements OutboundStream {
   }
 
   private async finish(text: string, attachments: readonly OutboundAttachment[]): Promise<void> {
-    this.clearTimer();
-    await this.#draftInFlight?.catch(() => undefined);
+    this.#throttle.clear();
+    await this.#throttle.settle();
     const attachmentNote =
       attachments.length === 0
         ? ""
         : `Generated files can only be attached in a direct chat with this bot: ${attachments
-            .map((attachment) => safeAttachmentName(attachment.filename))
+            .map((attachment) => safeFileName(attachment.filename, "attachment"))
             .join(", ")}${text.length === 0 ? "" : "\n\n"}`;
     const finalText = attachmentNote + text;
     if (this.#inlineMessageId === undefined) {
@@ -408,42 +486,12 @@ class TelegramGuestReplyStream implements OutboundStream {
 
   private scheduleDraft(immediate = false): void {
     if (this.#closing || this.#completed) return;
-    this.#draftDirty = true;
-    if (this.#inlineMessageId === undefined || this.#draftInFlight !== undefined) return;
-
-    const wait = immediate
-      ? 0
-      : Math.max(0, TelegramGuestReplyStream.#draftIntervalMs - (Date.now() - this.#lastDraftAt));
-    if (wait === 0) {
-      this.startDraftUpdate();
+    if (this.#inlineMessageId === undefined) {
+      // No inline message yet; start() re-schedules once the query is answered.
+      this.#throttle.markDirty();
       return;
     }
-    if (this.#draftTimer !== undefined) return;
-    this.#draftTimer = setTimeout(() => {
-      this.#draftTimer = undefined;
-      this.startDraftUpdate();
-    }, wait);
-    this.#draftTimer.unref();
-  }
-
-  private startDraftUpdate(): void {
-    if (
-      this.#closing ||
-      this.#completed ||
-      this.#inlineMessageId === undefined ||
-      this.#draftInFlight !== undefined ||
-      !this.#draftDirty
-    ) {
-      return;
-    }
-
-    this.#draftDirty = false;
-    const update = this.flushDraft().catch(() => undefined);
-    this.#draftInFlight = update;
-    void update.finally(() => {
-      if (this.#draftInFlight === update) this.#draftInFlight = undefined;
-      if (this.#draftDirty) this.scheduleDraft();
-    });
+    this.#throttle.schedule(immediate);
   }
 
   private async flushDraft(): Promise<void> {
@@ -451,7 +499,6 @@ class TelegramGuestReplyStream implements OutboundStream {
     if (this.#closing || this.#completed || inlineMessageId === undefined) return;
     const preview = this.preview();
     if (preview === this.#lastPublishedText) return;
-    this.#lastDraftAt = Date.now();
     this.#lastPublishedText = await this.#responder.edit(inlineMessageId, preview);
   }
 
@@ -462,31 +509,28 @@ class TelegramGuestReplyStream implements OutboundStream {
     const finalText = available === 0 ? "" : this.#finalText.slice(-available);
     return `${progress}\n\n${finalText}▌`;
   }
-
-  private clearTimer(): void {
-    if (this.#draftTimer !== undefined) clearTimeout(this.#draftTimer);
-    this.#draftTimer = undefined;
-    this.#draftDirty = false;
-  }
 }
 
 class TelegramReplyStream implements OutboundStream {
-  static readonly #draftIntervalMs = 250;
   readonly #draftId = Math.floor(Math.random() * 2_000_000_000) + 1;
   #progress: ProgressSnapshot = { actions: [], plan: [] };
   #finalText = "";
   #draftMode: "rich" | "plain" | "none";
-  #lastDraftAt = 0;
   #hasPublishedContent = false;
-  #draftDirty = false;
-  #draftTimer: NodeJS.Timeout | undefined;
-  #draftInFlight: Promise<void> | undefined;
   #typingTimer: NodeJS.Timeout | undefined;
   #completed = false;
   readonly #api: Api;
   readonly #chat: Chat;
   readonly #route: TelegramReplyRoute;
   readonly #logger: Logger;
+  readonly #throttle = new DraftThrottle(250, async () => await this.flushDraft(), {
+    onError: (error: unknown) => {
+      this.#logger.debug("Telegram draft update failed", {
+        error: error instanceof Error ? error.message : String(error),
+      });
+    },
+    immediateAfterFlush: (): boolean => !this.#hasPublishedContent,
+  });
 
   public constructor(api: Api, chat: Chat, route: TelegramReplyRoute, logger: Logger) {
     this.#api = api;
@@ -494,17 +538,17 @@ class TelegramReplyStream implements OutboundStream {
     this.#route = route;
     this.#logger = logger;
     this.#draftMode =
-      chat.type === "private" &&
-      route.visibility.kind === "normal" &&
-      route.destination.kind !== "directMessagesTopic"
-        ? "rich"
-        : "none";
+      chat.type === "private" && route.destination.kind !== "directMessagesTopic" ? "rich" : "none";
   }
 
   public async start(initialProgress?: ProgressSnapshot): Promise<void> {
     if (initialProgress !== undefined) this.#progress = initialProgress;
-    if (this.#draftMode !== "none") await this.flushDraft();
-    else this.startTyping();
+    if (this.#draftMode === "none") {
+      this.startTyping();
+      return;
+    }
+    this.#throttle.schedule(true);
+    await this.#throttle.settle();
   }
 
   public setProgress(progress: ProgressSnapshot): void {
@@ -524,17 +568,17 @@ class TelegramReplyStream implements OutboundStream {
     if (this.#completed) return;
     this.#completed = true;
     this.clearTimers();
-    await this.#draftInFlight?.catch(() => undefined);
+    await this.#throttle.settle();
     if (text.length > 0) {
       try {
-        await this.sendFinal(text);
+        await sendFinalText(this.#api, this.#chat.id, this.#route, text, undefined, this.#logger);
       } catch (error) {
         this.#logger.warn("Telegram final text delivery failed", {
           error: error instanceof Error ? error.message : String(error),
         });
       }
     }
-    await this.sendAttachments(attachments);
+    await sendTelegramAttachments(this.#api, this.#chat.id, this.#route, attachments, this.#logger);
   }
 
   public async fail(message: string): Promise<void> {
@@ -543,50 +587,11 @@ class TelegramReplyStream implements OutboundStream {
 
   private scheduleDraft(immediate = false): void {
     if (this.#completed || this.#draftMode === "none") return;
-    this.#draftDirty = true;
-    if (this.#draftInFlight !== undefined) return;
-
-    const wait = immediate
-      ? 0
-      : Math.max(0, TelegramReplyStream.#draftIntervalMs - (Date.now() - this.#lastDraftAt));
-    if (wait === 0) {
-      this.startDraftUpdate();
-      return;
-    }
-    if (this.#draftTimer !== undefined) return;
-    this.#draftTimer = setTimeout(() => {
-      this.#draftTimer = undefined;
-      this.startDraftUpdate();
-    }, wait);
-    this.#draftTimer.unref();
-  }
-
-  private startDraftUpdate(): void {
-    if (
-      this.#completed ||
-      this.#draftMode === "none" ||
-      this.#draftInFlight !== undefined ||
-      !this.#draftDirty
-    ) {
-      return;
-    }
-
-    this.#draftDirty = false;
-    const update = this.flushDraft().catch((error: unknown) => {
-      this.#logger.debug("Telegram draft update failed", {
-        error: error instanceof Error ? error.message : String(error),
-      });
-    });
-    this.#draftInFlight = update;
-    void update.finally(() => {
-      if (this.#draftInFlight === update) this.#draftInFlight = undefined;
-      if (this.#draftDirty) this.scheduleDraft(!this.#hasPublishedContent);
-    });
+    this.#throttle.schedule(immediate);
   }
 
   private async flushDraft(): Promise<void> {
     if (this.#completed || this.#draftMode === "none") return;
-    this.#lastDraftAt = Date.now();
     if (this.#draftMode === "rich") {
       const richMessage: InputRichMessageWithoutUpload = {
         blocks: [
@@ -633,12 +638,7 @@ class TelegramReplyStream implements OutboundStream {
   }
 
   private startTyping(): void {
-    if (
-      this.#route.visibility.kind === "ephemeral" ||
-      this.#route.destination.kind === "directMessagesTopic"
-    ) {
-      return;
-    }
+    if (this.#route.destination.kind === "directMessagesTopic") return;
     const send = (): void => {
       void this.#api
         .sendChatAction(this.#chat.id, "typing", { ...activityParameters(this.#route) })
@@ -651,35 +651,9 @@ class TelegramReplyStream implements OutboundStream {
     }
   }
 
-  private async sendFinal(text: string): Promise<void> {
-    if (this.#route.visibility.kind === "normal") {
-      try {
-        await this.#api.sendRichMessage(
-          this.#chat.id,
-          { markdown: text },
-          normalMessageParameters(this.#route),
-        );
-        return;
-      } catch (error) {
-        this.#logger.debug("Rich Telegram message failed; using plain chunks", {
-          error: error instanceof Error ? error.message : String(error),
-        });
-      }
-    }
-
-    for (const chunk of splitTelegramText(text)) {
-      await this.#api.sendMessage(this.#chat.id, chunk, telegramSendParameters(this.#route));
-    }
-  }
-
-  private async sendAttachments(attachments: readonly OutboundAttachment[]): Promise<void> {
-    await sendTelegramAttachments(this.#api, this.#chat.id, this.#route, attachments, this.#logger);
-  }
-
   private clearTimers(): void {
-    if (this.#draftTimer !== undefined) clearTimeout(this.#draftTimer);
+    this.#throttle.clear();
     if (this.#typingTimer !== undefined) clearInterval(this.#typingTimer);
-    this.#draftTimer = undefined;
     this.#typingTimer = undefined;
   }
 }
@@ -695,7 +669,7 @@ async function sendTelegramAttachments(
   const failed: string[] = [];
   for (const attachment of attachments) {
     const messageId = await sendTelegramAttachment(api, chatId, route, attachment, logger);
-    if (messageId === undefined) failed.push(safeAttachmentName(attachment.filename));
+    if (messageId === undefined) failed.push(safeFileName(attachment.filename, "attachment"));
     else messageIds.push(messageId);
   }
   if (failed.length === 0) return messageIds;
@@ -721,7 +695,7 @@ async function sendTelegramAttachment(
   attachment: OutboundAttachment,
   logger: Logger,
 ): Promise<number | undefined> {
-  const filename = safeAttachmentName(attachment.filename);
+  const filename = safeFileName(attachment.filename, "attachment");
   const input = (): InputFile => new InputFile(attachment.path, filename);
   const params = telegramSendParameters(route);
   const kind = telegramAttachmentKind(attachment.path);
@@ -778,10 +752,6 @@ function telegramAttachmentKind(path: string): TelegramAttachmentKind {
     default:
       return "document";
   }
-}
-
-function safeAttachmentName(path: string): string {
-  return basename(path).replace(/[\r\n]/g, "_") || "attachment";
 }
 
 export function formatThinkingBlock(progress: ProgressSnapshot, limit = 800): string {

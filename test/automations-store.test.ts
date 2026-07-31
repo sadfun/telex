@@ -2,12 +2,12 @@ import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import {
-  type AutomationDefinition,
-  type AutomationNotification,
-  type AutomationRun,
-  AutomationStore,
-} from "../src/automations/index.js";
+import { AutomationStore } from "../src/automations/store.js";
+import type {
+  AutomationDefinition,
+  AutomationNotification,
+  AutomationRun,
+} from "../src/automations/types.js";
 import { Logger } from "../src/shared/logger.js";
 
 const directories: string[] = [];
@@ -69,26 +69,36 @@ describe("AutomationStore", () => {
     expect(store.getAutomation("automation-1")?.nextRunAt).toBe("2026-07-21T11:00:00Z");
   });
 
+  it("deletes an automation together with its runs and notifications", async () => {
+    const { store } = await createStore();
+    await store.putAutomation(automation());
+    await store.claimRun({
+      automationId: "automation-1",
+      expectedNextRunAt: "2026-07-21T10:00:00Z",
+      nextRunAt: "2026-07-21T11:00:00Z",
+      run: runningRun("run-1"),
+    });
+    await store.putNotification(notification("notification-1", "run-1", "message-1"));
+
+    await expect(store.deleteAutomation("automation-1")).resolves.toBe(true);
+
+    expect(store.getAutomation("automation-1")).toBeUndefined();
+    expect(store.listRuns()).toHaveLength(0);
+    expect(store.listNotifications()).toHaveLength(0);
+    await expect(store.deleteAutomation("automation-1")).resolves.toBe(false);
+  });
+
   it("resolves any provider-owned message fragment back to its notification", async () => {
     const { store } = await createStore();
-    const notification: AutomationNotification = {
-      id: "notification-1",
-      automationId: "automation-1",
-      runId: "run-1",
-      target: { provider: "example", resource: "conversation", id: "room:42" },
+    const stored: AutomationNotification = {
+      ...notification("notification-1", "run-1", "room:42:message:7"),
       publishedMessages: [
         { provider: "example", resource: "message", id: "room:42:message:7" },
         { provider: "example", resource: "message", id: "room:42:message:8" },
       ],
-      sourceThreadId: "codex-thread-1",
-      status: "delivered",
-      title: "Build monitor",
       body: "A long provider-split result",
-      error: null,
-      createdAt: "2026-07-21T10:01:00Z",
-      updatedAt: "2026-07-21T10:01:00Z",
     };
-    await store.putNotification(notification);
+    await store.putNotification(stored);
 
     expect(
       store.findNotificationByPublishedMessage({
@@ -96,30 +106,12 @@ describe("AutomationStore", () => {
         resource: "message",
         id: "room:42:message:8",
       }),
-    ).toEqual(notification);
+    ).toEqual(stored);
   });
 
   it("prevents one provider message from identifying two notifications", async () => {
     const { store } = await createStore();
-    const sharedMessage = {
-      provider: "example",
-      resource: "message" as const,
-      id: "room:42:message:7",
-    };
-    const first: AutomationNotification = {
-      id: "notification-1",
-      automationId: "automation-1",
-      runId: "run-1",
-      target: { provider: "example", resource: "conversation", id: "room:42" },
-      publishedMessages: [sharedMessage],
-      sourceThreadId: "codex-thread-1",
-      status: "delivered",
-      title: null,
-      body: "First",
-      error: null,
-      createdAt: "2026-07-21T10:01:00Z",
-      updatedAt: "2026-07-21T10:01:00Z",
-    };
+    const first = notification("notification-1", "run-1", "room:42:message:7");
     await store.putNotification(first);
 
     await expect(
@@ -134,30 +126,29 @@ describe("AutomationStore", () => {
 
   it("bounds retained run and notification history per automation", async () => {
     const { store } = await createStore();
-    await store.putAutomation(automation());
+    const isoAt = (minutes: number) => new Date(Date.UTC(2026, 6, 21, 10, minutes)).toISOString();
+    await store.putAutomation(automation({ nextRunAt: isoAt(0) }));
     for (let index = 0; index < 105; index += 1) {
-      const instant = new Date(Date.UTC(2026, 6, 21, 10, index)).toISOString();
       const runId = `run-${String(index).padStart(3, "0")}`;
-      await store.putRun({
-        ...runningRun(runId),
-        status: "succeeded",
-        startedAt: instant,
-        finishedAt: instant,
-        summary: "Completed",
-      });
-      await store.putNotification({
-        id: `notification-${String(index).padStart(3, "0")}`,
+      await store.claimRun({
         automationId: "automation-1",
-        runId,
-        target: { provider: "example", resource: "destination", id: "room:42" },
-        publishedMessages: [{ provider: "example", resource: "message", id: `message-${index}` }],
-        sourceThreadId: `thread-${index}`,
-        status: "delivered",
-        title: "Status",
-        body: "Completed",
-        error: null,
-        createdAt: instant,
-        updatedAt: instant,
+        expectedNextRunAt: isoAt(index),
+        nextRunAt: isoAt(index + 1),
+        run: {
+          ...runningRun(runId),
+          scheduledFor: isoAt(index),
+          startedAt: isoAt(index),
+        },
+      });
+      await store.completeRun(runId, { status: "succeeded", finishedAt: isoAt(index) });
+      await store.putNotification({
+        ...notification(
+          `notification-${String(index).padStart(3, "0")}`,
+          runId,
+          `message-${index}`,
+        ),
+        createdAt: isoAt(index),
+        updatedAt: isoAt(index),
       });
     }
 
@@ -201,7 +192,6 @@ function automation(overrides: Partial<AutomationDefinition> = {}): AutomationDe
     owner: { provider: "example", resource: "user", id: "user-1" },
     conversation: { provider: "example", resource: "conversation", id: "room-1" },
     deliveryTarget: { provider: "example", resource: "conversation", id: "room-1" },
-    kind: "cron",
     name: "Status",
     prompt: "Check the status",
     status: "active",
@@ -210,7 +200,7 @@ function automation(overrides: Partial<AutomationDefinition> = {}): AutomationDe
       startAt: "2026-07-21T10:00:00Z",
       timeZone: "UTC",
     },
-    execution: { mode: "new-thread", cwd: "/workspace" },
+    threadId: null,
     notificationPolicy: "on-result",
     model: null,
     reasoningEffort: null,
@@ -234,7 +224,22 @@ function runningRun(id: string): AutomationRun {
     startedAt: "2026-07-21T10:00:00Z",
     finishedAt: null,
     threadId: null,
-    summary: null,
     error: null,
+  };
+}
+
+function notification(id: string, runId: string, messageId: string): AutomationNotification {
+  return {
+    id,
+    automationId: "automation-1",
+    runId,
+    publishedMessages: [{ provider: "example", resource: "message", id: messageId }],
+    sourceThreadId: "codex-thread-1",
+    status: "delivered",
+    title: "Status",
+    body: "Completed",
+    error: null,
+    createdAt: "2026-07-21T10:01:00Z",
+    updatedAt: "2026-07-21T10:01:00Z",
   };
 }

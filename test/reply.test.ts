@@ -98,62 +98,6 @@ describe("Telegram reply routing", () => {
     expect(sendMessage).toHaveBeenCalledWith(42, "hello", expected);
   });
 
-  it("answers a cached ephemeral command privately, then edits the private response", async () => {
-    const sendMessage = vi.fn(async () => ({ message_id: 0, ephemeral_message_id: 701 }));
-    const editEphemeralMessageText = vi.fn(async () => true);
-    const { responder } = createResponder(
-      { sendMessage, editEphemeralMessageText },
-      ephemeralTopicRoute(17, 42, 700),
-    );
-
-    await responder.sendText("Checking…");
-    await responder.sendText("Done.");
-
-    expect(sendMessage).toHaveBeenCalledWith(42, "Checking…", {
-      message_thread_id: 17,
-      receiver_user_id: 42,
-      reply_parameters: { ephemeral_message_id: 700 },
-    });
-    expect(editEphemeralMessageText).toHaveBeenCalledWith(42, 42, 701, "Done.", {});
-  });
-
-  it("does not publish draft or activity calls for ephemeral streams", async () => {
-    const sendRichMessageDraft = vi.fn(async () => true);
-    const sendMessageDraft = vi.fn(async () => true);
-    const sendChatAction = vi.fn(async () => true);
-    const sendRichMessage = vi.fn(async () => ({ message_id: 1 }));
-    const sendMessage = vi.fn(async () => ({ message_id: 0, ephemeral_message_id: 701 }));
-    const sendDocument = uploadMock(2);
-    const route = ephemeralTopicRoute(17, 42, 700);
-    const { responder } = createResponder(
-      {
-        sendRichMessageDraft,
-        sendMessageDraft,
-        sendChatAction,
-        sendRichMessage,
-        sendMessage,
-        sendDocument,
-      },
-      route,
-    );
-    const stream = responder.createStream();
-
-    await stream.start();
-    await stream.complete("Done.", [attachment("/workspace/report.pdf")]);
-
-    expect(sendRichMessageDraft).not.toHaveBeenCalled();
-    expect(sendMessageDraft).not.toHaveBeenCalled();
-    expect(sendChatAction).not.toHaveBeenCalled();
-    expect(sendRichMessage).not.toHaveBeenCalled();
-    const expected = {
-      message_thread_id: 17,
-      receiver_user_id: 42,
-      reply_parameters: { ephemeral_message_id: 700 },
-    };
-    expect(sendMessage).toHaveBeenCalledWith(42, "Done.", expected);
-    expect(sendDocument.mock.calls[0]?.[2]).toEqual(expected);
-  });
-
   it("uses the direct-message topic for final output without unsupported chat activity", async () => {
     const sendChatAction = vi.fn(async () => true);
     const sendRichMessage = vi.fn(async () => ({ message_id: 1 }));
@@ -335,6 +279,25 @@ describe("Telegram streaming", () => {
     expect(editMessageTextInline).toHaveBeenCalledTimes(2);
     expect(editMessageTextInline).toHaveBeenLastCalledWith("guest-inline", {
       markdown: "Done.",
+    });
+  });
+
+  it("appends follow-up guest text to the answered inline message instead of dropping it", async () => {
+    const answerGuestQuery = guestAnswerMock();
+    const editMessageTextInline = vi.fn(
+      async (_inlineMessageId: string, _content: unknown) => true,
+    );
+    const responder = new TelegramGuestResponder(
+      { answerGuestQuery, editMessageTextInline } as unknown as Api,
+      "guest-query",
+    );
+
+    await responder.sendText("First answer");
+    await responder.sendText("Bridge error: boom");
+
+    expect(answerGuestQuery).toHaveBeenCalledOnce();
+    expect(editMessageTextInline).toHaveBeenCalledWith("guest-inline", {
+      markdown: "First answer\n\nBridge error: boom",
     });
   });
 
@@ -578,37 +541,17 @@ function createResponder(
 }
 
 function chatRoute(): TelegramReplyRoute {
-  return { destination: { kind: "chat" }, visibility: { kind: "normal" } };
+  return { destination: { kind: "chat" } };
 }
 
 function topicRoute(messageThreadId: number): TelegramReplyRoute {
-  return {
-    destination: { kind: "topic", messageThreadId },
-    visibility: { kind: "normal" },
-  };
+  return { destination: { kind: "topic", messageThreadId } };
 }
 
 function directRoute(directMessagesTopicId: number): TelegramReplyRoute {
-  return {
-    destination: { kind: "directMessagesTopic", directMessagesTopicId },
-    visibility: { kind: "normal" },
-  };
+  return { destination: { kind: "directMessagesTopic", directMessagesTopicId } };
 }
 
 function genericThreadRoute(replyToMessageId: number): TelegramReplyRoute {
-  return {
-    destination: { kind: "genericThread", replyToMessageId },
-    visibility: { kind: "normal" },
-  };
-}
-
-function ephemeralTopicRoute(
-  messageThreadId: number,
-  receiverUserId: number,
-  incomingEphemeralMessageId: number,
-): TelegramReplyRoute {
-  return {
-    destination: { kind: "topic", messageThreadId },
-    visibility: { kind: "ephemeral", receiverUserId, incomingEphemeralMessageId },
-  };
+  return { destination: { kind: "genericThread", replyToMessageId } };
 }

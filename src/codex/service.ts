@@ -1,46 +1,29 @@
-import { rm } from "node:fs/promises";
-import { basename, join } from "node:path";
 import type {
   ChoiceOption,
   InboundAttachment,
   MessageResponder,
   OutboundAttachment,
-  OutboundStream,
-  ProgressAction,
-  ProgressPlanStep,
-  ProgressSnapshot,
   ProviderReference,
 } from "../core/channel.js";
 import type { ConversationStore } from "../core/conversation-store.js";
+import type { RequestId } from "../generated/codex/RequestId.js";
 import type { ServerNotification } from "../generated/codex/ServerNotification.js";
 import type { ServerRequest } from "../generated/codex/ServerRequest.js";
 import type { JsonValue } from "../generated/codex/serde_json/JsonValue.js";
 import type { AccountLoginCompletedNotification } from "../generated/codex/v2/AccountLoginCompletedNotification.js";
-import type { AgentMessageDeltaNotification } from "../generated/codex/v2/AgentMessageDeltaNotification.js";
 import type { CommandExecutionRequestApprovalResponse } from "../generated/codex/v2/CommandExecutionRequestApprovalResponse.js";
 import type { DynamicToolCallParams } from "../generated/codex/v2/DynamicToolCallParams.js";
 import type { DynamicToolCallResponse } from "../generated/codex/v2/DynamicToolCallResponse.js";
 import type { DynamicToolSpec } from "../generated/codex/v2/DynamicToolSpec.js";
-import type { FileChangePatchUpdatedNotification } from "../generated/codex/v2/FileChangePatchUpdatedNotification.js";
 import type { FileChangeRequestApprovalResponse } from "../generated/codex/v2/FileChangeRequestApprovalResponse.js";
-import type { FileUpdateChange } from "../generated/codex/v2/FileUpdateChange.js";
 import type { GetAccountResponse } from "../generated/codex/v2/GetAccountResponse.js";
-import type { ItemCompletedNotification } from "../generated/codex/v2/ItemCompletedNotification.js";
-import type { ItemStartedNotification } from "../generated/codex/v2/ItemStartedNotification.js";
 import type { LoginAccountResponse } from "../generated/codex/v2/LoginAccountResponse.js";
 import type { PermissionsRequestApprovalResponse } from "../generated/codex/v2/PermissionsRequestApprovalResponse.js";
-import type { ReasoningSummaryTextDeltaNotification } from "../generated/codex/v2/ReasoningSummaryTextDeltaNotification.js";
-import type { ThreadItem } from "../generated/codex/v2/ThreadItem.js";
 import type { ThreadResumeResponse } from "../generated/codex/v2/ThreadResumeResponse.js";
 import type { ThreadStartParams } from "../generated/codex/v2/ThreadStartParams.js";
 import type { ThreadStartResponse } from "../generated/codex/v2/ThreadStartResponse.js";
 import type { ToolRequestUserInputAnswer } from "../generated/codex/v2/ToolRequestUserInputAnswer.js";
 import type { ToolRequestUserInputResponse } from "../generated/codex/v2/ToolRequestUserInputResponse.js";
-import type { Turn } from "../generated/codex/v2/Turn.js";
-import type { TurnCompletedNotification } from "../generated/codex/v2/TurnCompletedNotification.js";
-import type { TurnInterruptResponse } from "../generated/codex/v2/TurnInterruptResponse.js";
-import type { TurnPlanUpdatedNotification } from "../generated/codex/v2/TurnPlanUpdatedNotification.js";
-import type { TurnStartedNotification } from "../generated/codex/v2/TurnStartedNotification.js";
 import type { TurnStartParams } from "../generated/codex/v2/TurnStartParams.js";
 import type { TurnStartResponse } from "../generated/codex/v2/TurnStartResponse.js";
 import type { UserInput } from "../generated/codex/v2/UserInput.js";
@@ -48,30 +31,14 @@ import { type Deferred, deferred, KeyedSerialQueue } from "../shared/async.js";
 import { BridgeError, errorMessage } from "../shared/errors.js";
 import type { Logger } from "../shared/logger.js";
 import type { VoiceTranscriber } from "../transcription/service.js";
-import { generatedFilePaths, resolveOutboundAttachments } from "./output-files.js";
 import type { ApplicationContext, CodexAppServer } from "./rpc.js";
-
-interface ActiveTurn {
-  readonly conversationKey: string;
-  readonly connector: string;
-  readonly threadId: string;
-  readonly responder: MessageResponder | undefined;
-  readonly stream: OutboundStream;
-  readonly invocation: CodexInvocationContext;
-  readonly completion: Deferred<Turn>;
-  readonly interruptRequests: Map<string, Promise<void>>;
-  readonly phases: Map<string, "commentary" | "final_answer" | null>;
-  readonly actions: Map<string, readonly ProgressAction[]>;
-  readonly reasoning: Map<string, readonly string[]>;
-  readonly generatedPaths: string[];
-  progressMessage: string;
-  plan: readonly ProgressPlanStep[];
-  finalText: string;
-  terminalTurn: Turn | undefined;
-  settlementTimer: ReturnType<typeof setTimeout> | undefined;
-  interruptRequested: boolean;
-  turnId: string | undefined;
-}
+import {
+  type FinalizedTurn,
+  silentStream,
+  ThreadSession,
+  type ThreadSessionContext,
+  type TurnPresentation,
+} from "./thread-session.js";
 
 export interface CodexInvocationContext {
   readonly owner?: ProviderReference;
@@ -111,32 +78,26 @@ export interface CodexTurnResult {
   readonly turnId: string;
   /** Unmodified final assistant text, before delivery-specific warnings. */
   readonly rawText: string;
-  readonly text: string;
   readonly attachments: readonly OutboundAttachment[];
   readonly unavailableAttachments: readonly string[];
   dispose(): Promise<void>;
 }
 
-export type BackgroundLeaseDecision =
+type BackgroundLeaseDecision =
   | { readonly acquired: true; readonly release: () => void }
   | { readonly acquired: false; readonly reason: string; readonly retryAt: Date };
 
-interface ExecuteTurnRequest {
-  readonly conversationKey: string;
-  readonly connector: string;
-  readonly threadId: string;
+interface StartTurnRequest extends TurnPresentation {
   readonly input: readonly UserInput[];
   readonly turnSettings: CodexTurnSettings;
-  readonly invocation: CodexInvocationContext;
-  readonly responder?: MessageResponder;
-  readonly stream: OutboundStream;
   readonly outputSchema?: JsonValue;
-  readonly failIfInterrupted?: boolean;
+  /** Called once the turn exists in Codex and its rendering is session-owned. */
+  readonly onStarted?: () => void;
 }
 
-export type LoginCompletedListener = (notification: AccountLoginCompletedNotification) => void;
+type LoginCompletedListener = (notification: AccountLoginCompletedNotification) => void;
 
-export type CodexThreadSettings = Readonly<
+type CodexThreadSettings = Readonly<
   Pick<
     ThreadStartParams,
     | "model"
@@ -152,7 +113,7 @@ export type CodexThreadSettings = Readonly<
   >
 >;
 
-export type CodexTurnSettings = Readonly<
+type CodexTurnSettings = Readonly<
   Pick<
     TurnStartParams,
     | "approvalPolicy"
@@ -172,35 +133,32 @@ export interface EffectiveCodexSettings {
 }
 
 export type ExplicitSkillInput = Extract<UserInput, { readonly type: "skill" }>;
-export type EffectiveCodexSettingsProvider = () =>
+type EffectiveCodexSettingsProvider = () =>
   | EffectiveCodexSettings
   | Promise<EffectiveCodexSettings>;
-export type ExplicitSkillInputProvider = (
+type ExplicitSkillInputProvider = (
   text: string,
 ) => readonly ExplicitSkillInput[] | Promise<readonly ExplicitSkillInput[]>;
 
-export interface CodexServiceProviders {
+interface CodexServiceProviders {
   readonly effectiveSettings?: EffectiveCodexSettingsProvider;
   readonly explicitSkillInputs?: ExplicitSkillInputProvider;
 }
 
 export class CodexService {
   static readonly #backgroundQuietPeriodMs = 30_000;
-  static readonly #turnSettlementDelayMs = 100;
   readonly #queue = new KeyedSerialQueue();
-  readonly #activeByThread = new Map<string, ActiveTurn>();
-  readonly #activeByConversation = new Map<string, ActiveTurn>();
+  readonly #sessions = new Map<string, ThreadSession>();
+  readonly #conversationSessions = new Map<string, ThreadSession>();
   readonly #dynamicTools = new Map<string, CodexDynamicTool>();
   readonly #foregroundWaiting = new Map<string, number>();
   readonly #lastForegroundAt = new Map<string, number>();
-  readonly #loadedThreads = new Set<string>();
   readonly #loginListeners = new Set<LoginCompletedListener>();
   readonly #rpc: CodexAppServer;
   readonly #conversations: ConversationStore;
   readonly #workspace: string;
-  readonly #generatedImagesDirectory: string;
-  readonly #outboundDirectory: string;
   readonly #logger: Logger;
+  readonly #sessionContext: ThreadSessionContext;
   readonly #voiceTranscriber: VoiceTranscriber | undefined;
   readonly #remoteClientContextEnabled: () => boolean;
   readonly #effectiveSettings: EffectiveCodexSettingsProvider;
@@ -224,9 +182,14 @@ export class CodexService {
     this.#rpc = rpc;
     this.#conversations = conversations;
     this.#workspace = workspace;
-    this.#generatedImagesDirectory = generatedImagesDirectory;
-    this.#outboundDirectory = outboundDirectory;
     this.#logger = logger;
+    this.#sessionContext = {
+      rpc,
+      logger,
+      workspace,
+      generatedImagesDirectory,
+      outboundDirectory,
+    };
     this.#voiceTranscriber = voiceTranscriber;
     this.#remoteClientContextEnabled = remoteClientContextEnabled;
     this.#effectiveSettings = providers.effectiveSettings ?? (() => ({}));
@@ -316,7 +279,7 @@ export class CodexService {
         dequeued = true;
         this.decrementForegroundWaiting(conversationKey);
         await this.enterJob();
-        let result: CodexTurnResult | undefined;
+        let started = false;
         try {
           if (!shouldTranscribe) {
             if (startsQueued) {
@@ -332,28 +295,38 @@ export class CodexService {
           ]);
           const threadId = await this.ensureThread(
             conversationKey,
+            connector,
             ephemeral,
             settings.thread ?? {},
           );
-          result = await this.executeTurn({
+          const session = this.requireSession(threadId);
+          this.#conversationSessions.set(conversationKey, session);
+          session.adoptPresenter(conversationKey, connector, responder, invocation);
+          const finalized = await this.startTurn(session, {
+            origin: "user",
+            stream,
+            responder,
+            invocation,
             conversationKey,
             connector,
-            threadId,
             input: [...createTurnInput(prepared, connector, attachments), ...skillInputs],
             turnSettings: settings.turn ?? {},
-            invocation,
-            responder,
-            stream,
+            onStarted: () => {
+              started = true;
+            },
           });
-          await stream.complete(
-            result.text || (result.attachments.length === 0 ? "Done." : ""),
-            result.attachments,
-          );
+          if (finalized.turn.status === "failed") {
+            this.#logger.warn("Codex turn failed", {
+              conversationKey,
+              turnId: finalized.turn.id,
+              error: finalized.turn.error?.message,
+            });
+          }
         } catch (error) {
           this.#logger.error("Codex turn failed", error, { conversationKey });
-          await stream.fail(errorMessage(error));
+          // Once a turn started, its session owns the stream, including failure.
+          if (!started) await stream.fail(errorMessage(error));
         } finally {
-          await result?.dispose();
           this.#lastForegroundAt.set(conversationKey, Date.now());
           this.leaveJob();
         }
@@ -381,12 +354,31 @@ export class CodexService {
                   : { developerInstructions: request.thread.developerInstructions }),
               },
               "automation",
+              false,
+              request.conversationKey,
+              request.connector,
             )
-          : await this.resumeThreadStrict(request.thread.threadId, settings.thread ?? {});
-      return await this.executeTurn({
+          : await this.resumeThreadStrict(
+              request.thread.threadId,
+              settings.thread ?? {},
+              request.conversationKey,
+              request.connector,
+            );
+      const session = this.requireSession(threadId);
+      this.#conversationSessions.set(request.conversationKey, session);
+      session.adoptPresenter(
+        request.conversationKey,
+        request.connector,
+        undefined,
+        request.invocation,
+      );
+      const finalized = await this.startTurn(session, {
+        origin: "scheduled",
+        stream: silentStream,
+        responder: undefined,
+        invocation: request.invocation,
         conversationKey: request.conversationKey,
         connector: request.connector,
-        threadId,
         input: [...createTurnInput(request.prompt, request.connector, []), ...skillInputs],
         turnSettings: {
           ...(settings.turn ?? {}),
@@ -394,112 +386,65 @@ export class CodexService {
           ...(request.model === undefined ? {} : { model: request.model }),
           ...(request.reasoningEffort === undefined ? {} : { effort: request.reasoningEffort }),
         },
-        invocation: request.invocation,
-        stream: silentStream,
-        failIfInterrupted: true,
         ...(request.outputSchema === undefined ? {} : { outputSchema: request.outputSchema }),
       });
+      const turn = finalized.turn;
+      if (turn.status === "failed") {
+        throw new BridgeError(turn.error?.message ?? "Codex turn failed", "CODEX_TURN_FAILED");
+      }
+      if (turn.status === "interrupted") {
+        await finalized.dispose();
+        throw new BridgeError("Scheduled Codex turn was interrupted", "CODEX_TURN_INTERRUPTED");
+      }
+      return {
+        threadId,
+        turnId: turn.id,
+        rawText: finalized.finalText,
+        attachments: finalized.attachments,
+        unavailableAttachments: finalized.unavailableAttachments,
+        dispose: finalized.dispose,
+      };
     } finally {
       this.leaveJob();
     }
   }
 
-  private async executeTurn(request: ExecuteTurnRequest): Promise<CodexTurnResult> {
-    const stagingDirectory = join(this.#outboundDirectory, crypto.randomUUID());
-    const active: ActiveTurn = {
-      conversationKey: request.conversationKey,
-      connector: request.connector,
-      threadId: request.threadId,
-      responder: request.responder,
-      stream: request.stream,
-      invocation: request.invocation,
-      completion: deferred<Turn>(),
-      interruptRequests: new Map(),
-      phases: new Map(),
-      actions: new Map(),
-      reasoning: new Map(),
-      generatedPaths: [],
-      progressMessage: "",
-      plan: [],
-      finalText: "",
-      terminalTurn: undefined,
-      settlementTimer: undefined,
-      interruptRequested: false,
-      turnId: undefined,
-    };
-    void active.completion.promise.catch(() => undefined);
-    this.#activeByThread.set(request.threadId, active);
-    this.#activeByConversation.set(request.conversationKey, active);
-
+  /**
+   * Start a turn and follow it to its `turn/completed` notification. The
+   * turn/start response and the turn/started notification race by design;
+   * the session binds the presentation to whichever announcement wins.
+   */
+  private async startTurn(
+    session: ThreadSession,
+    request: StartTurnRequest,
+  ): Promise<FinalizedTurn> {
+    const additionalContext = this.additionalContext(request.connector, request.invocation);
+    const pending = session.expectTurn(request);
+    let response: TurnStartResponse;
     try {
-      const additionalContext = this.additionalContext(request.connector, request.invocation);
-      const response = await this.#rpc.request<TurnStartResponse>({
+      response = await this.#rpc.request<TurnStartResponse>({
         method: "turn/start",
         params: {
           ...request.turnSettings,
-          threadId: request.threadId,
+          threadId: session.threadId,
           clientUserMessageId: crypto.randomUUID(),
           input: [...request.input],
           ...(Object.keys(additionalContext).length === 0 ? {} : { additionalContext }),
           ...(request.outputSchema === undefined ? {} : { outputSchema: request.outputSchema }),
         },
       });
-      if (active.turnId !== undefined && active.turnId !== response.turn.id) {
-        throw new BridgeError(
-          "Codex returned inconsistent turn identifiers",
-          "CODEX_TURN_MISMATCH",
-        );
-      }
-      active.turnId = response.turn.id;
-      if (this.#interruptingScheduledTurns && request.invocation.automationId !== undefined) {
-        await this.interruptActiveTurn(active);
-      }
-      const turn = await active.completion.promise;
-      if (turn.status === "failed") {
-        throw new BridgeError(turn.error?.message ?? "Codex turn failed", "CODEX_TURN_FAILED");
-      }
-      if (turn.status === "interrupted" && request.failIfInterrupted === true) {
-        throw new BridgeError("Scheduled Codex turn was interrupted", "CODEX_TURN_INTERRUPTED");
-      }
-
-      const finalText = this.finalTextFromTurn(turn) || active.finalText;
-      const resolution = await resolveOutboundAttachments(
-        this.#workspace,
-        this.#generatedImagesDirectory,
-        stagingDirectory,
-        finalText,
-        [...active.generatedPaths, ...generatedFilePaths(turn.items)],
-      );
-      const responseText =
-        turn.status === "interrupted" && finalText.length === 0
-          ? "Stopped."
-          : appendAttachmentWarning(finalText, resolution.unavailable);
-      let disposed = false;
-      return {
-        threadId: request.threadId,
-        turnId: turn.id,
-        rawText: finalText,
-        text: responseText,
-        attachments: resolution.attachments,
-        unavailableAttachments: resolution.unavailable,
-        dispose: async () => {
-          if (disposed) return;
-          disposed = true;
-          await rm(stagingDirectory, { recursive: true, force: true }).catch(() => undefined);
-        },
-      };
     } catch (error) {
-      await rm(stagingDirectory, { recursive: true, force: true }).catch(() => undefined);
-      throw error;
-    } finally {
-      this.clearTurnSettlement(active);
-      if (this.#activeByThread.get(request.threadId) === active) {
-        this.#activeByThread.delete(request.threadId);
-      }
-      if (this.#activeByConversation.get(request.conversationKey) === active) {
-        this.#activeByConversation.delete(request.conversationKey);
-      }
+      const view = pending.cancel();
+      if (view === undefined) throw error;
+      request.onStarted?.();
+      return await view.terminal.promise;
     }
+    const view = pending.claim(response.turn.id);
+    request.onStarted?.();
+    if (this.#interruptingScheduledTurns && request.invocation.automationId !== undefined) {
+      await session.interruptTurn(view);
+    }
+    return await view.terminal.promise;
   }
 
   private async transcribeVoiceMessages(
@@ -530,10 +475,11 @@ export class CodexService {
 
   public async activateConversationThread(
     conversationKey: string,
+    connector: string,
     threadId: string,
   ): Promise<boolean> {
     if (
-      this.#activeByConversation.has(conversationKey) ||
+      this.#conversationSessions.get(conversationKey)?.busy === true ||
       (this.#foregroundWaiting.get(conversationKey) ?? 0) > 0
     ) {
       throw new BridgeError(
@@ -550,7 +496,12 @@ export class CodexService {
     }
     try {
       const settings = await this.#effectiveSettings();
-      const resumedThreadId = await this.resumeThreadStrict(threadId, settings.thread ?? {});
+      const resumedThreadId = await this.resumeThreadStrict(
+        threadId,
+        settings.thread ?? {},
+        conversationKey,
+        connector,
+      );
       return await this.#conversations.switchTo(conversationKey, resumedThreadId);
     } finally {
       lease.release();
@@ -559,28 +510,33 @@ export class CodexService {
 
   public async activatePreviousConversationThread(
     conversationKey: string,
+    connector: string,
   ): Promise<string | undefined> {
     const previous = this.#conversations.previous(conversationKey);
     if (previous === undefined) return undefined;
-    await this.activateConversationThread(conversationKey, previous);
+    await this.activateConversationThread(conversationKey, connector, previous);
     return previous;
   }
 
   public async interrupt(conversationKey: string): Promise<boolean> {
-    const active = this.#activeByConversation.get(conversationKey);
-    return active === undefined ? false : await this.interruptActiveTurn(active);
+    const sessions = new Set<ThreadSession>();
+    const bound = this.#conversationSessions.get(conversationKey);
+    if (bound !== undefined) sessions.add(bound);
+    const storedThread = this.#conversations.get(conversationKey);
+    const stored = storedThread === undefined ? undefined : this.#sessions.get(storedThread);
+    if (stored !== undefined) sessions.add(stored);
+    let interrupted = false;
+    for (const session of sessions) {
+      interrupted = (await session.interruptRunning()) || interrupted;
+    }
+    return interrupted;
   }
 
   public async interruptScheduledTurns(): Promise<void> {
     this.#interruptingScheduledTurns = true;
-    const activeTurns = new Set(
-      [...this.#activeByThread.values()].filter(
-        (active) => active.invocation.automationId !== undefined && active.turnId !== undefined,
-      ),
-    );
-    await Promise.allSettled(
-      [...activeTurns].map(async (active) => {
-        await this.interruptActiveTurn(active);
+    await Promise.all(
+      [...this.#sessions.values()].map(async (session) => {
+        await session.interruptMatching((view) => view.invocation.automationId !== undefined);
       }),
     );
   }
@@ -609,35 +565,38 @@ export class CodexService {
 
   private async ensureThread(
     conversationKey: string,
+    connector: string,
     ephemeral: boolean,
     settings: CodexThreadSettings,
   ): Promise<string> {
     if (!ephemeral) {
       const stored = this.#conversations.get(conversationKey);
       if (stored !== undefined) {
-        if (!this.#loadedThreads.has(stored)) {
-          try {
-            return await this.resumeThreadStrict(stored, settings);
-          } catch (error) {
-            if (
-              error instanceof BridgeError &&
-              (error.code === "CODEX_NOT_RUNNING" || error.code === "CODEX_EXITED")
-            ) {
-              throw error;
-            }
-            this.#logger.warn("Stored Codex thread could not be resumed; starting a new thread", {
-              conversationKey,
-              error: errorMessage(error),
-            });
-            await this.#conversations.delete(conversationKey);
+        try {
+          return await this.resumeThreadStrict(stored, settings, conversationKey, connector);
+        } catch (error) {
+          if (
+            error instanceof BridgeError &&
+            (error.code === "CODEX_NOT_RUNNING" || error.code === "CODEX_EXITED")
+          ) {
+            throw error;
           }
-        } else {
-          return stored;
+          this.#logger.warn("Stored Codex thread could not be resumed; starting a new thread", {
+            conversationKey,
+            error: errorMessage(error),
+          });
+          await this.#conversations.delete(conversationKey);
         }
       }
     }
 
-    const threadId = await this.startThread(settings, "telex", ephemeral);
+    const threadId = await this.startThread(
+      settings,
+      "telex",
+      ephemeral,
+      conversationKey,
+      connector,
+    );
     if (!ephemeral) await this.#conversations.set(conversationKey, threadId);
     return threadId;
   }
@@ -645,7 +604,9 @@ export class CodexService {
   private async startThread(
     settings: CodexThreadSettings,
     threadSource: string,
-    ephemeral = false,
+    ephemeral: boolean,
+    conversationKey: string,
+    connector: string,
   ): Promise<string> {
     const started = await this.#rpc.request<ThreadStartResponse>({
       method: "thread/start",
@@ -658,21 +619,39 @@ export class CodexService {
         dynamicTools: [...this.#dynamicTools.values()].map((tool) => tool.spec),
       },
     });
-    this.#loadedThreads.add(started.thread.id);
+    this.openSession(started.thread.id, conversationKey, connector);
     return started.thread.id;
   }
 
   private async resumeThreadStrict(
     threadId: string,
     settings: CodexThreadSettings,
+    conversationKey: string,
+    connector: string,
   ): Promise<string> {
-    if (this.#loadedThreads.has(threadId)) return threadId;
+    if (this.#sessions.has(threadId)) return threadId;
     const resumed = await this.#rpc.request<ThreadResumeResponse>({
       method: "thread/resume",
       params: { ...settings, threadId, cwd: this.#workspace },
     });
-    this.#loadedThreads.add(resumed.thread.id);
+    this.openSession(resumed.thread.id, conversationKey, connector);
     return resumed.thread.id;
+  }
+
+  private openSession(threadId: string, conversationKey: string, connector: string): void {
+    if (this.#sessions.has(threadId)) return;
+    this.#sessions.set(
+      threadId,
+      new ThreadSession(threadId, conversationKey, connector, this.#sessionContext),
+    );
+  }
+
+  private requireSession(threadId: string): ThreadSession {
+    const session = this.#sessions.get(threadId);
+    if (session === undefined) {
+      throw new BridgeError(`Codex thread ${threadId} is not loaded`, "CODEX_THREAD_NOT_LOADED");
+    }
+    return session;
   }
 
   private additionalContext(
@@ -712,249 +691,34 @@ export class CodexService {
   }
 
   private handleTransportExit(error: BridgeError): void {
-    this.#loadedThreads.clear();
-    for (const active of this.#activeByThread.values()) {
-      this.clearTurnSettlement(active);
-      active.completion.reject(error);
-    }
+    const sessions = [...this.#sessions.values()];
+    this.#sessions.clear();
+    this.#conversationSessions.clear();
+    for (const session of sessions) session.fail(error);
   }
 
   private handleNotification(notification: ServerNotification): void {
     switch (notification.method) {
-      case "turn/started":
-        this.handleTurnStarted(notification.params);
-        break;
-      case "item/started":
-        this.handleItemStarted(notification.params);
-        break;
-      case "item/completed":
-        this.handleItemCompleted(notification.params);
-        break;
-      case "item/agentMessage/delta":
-        this.handleAgentDelta(notification.params);
-        break;
-      case "item/reasoning/summaryTextDelta":
-        this.handleReasoningDelta(notification.params);
-        break;
-      case "item/fileChange/patchUpdated":
-        this.handleFileChangeUpdated(notification.params);
-        break;
-      case "turn/plan/updated":
-        this.handlePlanUpdated(notification.params);
-        break;
-      case "turn/completed":
-        this.handleTurnCompleted(notification.params);
-        break;
       case "account/login/completed":
         this.handleLoginCompleted(notification.params);
-        break;
+        return;
       case "error":
         this.#logger.warn("Codex reported an error notification", {
           codexMessage: notification.params.error.message,
         });
-        break;
-      default:
-        break;
-    }
-  }
-
-  private handleTurnStarted(notification: TurnStartedNotification): void {
-    const active = this.#activeByThread.get(notification.threadId);
-    if (active === undefined) return;
-    if (active.turnId !== undefined && active.turnId !== notification.turn.id) {
-      this.followTurn(active, notification.turn.id, "turn/started notification");
-    } else {
-      active.turnId = notification.turn.id;
-    }
-    if (active.interruptRequested) {
-      void this.interruptActiveTurn(active).catch((error) => {
-        this.#logger.error("Failed to interrupt successor Codex turn", error, {
-          threadId: active.threadId,
-          turnId: notification.turn.id,
+        return;
+      case "configWarning":
+        this.#logger.warn("Codex reported a config warning", {
+          summary: notification.params.summary,
+          path: notification.params.path,
         });
-      });
-    }
-  }
-
-  private handleItemStarted(notification: ItemStartedNotification): void {
-    const active = this.#activeByThread.get(notification.threadId);
-    if (active === undefined || !matchesTurn(active, notification.turnId)) return;
-    if (notification.item.type === "agentMessage") {
-      active.phases.set(notification.item.id, notification.item.phase);
-      if (notification.item.phase === "commentary") {
-        active.progressMessage = notification.item.text;
+        return;
+      default: {
+        const threadId = notificationThreadId(notification);
+        if (threadId !== undefined) this.#sessions.get(threadId)?.handleNotification(notification);
+        return;
       }
     }
-    if (notification.item.type === "reasoning") {
-      active.reasoning.set(notification.item.id, notification.item.summary);
-    }
-    if (
-      notification.item.type === "imageGeneration" &&
-      notification.item.savedPath !== undefined &&
-      !active.generatedPaths.includes(notification.item.savedPath)
-    ) {
-      active.generatedPaths.push(notification.item.savedPath);
-    }
-    this.updateItemActions(active, notification.item);
-  }
-
-  private handleItemCompleted(notification: ItemCompletedNotification): void {
-    const active = this.#activeByThread.get(notification.threadId);
-    if (active === undefined || !matchesTurn(active, notification.turnId)) return;
-    if (notification.item.type === "agentMessage") {
-      active.phases.set(notification.item.id, notification.item.phase);
-      if (notification.item.phase === "commentary") {
-        active.progressMessage = notification.item.text;
-      } else if (notification.item.text.length > 0) {
-        active.finalText = notification.item.text;
-      }
-    }
-    if (notification.item.type === "reasoning") {
-      active.reasoning.set(notification.item.id, notification.item.summary);
-    }
-    if (
-      notification.item.type === "imageGeneration" &&
-      notification.item.savedPath !== undefined &&
-      !active.generatedPaths.includes(notification.item.savedPath)
-    ) {
-      active.generatedPaths.push(notification.item.savedPath);
-    }
-    this.updateItemActions(active, notification.item);
-  }
-
-  private handleAgentDelta(notification: AgentMessageDeltaNotification): void {
-    const active = this.#activeByThread.get(notification.threadId);
-    if (active === undefined || !matchesTurn(active, notification.turnId)) return;
-    if (active.phases.get(notification.itemId) === "commentary") {
-      active.progressMessage += notification.delta;
-      this.publishProgress(active);
-    } else {
-      active.finalText += notification.delta;
-      active.stream.appendFinal(notification.delta);
-    }
-  }
-
-  private handleReasoningDelta(notification: ReasoningSummaryTextDeltaNotification): void {
-    const active = this.#activeByThread.get(notification.threadId);
-    if (active === undefined || !matchesTurn(active, notification.turnId)) return;
-    const summaries = [...(active.reasoning.get(notification.itemId) ?? [])];
-    summaries[notification.summaryIndex] =
-      `${summaries[notification.summaryIndex] ?? ""}${notification.delta}`;
-    active.reasoning.set(notification.itemId, summaries);
-    this.publishProgress(active);
-  }
-
-  private handleFileChangeUpdated(notification: FileChangePatchUpdatedNotification): void {
-    const active = this.#activeByThread.get(notification.threadId);
-    if (active === undefined || !matchesTurn(active, notification.turnId)) return;
-    active.actions.set(notification.itemId, fileChangeActions(notification.changes, false));
-    this.publishProgress(active);
-  }
-
-  private handlePlanUpdated(notification: TurnPlanUpdatedNotification): void {
-    const active = this.#activeByThread.get(notification.threadId);
-    if (active === undefined || !matchesTurn(active, notification.turnId)) return;
-    active.plan = notification.plan;
-    this.publishProgress(active);
-  }
-
-  private updateItemActions(active: ActiveTurn, item: ThreadItem): void {
-    const actions = progressActions(item);
-    if (actions.length > 0) active.actions.set(item.id, actions);
-    this.publishProgress(active);
-  }
-
-  private publishProgress(active: ActiveTurn): void {
-    const summary = Array.from(active.reasoning.values())
-      .reverse()
-      .flatMap((summaries) => [...summaries].reverse())
-      .find((value) => value.trim().length > 0);
-    const progress: ProgressSnapshot = {
-      ...(summary === undefined ? {} : { summary }),
-      ...(active.progressMessage.trim().length === 0 ? {} : { message: active.progressMessage }),
-      actions: Array.from(active.actions.values()).flat(),
-      plan: active.plan,
-    };
-    active.stream.setProgress(progress);
-  }
-
-  private handleTurnCompleted(notification: TurnCompletedNotification): void {
-    const active = this.#activeByThread.get(notification.threadId);
-    if (active === undefined || !matchesTurn(active, notification.turn.id)) return;
-    active.terminalTurn = notification.turn;
-    this.clearTurnSettlement(active);
-    active.settlementTimer = setTimeout(() => {
-      active.settlementTimer = undefined;
-      if (
-        active.turnId === notification.turn.id &&
-        active.terminalTurn?.id === notification.turn.id
-      ) {
-        active.completion.resolve(notification.turn);
-      }
-    }, CodexService.#turnSettlementDelayMs);
-  }
-
-  private clearTurnSettlement(active: ActiveTurn): void {
-    if (active.settlementTimer === undefined) return;
-    clearTimeout(active.settlementTimer);
-    active.settlementTimer = undefined;
-  }
-
-  private followTurn(active: ActiveTurn, turnId: string, source: string): void {
-    if (active.turnId === turnId) return;
-    const previousTurnId = active.turnId;
-    this.clearTurnSettlement(active);
-    active.terminalTurn = undefined;
-    active.phases.clear();
-    active.actions.clear();
-    active.reasoning.clear();
-    active.progressMessage = "";
-    active.plan = [];
-    active.finalText = "";
-    active.turnId = turnId;
-    active.stream.setProgress({ summary: "Thinking…", actions: [], plan: [] });
-    this.#logger.info("Following successor Codex turn", {
-      threadId: active.threadId,
-      previousTurnId,
-      turnId,
-      source,
-    });
-  }
-
-  private async interruptActiveTurn(active: ActiveTurn): Promise<boolean> {
-    if (active.turnId === undefined) return false;
-    active.interruptRequested = true;
-    const requestedTurnId = active.turnId;
-    try {
-      await this.requestTurnInterrupt(active, requestedTurnId);
-    } catch (error) {
-      const actualTurnId =
-        active.turnId !== requestedTurnId
-          ? active.turnId
-          : activeTurnIdFromInterruptError(errorMessage(error));
-      if (actualTurnId === undefined || actualTurnId === requestedTurnId) throw error;
-      this.followTurn(active, actualTurnId, "turn/interrupt mismatch");
-      await this.requestTurnInterrupt(active, actualTurnId);
-    }
-    return true;
-  }
-
-  private requestTurnInterrupt(active: ActiveTurn, turnId: string): Promise<void> {
-    const pending = active.interruptRequests.get(turnId);
-    if (pending !== undefined) return pending;
-    const request = this.#rpc
-      .request<TurnInterruptResponse>({
-        method: "turn/interrupt",
-        params: { threadId: active.threadId, turnId },
-      })
-      .then(() => undefined);
-    active.interruptRequests.set(turnId, request);
-    void request.catch(() => {
-      if (active.interruptRequests.get(turnId) === request) {
-        active.interruptRequests.delete(turnId);
-      }
-    });
-    return request;
   }
 
   private handleLoginCompleted(notification: AccountLoginCompletedNotification): void {
@@ -974,13 +738,10 @@ export class CodexService {
   private async handleServerRequest(request: ServerRequest): Promise<void> {
     switch (request.method) {
       case "item/commandExecution/requestApproval": {
-        const candidate = this.#activeByThread.get(request.params.threadId);
-        const active =
-          candidate !== undefined && matchesTurn(candidate, request.params.turnId)
-            ? candidate
-            : undefined;
         const choice = await this.askApproval(
-          active,
+          request.id,
+          request.params.threadId,
+          request.params.turnId,
           `Codex wants to run:\n\n${request.params.command ?? "(unknown command)"}${
             request.params.reason === undefined || request.params.reason === null
               ? ""
@@ -995,13 +756,10 @@ export class CodexService {
         break;
       }
       case "item/fileChange/requestApproval": {
-        const candidate = this.#activeByThread.get(request.params.threadId);
-        const active =
-          candidate !== undefined && matchesTurn(candidate, request.params.turnId)
-            ? candidate
-            : undefined;
         const choice = await this.askApproval(
-          active,
+          request.id,
+          request.params.threadId,
+          request.params.turnId,
           `Codex wants permission to change files${
             request.params.reason === undefined || request.params.reason === null
               ? "."
@@ -1015,42 +773,11 @@ export class CodexService {
         await this.#rpc.reply(request.id, response);
         break;
       }
-      case "item/tool/requestUserInput": {
-        const candidate = this.#activeByThread.get(request.params.threadId);
-        const active =
-          candidate !== undefined && matchesTurn(candidate, request.params.turnId)
-            ? candidate
-            : undefined;
-        const answers: Record<string, ToolRequestUserInputAnswer> = {};
-        for (const question of request.params.questions) {
-          if (active === undefined || question.options === null || question.options.length === 0) {
-            answers[question.id] = { answers: [] };
-            continue;
-          }
-          const options: ChoiceOption[] = question.options.map((option, index) => ({
-            id: String(index),
-            label: option.label,
-            description: option.description,
-          }));
-          const answer = await active.responder?.askChoice(question.question, options);
-          const selected = question.options[Number(answer)];
-          answers[question.id] = { answers: selected === undefined ? [] : [selected.label] };
-        }
-        const response: ToolRequestUserInputResponse = { answers };
-        await this.#rpc.reply(request.id, response);
-        break;
-      }
-      case "item/tool/call":
-        await this.handleDynamicToolCall(request.params, request.id);
-        break;
       case "item/permissions/requestApproval": {
-        const candidate = this.#activeByThread.get(request.params.threadId);
-        const active =
-          candidate !== undefined && matchesTurn(candidate, request.params.turnId)
-            ? candidate
-            : undefined;
         const choice = await this.askApproval(
-          active,
+          request.id,
+          request.params.threadId,
+          request.params.turnId,
           request.params.reason ?? "Codex is requesting additional permissions.",
         );
         const response: PermissionsRequestApprovalResponse = {
@@ -1070,6 +797,40 @@ export class CodexService {
         await this.#rpc.reply(request.id, response);
         break;
       }
+      case "item/tool/requestUserInput": {
+        const session = this.#sessions.get(request.params.threadId);
+        const responder = this.turnResponder(request.params.threadId, request.params.turnId);
+        const signal = session?.beginServerRequest(request.id);
+        const answers: Record<string, ToolRequestUserInputAnswer> = {};
+        try {
+          for (const question of request.params.questions) {
+            if (
+              responder === undefined ||
+              question.options === null ||
+              question.options.length === 0
+            ) {
+              answers[question.id] = { answers: [] };
+              continue;
+            }
+            const options: ChoiceOption[] = question.options.map((option, index) => ({
+              id: String(index),
+              label: option.label,
+              description: option.description,
+            }));
+            const answer = await responder.askChoice(question.question, options, signal);
+            const selected = question.options[Number(answer)];
+            answers[question.id] = { answers: selected === undefined ? [] : [selected.label] };
+          }
+        } finally {
+          session?.endServerRequest(request.id);
+        }
+        const response: ToolRequestUserInputResponse = { answers };
+        await this.#rpc.reply(request.id, response);
+        break;
+      }
+      case "item/tool/call":
+        await this.handleDynamicToolCall(request.params, request.id);
+        break;
       default:
         await this.#rpc.replyError(request.id, -32_601, `Unsupported request: ${request.method}`);
     }
@@ -1079,8 +840,8 @@ export class CodexService {
     params: DynamicToolCallParams,
     requestId: ServerRequest["id"],
   ): Promise<void> {
-    const active = this.#activeByThread.get(params.threadId);
-    if (active === undefined || !matchesTurn(active, params.turnId) || params.namespace !== null) {
+    const view = this.#sessions.get(params.threadId)?.view(params.turnId);
+    if (view === undefined || params.namespace !== null) {
       await this.replyDynamicTool(requestId, false, "This tool call has no active Telex turn.");
       return;
     }
@@ -1091,10 +852,10 @@ export class CodexService {
     }
     try {
       const result = await tool.execute(params.arguments, {
-        ...active.invocation,
-        conversationKey: active.conversationKey,
-        connector: active.connector,
-        threadId: active.threadId,
+        ...view.invocation,
+        conversationKey: view.conversationKey,
+        connector: view.connector,
+        threadId: params.threadId,
         turnId: params.turnId,
         callId: params.callId,
       });
@@ -1120,50 +881,49 @@ export class CodexService {
     await this.#rpc.reply(requestId, response);
   }
 
+  private turnResponder(threadId: string, turnId: string): MessageResponder | undefined {
+    const session = this.#sessions.get(threadId);
+    if (session === undefined) return undefined;
+    const view = session.view(turnId);
+    // A known turn keeps its own presenter: scheduled turns intentionally
+    // have none, so their approvals are declined rather than shown to a
+    // user who is not attending the run.
+    if (view !== undefined) return view.responder;
+    return session.defaultResponder();
+  }
+
   private async askApproval(
-    active: ActiveTurn | undefined,
+    requestId: RequestId,
+    threadId: string,
+    turnId: string,
     prompt: string,
   ): Promise<"once" | "session" | "decline"> {
-    if (active?.responder === undefined) return "decline";
-    const answer = await active.responder.askChoice(prompt, [
-      { id: "once", label: "Allow once" },
-      { id: "session", label: "Allow for session" },
-      { id: "decline", label: "Deny" },
-    ]);
-    return answer === "once" || answer === "session" ? answer : "decline";
+    const session = this.#sessions.get(threadId);
+    const responder = this.turnResponder(threadId, turnId);
+    if (session === undefined || responder === undefined) return "decline";
+    const signal = session.beginServerRequest(requestId);
+    try {
+      const answer = await responder.askChoice(
+        prompt,
+        [
+          { id: "once", label: "Allow once" },
+          { id: "session", label: "Allow for session" },
+          { id: "decline", label: "Deny" },
+        ],
+        signal,
+      );
+      return answer === "once" || answer === "session" ? answer : "decline";
+    } finally {
+      session.endServerRequest(requestId);
+    }
   }
-
-  private finalTextFromTurn(turn: Turn): string {
-    const messages = turn.items.filter((item) => item.type === "agentMessage");
-    const finals = messages.filter((item) => item.phase === "final_answer");
-    const selected = finals.length > 0 ? finals : messages.slice(-1);
-    return selected
-      .map((item) => item.text)
-      .filter(Boolean)
-      .join("\n\n");
-  }
 }
 
-const silentStream: OutboundStream = {
-  start: async () => undefined,
-  setProgress: () => undefined,
-  appendFinal: () => undefined,
-  complete: async () => undefined,
-  fail: async () => undefined,
-};
-
-function matchesTurn(active: ActiveTurn, turnId: string): boolean {
-  return active.turnId === turnId;
-}
-
-function activeTurnIdFromInterruptError(message: string): string | undefined {
-  return /^expected active turn id `?[^`\s]+`? but found `?([^`\s]+)`?$/u.exec(message)?.[1];
-}
-
-function appendAttachmentWarning(text: string, unavailable: readonly string[]): string {
-  if (unavailable.length === 0) return text;
-  const warning = `Could not attach ${unavailable.join(", ")}.`;
-  return text.length === 0 ? warning : `${warning}\n\n${text}`;
+function notificationThreadId(notification: ServerNotification): string | undefined {
+  const params: unknown = notification.params;
+  if (typeof params !== "object" || params === null) return undefined;
+  const threadId = (params as Record<string, unknown>).threadId;
+  return typeof threadId === "string" ? threadId : undefined;
 }
 
 export function createTurnInput(
@@ -1217,139 +977,4 @@ function connectorDisplayName(connector: string): string {
   return words
     .map((word) => `${word.slice(0, 1).toUpperCase()}${word.slice(1).toLowerCase()}`)
     .join(" ");
-}
-
-function progressActions(item: ThreadItem): readonly ProgressAction[] {
-  switch (item.type) {
-    case "commandExecution":
-      return [{ label: commandActionLabel(item) }];
-    case "fileChange":
-      return fileChangeActions(item.changes, item.status !== "inProgress");
-    case "mcpToolCall":
-      return [
-        {
-          label: `${item.status === "inProgress" ? "Calling" : "Called"} ${item.server}.${item.tool}${durationSuffix(item.durationMs)}`,
-        },
-      ];
-    case "dynamicToolCall":
-      return [
-        {
-          label: `${item.status === "inProgress" ? "Calling" : "Called"} ${item.namespace === null ? "" : `${item.namespace}.`}${item.tool}${durationSuffix(item.durationMs)}`,
-        },
-      ];
-    case "collabAgentToolCall":
-      return [
-        {
-          label: `${item.status === "inProgress" ? "Running" : "Ran"} ${collaborationLabel(item.tool)}`,
-        },
-      ];
-    case "webSearch":
-      return [{ label: `Searched  ${item.query || "the web"}` }];
-    case "imageView":
-      return [{ label: `Viewed    ${basename(item.path)}` }];
-    case "imageGeneration":
-      return [{ label: `${item.status === "inProgress" ? "Generating" : "Generated"} image` }];
-    case "sleep":
-      return [{ label: `Waited    ${formatDuration(item.durationMs)}` }];
-    case "subAgentActivity":
-      return [{ label: `${capitalize(item.kind)} agent ${item.agentPath}` }];
-    case "enteredReviewMode":
-      return [{ label: "Entered review mode" }];
-    case "exitedReviewMode":
-      return [{ label: "Exited review mode" }];
-    default:
-      return [];
-  }
-}
-
-function fileChangeActions(
-  changes: readonly FileUpdateChange[],
-  completed: boolean,
-): readonly ProgressAction[] {
-  return changes.map((change) => {
-    const verb =
-      change.kind.type === "add"
-        ? completed
-          ? "Created"
-          : "Creating"
-        : change.kind.type === "delete"
-          ? completed
-            ? "Deleted"
-            : "Deleting"
-          : completed
-            ? "Edited"
-            : "Editing";
-    const counts = diffCounts(change.diff);
-    const diffSummary =
-      change.kind.type === "delete" || counts.added + counts.removed === 0
-        ? ""
-        : `   +${counts.added} −${counts.removed}`;
-    return { label: `${verb.padEnd(9)} ${basename(change.path)}${diffSummary}` };
-  });
-}
-
-function commandActionLabel(item: Extract<ThreadItem, { type: "commandExecution" }>): string {
-  const completed = item.status !== "inProgress";
-  const action = item.commandActions.length === 1 ? item.commandActions[0] : undefined;
-  let label: string;
-  switch (action?.type) {
-    case "read":
-      label = `${completed ? "Read" : "Reading"}     ${action.name || basename(action.path)}`;
-      break;
-    case "listFiles":
-      label = `${completed ? "Listed" : "Listing"}  files${action.path === null ? "" : ` in ${basename(action.path)}`}`;
-      break;
-    case "search":
-      label = `${completed ? "Searched" : "Searching"} ${action.query ?? "files"}`;
-      break;
-    default:
-      label = `${completed ? "Ran" : "Running"}      ${compactCommand(item.command)}`;
-  }
-  return `${label}${durationSuffix(item.durationMs)}`;
-}
-
-function diffCounts(diff: string): Readonly<{ added: number; removed: number }> {
-  let added = 0;
-  let removed = 0;
-  for (const line of diff.split("\n")) {
-    if (line.startsWith("+") && !line.startsWith("+++")) added += 1;
-    if (line.startsWith("-") && !line.startsWith("---")) removed += 1;
-  }
-  return { added, removed };
-}
-
-function durationSuffix(durationMs: number | null): string {
-  return durationMs === null ? "" : `   ${formatDuration(durationMs)}`;
-}
-
-function formatDuration(durationMs: number): string {
-  if (durationMs < 1_000) return `${durationMs}ms`;
-  if (durationMs < 60_000) return `${Math.round(durationMs / 100) / 10}s`;
-  return `${Math.round(durationMs / 60_000)}m`;
-}
-
-function compactCommand(command: string): string {
-  const compact = command.replaceAll(/\s+/g, " ").trim();
-  return compact.length <= 120 ? compact : `${compact.slice(0, 119).trimEnd()}…`;
-}
-
-function collaborationLabel(
-  tool: Extract<ThreadItem, { type: "collabAgentToolCall" }>["tool"],
-): string {
-  switch (tool) {
-    case "spawnAgent":
-      return "spawn agent";
-    case "sendInput":
-      return "send agent input";
-    case "resumeAgent":
-      return "resume agent";
-    case "wait":
-      return "wait for agents";
-    case "closeAgent":
-      return "close agent";
-  }
-}
-
-function capitalize(value: string): string {
-  return value.length === 0 ? value : `${value[0]?.toUpperCase()}${value.slice(1)}`;
 }

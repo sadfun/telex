@@ -1,4 +1,5 @@
 import type { ScheduledRunsEngine } from "../automations/engine.js";
+import type { CodexRuntimeStatus } from "../codex/runtime-service.js";
 import type { CodexService } from "../codex/service.js";
 import type { Account } from "../generated/codex/v2/Account.js";
 import type { AccountLoginCompletedNotification } from "../generated/codex/v2/AccountLoginCompletedNotification.js";
@@ -17,22 +18,54 @@ import type {
 const introText =
   "👋 Hi, I'm Telex. Send me a message and I'll hand it to Codex, then stream progress and results back into this chat.";
 
+/**
+ * The single source for the user-facing command list: /help and the Telegram
+ * command menu both derive from it. /continue stays hidden on purpose.
+ */
+export const botCommands: readonly {
+  readonly command: string;
+  readonly menuDescription: string;
+  readonly help: string;
+}[] = [
+  { command: "start", menuDescription: "Set up Telex", help: "show setup and sign-in help" },
+  { command: "new", menuDescription: "Start a new Codex task", help: "start a fresh Codex task" },
+  {
+    command: "back",
+    menuDescription: "Return to the previous Codex task",
+    help: "return to the previous Codex task",
+  },
+  { command: "stop", menuDescription: "Stop the running turn", help: "stop the current turn" },
+  { command: "schedules", menuDescription: "List scheduled runs", help: "list scheduled runs" },
+  {
+    command: "status",
+    menuDescription: "Show Codex status",
+    help: "check Codex and sign-in status",
+  },
+  { command: "login", menuDescription: "Sign in to Codex", help: "sign in to ChatGPT" },
+  { command: "logout", menuDescription: "Sign out of Codex", help: "sign out" },
+  { command: "config", menuDescription: "Open Codex settings", help: "open Codex settings" },
+  {
+    command: "reload",
+    menuDescription: "Reload Codex resources",
+    help: "reload Codex config, MCP servers, and skills",
+  },
+  {
+    command: "restart",
+    menuDescription: "Restart the Codex app-server",
+    help: "safely restart the Codex app-server",
+  },
+  {
+    command: "update",
+    menuDescription: "Update Telex",
+    help: "update Telex to the latest release",
+  },
+  { command: "help", menuDescription: "Show commands", help: "show this help" },
+];
+
 const helpText = [
   "Send me a message to work with Codex in this conversation.",
   "",
-  "/start — show setup and sign-in help",
-  "/new — start a fresh Codex task",
-  "/back — return to the previous Codex task",
-  "/stop — stop the current turn",
-  "/schedules — list scheduled runs",
-  "/status — check Codex and sign-in status",
-  "/login — sign in to ChatGPT",
-  "/logout — sign out",
-  "/config — open Codex settings",
-  "/reload — reload Codex config, MCP servers, and skills",
-  "/restart — safely restart the Codex app-server",
-  "/update — update Telex to the latest release",
-  "/help — show this help",
+  ...botCommands.map((entry) => `/${entry.command} — ${entry.help}`),
 ].join("\n");
 
 const readyText =
@@ -55,7 +88,7 @@ export interface TelexUpdateCommand {
 }
 
 export interface CodexRuntimeCommand {
-  status(): unknown;
+  status(): CodexRuntimeStatus;
   reload(): Promise<unknown>;
   restart(): Promise<unknown>;
 }
@@ -71,18 +104,17 @@ export class CodexBridge {
   readonly #codex: CodexService;
   readonly #publicUrl: string | undefined;
   readonly #logger: Logger;
-  readonly #updateCommand: TelexUpdateCommand | undefined;
-  readonly #runtimeCommand: CodexRuntimeCommand | undefined;
-  readonly #scheduledRuns: ScheduledRunsEngine | undefined;
+  readonly #updateCommand: TelexUpdateCommand;
+  readonly #runtimeCommand: CodexRuntimeCommand;
+  readonly #scheduledRuns: ScheduledRunsEngine;
   readonly #pendingLogins = new Map<string, PendingLogin>();
   #signedInConfirmed = false;
   #updateInProgress = false;
 
   public readonly handleMessage: MessageHandler = async (message) => {
     try {
-      const command =
-        message.command ??
-        (message.attachments.length === 0 ? parseCommand(message.text) : undefined);
+      // Command parsing is owned by the channel; the bridge trusts message.command.
+      const command = message.command;
       if (command === undefined) {
         if (!(await this.ensureSignedIn(message))) return;
         await this.runUserTurn(message);
@@ -102,9 +134,9 @@ export class CodexBridge {
     codex: CodexService,
     publicUrl: string | undefined,
     logger: Logger,
-    updateCommand?: TelexUpdateCommand,
-    runtimeCommand?: CodexRuntimeCommand,
-    scheduledRuns?: ScheduledRunsEngine,
+    updateCommand: TelexUpdateCommand,
+    runtimeCommand: CodexRuntimeCommand,
+    scheduledRuns: ScheduledRunsEngine,
   ) {
     this.#codex = codex;
     this.#publicUrl = publicUrl;
@@ -118,23 +150,22 @@ export class CodexBridge {
   }
 
   private async runUserTurn(message: InboundMessage): Promise<void> {
-    if (this.#scheduledRuns === undefined || message.address.isGuest) {
+    if (message.address.isGuest) {
       await this.#codex.runTurn(
         message.address.key,
         message.address.channel,
         message.text,
         message.responder,
-        message.address.isGuest,
+        true,
         message.attachments,
       );
       return;
     }
     const owner = messageOwner(message);
-    const conversation = messageConversation(message);
     const additionalContext = await this.#scheduledRuns.contextForReply(
       message.replyTo,
       owner,
-      conversation,
+      messageConversation(message),
     );
     await this.#codex.runTurn(
       message.address.key,
@@ -166,7 +197,10 @@ export class CodexBridge {
         await message.responder.sendText("Started a fresh Codex task. What should we work on?");
         return;
       case "back": {
-        const threadId = await this.#codex.activatePreviousConversationThread(message.address.key);
+        const threadId = await this.#codex.activatePreviousConversationThread(
+          message.address.key,
+          message.address.channel,
+        );
         await message.responder.sendText(
           threadId === undefined
             ? "There is no previous Codex task in this conversation."
@@ -243,12 +277,7 @@ export class CodexBridge {
   }
 
   private async handleSchedules(message: InboundMessage): Promise<void> {
-    const scheduledRuns = this.#scheduledRuns;
-    if (scheduledRuns === undefined) {
-      await message.responder.sendText("Scheduled runs are unavailable in this Telex build.");
-      return;
-    }
-    const automations = scheduledRuns.listForConversation(
+    const automations = this.#scheduledRuns.listForConversation(
       messageOwner(message),
       messageConversation(message),
     );
@@ -269,16 +298,11 @@ export class CodexBridge {
   }
 
   private async handleContinueRun(message: InboundMessage, runId: string): Promise<void> {
-    const scheduledRuns = this.#scheduledRuns;
-    if (scheduledRuns === undefined) {
-      await message.responder.sendText("Scheduled runs are unavailable in this Telex build.");
-      return;
-    }
     if (runId.trim().length === 0) {
       await message.responder.sendText("This scheduled-run link is incomplete.");
       return;
     }
-    const result = await scheduledRuns.continueRun(
+    const result = await this.#scheduledRuns.continueRun(
       messageOwner(message),
       messageConversation(message),
       runId.trim(),
@@ -295,10 +319,6 @@ export class CodexBridge {
     action: "reload" | "restart",
   ): Promise<void> {
     const runtime = this.#runtimeCommand;
-    if (runtime === undefined) {
-      await message.responder.sendText("Runtime controls are unavailable in this Telex build.");
-      return;
-    }
     await message.responder.sendText(
       action === "reload"
         ? "Applying Codex config, MCP servers, and skills…"
@@ -320,7 +340,7 @@ export class CodexBridge {
 
   private async handleUpdate(message: InboundMessage): Promise<void> {
     const updateCommand = this.#updateCommand;
-    if (updateCommand === undefined || !updateCommand.canInstall) {
+    if (!updateCommand.canInstall) {
       await message.responder.sendText(
         "In-app updates require an installer-managed Telex release. This is a source checkout; update it with Git instead.",
       );
@@ -509,14 +529,10 @@ export class CodexBridge {
   }
 
   private async statusText(): Promise<string> {
-    const runtime =
-      this.#runtimeCommand === undefined
-        ? undefined
-        : runtimeStatusSummary(this.#runtimeCommand.status());
+    const runtime = runtimeStatusSummary(this.#runtimeCommand.status());
     const response = await this.#codex.account().catch((error: unknown) => {
-      const runtimeDetail = runtime === undefined ? "" : ` Runtime status: ${runtime.detail}.`;
       throw new BridgeError(
-        `Codex app-server is unavailable: ${errorMessage(error)}.${runtimeDetail} Send /restart to recover it.`,
+        `Codex app-server is unavailable: ${errorMessage(error)}. Runtime status: ${runtime.detail}. Send /restart to recover it.`,
         "CODEX_STATUS_UNAVAILABLE",
       );
     });
@@ -527,30 +543,22 @@ export class CodexBridge {
           ? "Codex app-server is connected. Not signed in — send /login to connect ChatGPT."
           : "Codex app-server is connected. This configuration does not require OpenAI sign-in."
         : `Codex app-server is connected. You're ${accountSummary(account)}.`;
-    return runtime?.degraded === true
+    return runtime.degraded
       ? `${accountStatus}\nRuntime needs attention: ${runtime.detail}`
       : accountStatus;
   }
 }
 
-function runtimeStatusSummary(value: unknown): {
+function runtimeStatusSummary(status: CodexRuntimeStatus): {
   readonly degraded: boolean;
   readonly detail: string;
 } {
-  if (typeof value !== "object" || value === null) {
-    return { degraded: true, detail: "status unavailable" };
-  }
-  const status = value as Readonly<Record<string, unknown>>;
-  const restartRequired = status.restartRequired === true;
-  const degraded = status.state === "degraded" || restartRequired;
+  const degraded = status.state === "degraded" || status.restartRequired;
   const detail =
-    typeof status.lastError === "string"
-      ? status.lastError
-      : restartRequired
-        ? "an app-server restart is required to apply startup-only changes"
-        : typeof status.state === "string"
-          ? status.state
-          : "status unavailable";
+    status.lastError ??
+    (status.restartRequired
+      ? "an app-server restart is required to apply startup-only changes"
+      : status.state);
   return { degraded, detail };
 }
 
@@ -586,15 +594,5 @@ function messageConversation(message: InboundMessage): ProviderReference {
     provider: message.address.channel,
     resource: "conversation",
     id: message.address.key,
-  };
-}
-
-function parseCommand(text: string): InboundCommand | undefined {
-  const match = /^\/([a-z][a-z0-9_]*)(?:@[a-z0-9_]+)?(?:[ \t]+([^\r\n]*))?$/i.exec(text.trim());
-  const name = match?.[1];
-  if (name === undefined) return undefined;
-  return {
-    name: name.toLowerCase(),
-    args: match?.[2]?.trimStart() ?? "",
   };
 }

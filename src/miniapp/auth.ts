@@ -6,23 +6,8 @@ const telegramUserSchema = z
   .object({
     id: z.number().int().positive().safe(),
     is_bot: z.boolean().optional(),
-    first_name: z.string().min(1),
-    last_name: z.string().optional(),
-    username: z.string().optional(),
-    language_code: z.string().optional(),
-    is_premium: z.boolean().optional(),
-    allows_write_to_pm: z.boolean().optional(),
-    photo_url: z.url().optional(),
   })
   .strip();
-
-export type TelegramMiniAppUser = z.infer<typeof telegramUserSchema>;
-
-export interface TelegramMiniAppSession {
-  readonly user: TelegramMiniAppUser;
-  readonly authenticatedAt: Date;
-  readonly queryId: string | undefined;
-}
 
 export interface TelegramInitDataOptions {
   readonly botToken: string;
@@ -36,13 +21,11 @@ const DEFAULT_MAX_AGE_SECONDS = 60 * 60;
 const MAX_CLOCK_SKEW_SECONDS = 30;
 
 /**
- * Verifies Telegram's raw WebApp.initData before exposing any trusted values.
- * The raw string must be passed as-is by the Mini App, not reconstructed client-side.
+ * Verifies Telegram's raw WebApp.initData and throws unless it is freshly
+ * signed for an allowlisted human user. The raw string must be passed as-is
+ * by the Mini App, not reconstructed client-side.
  */
-export function validateTelegramInitData(
-  initData: string,
-  options: TelegramInitDataOptions,
-): TelegramMiniAppSession {
+export function validateTelegramInitData(initData: string, options: TelegramInitDataOptions): void {
   if (initData.length === 0 || initData.length > 16_384) {
     throw new BridgeError("Invalid Telegram initialization data", "MINIAPP_UNAUTHORIZED");
   }
@@ -108,13 +91,6 @@ export function validateTelegramInitData(
   if (user.is_bot === true || !options.allowedUserIds.has(user.id)) {
     throw new BridgeError("This Telegram user is not allowed", "MINIAPP_FORBIDDEN");
   }
-
-  const queryId = parameters.get("query_id") ?? undefined;
-  return {
-    user,
-    authenticatedAt: new Date(authDate * 1_000),
-    queryId,
-  };
 }
 
 function parseUnixTimestamp(value: string | null): number {

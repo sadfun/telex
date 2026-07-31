@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { nextOccurrence, parseRecurrence, RecurrenceError } from "../src/automations/index.js";
+import { nextOccurrence, parseRecurrence, RecurrenceError } from "../src/automations/recurrence.js";
 
 describe("automation recurrence", () => {
   it("supports minutely intervals and returns occurrences strictly after the cursor", () => {

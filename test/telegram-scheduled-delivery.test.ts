@@ -7,7 +7,6 @@ import {
 } from "../src/channels/telegram/channel.js";
 import {
   parseTelegramDeliveryTarget,
-  parseTelegramMessageReference,
   telegramDeliveryTarget,
   telegramMessageReference,
 } from "../src/channels/telegram/references.js";
@@ -91,20 +90,54 @@ describe("Telegram scheduled delivery", () => {
 
   it("keeps provider routing details inside opaque versioned references", () => {
     const route = topicRoute(19);
-    const target = telegramDeliveryTarget(42, "supergroup", route);
+    const target = telegramDeliveryTarget(42, route);
     const message = telegramMessageReference(42, 91);
 
     expect(target).toMatchObject({ provider: "telegram", resource: "destination" });
     expect(parseTelegramDeliveryTarget(target)).toEqual({
       chatId: 42,
-      chatType: "supergroup",
       destination: { kind: "topic", messageThreadId: 19 },
     });
-    expect(parseTelegramMessageReference(message)).toEqual({ chatId: 42, messageId: 91 });
+    expect(message).toMatchObject({ provider: "telegram", resource: "message" });
+  });
+
+  it("delivers scheduled notifications as one rich-markdown message with command actions", async () => {
+    const sendRichMessage = vi.fn(
+      async (_chatId: number, _content: unknown, _options: Record<string, unknown>) => ({
+        message_id: 9,
+      }),
+    );
+    const runId = "17d08466-a7c6-4410-b8e0-e9a207ef0919";
+
+    const messageIds = await publishTelegramMessage(
+      { sendRichMessage } as unknown as Api,
+      42,
+      topicRoute(19),
+      {
+        text: "Done",
+        actions: [{ label: "Continue this run", command: { name: "continue", args: runId } }],
+      },
+      new Logger("error"),
+    );
+
+    expect(messageIds).toEqual([9]);
+    expect(sendRichMessage).toHaveBeenCalledWith(
+      42,
+      { markdown: "Done" },
+      {
+        message_thread_id: 19,
+        reply_markup: {
+          inline_keyboard: [[{ text: "Continue this run", callback_data: `tx:continue:${runId}` }]],
+        },
+      },
+    );
   });
 
   it("returns every split message and encodes durable command actions", async () => {
     let nextMessageId = 10;
+    const sendRichMessage = vi.fn(async () => {
+      throw new Error("rich messages unavailable");
+    });
     const sendMessage = vi.fn(
       async (_chatId: number, _text: string, _options: Record<string, unknown>) => ({
         message_id: nextMessageId++,
@@ -113,7 +146,7 @@ describe("Telegram scheduled delivery", () => {
     const runId = "17d08466-a7c6-4410-b8e0-e9a207ef0919";
 
     const messageIds = await publishTelegramMessage(
-      { sendMessage } as unknown as Api,
+      { sendRichMessage, sendMessage } as unknown as Api,
       42,
       topicRoute(19),
       {
@@ -139,19 +172,6 @@ describe("Telegram scheduled delivery", () => {
     });
   });
 
-  it("does not turn an ephemeral route into a public scheduled destination", () => {
-    expect(() =>
-      telegramDeliveryTarget(42, "private", {
-        destination: { kind: "chat" },
-        visibility: {
-          kind: "ephemeral",
-          receiverUserId: 7,
-          incomingEphemeralMessageId: 19,
-        },
-      }),
-    ).toThrow("cannot be proactive delivery targets");
-  });
-
   it("re-checks persisted provider principals against the current allowlist", () => {
     const channel = new TelegramChannel(
       "123:test",
@@ -171,8 +191,5 @@ describe("Telegram scheduled delivery", () => {
 });
 
 function topicRoute(messageThreadId: number): TelegramReplyRoute {
-  return {
-    destination: { kind: "topic", messageThreadId },
-    visibility: { kind: "normal" },
-  };
+  return { destination: { kind: "topic", messageThreadId } };
 }

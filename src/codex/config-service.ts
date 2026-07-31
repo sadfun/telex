@@ -1,7 +1,6 @@
 import { z } from "zod";
 import type { JsonValue } from "../generated/codex/serde_json/JsonValue.js";
 import type { AskForApproval } from "../generated/codex/v2/AskForApproval.js";
-import type { Config } from "../generated/codex/v2/Config.js";
 import type { ConfigBatchWriteParams } from "../generated/codex/v2/ConfigBatchWriteParams.js";
 import type { ConfigEdit } from "../generated/codex/v2/ConfigEdit.js";
 import type { ConfigLayer } from "../generated/codex/v2/ConfigLayer.js";
@@ -60,78 +59,35 @@ const environmentPatternsSchema = z
   .superRefine(requireUniqueStrings)
   .nullable();
 
-export const basicFeatureDefinitions = Object.freeze({
-  apps: {
-    label: "Apps",
-    description: "Enable app and connector integrations.",
-  },
-  goals: {
-    label: "Goals",
-    description: "Enable persisted goals and automatic continuation.",
-  },
-  hooks: {
-    label: "Hooks",
-    description: "Enable lifecycle hooks from hooks.json or inline config.",
-  },
-  fast_mode: {
-    label: "Fast mode",
-    description: "Enable catalog service tiers and the fast path.",
-  },
-  memories: {
-    label: "Memories",
-    description: "Enable experimental Codex memories.",
-  },
-  multi_agent: {
-    label: "Multi-agent",
-    description: "Enable subagent collaboration tools.",
-  },
-  personality: {
-    label: "Personality",
-    description: "Enable personality selection for supported models.",
-  },
-  remote_plugin: {
-    label: "Plugin catalog",
-    description: "Enable the remote plugin catalog.",
-  },
-  shell_snapshot: {
-    label: "Shell snapshot",
-    description: "Snapshot the shell environment to speed up commands.",
-  },
-  shell_tool: {
-    label: "Shell tool",
-    description: "Enable the default shell tool.",
-  },
-  unified_exec: {
-    label: "Unified exec",
-    description: "Use the unified PTY-backed command executor.",
-  },
-} as const);
+/** Everyday feature flags exposed in the Mini App; labels come from Codex itself. */
+const basicFeatureKeys = Object.freeze([
+  "apps",
+  "goals",
+  "hooks",
+  "fast_mode",
+  "memories",
+  "multi_agent",
+  "personality",
+  "remote_plugin",
+  "shell_snapshot",
+  "shell_tool",
+  "unified_exec",
+] as const);
 
-export type BasicFeatureKey = keyof typeof basicFeatureDefinitions;
+type BasicFeatureKey = (typeof basicFeatureKeys)[number];
 
-export const basicFeatureKeys = Object.freeze(
-  Object.keys(basicFeatureDefinitions) as BasicFeatureKey[],
+const featureValuesSchema = z.strictObject(
+  Object.fromEntries(basicFeatureKeys.map((key) => [key, z.boolean().nullable()])) as Record<
+    BasicFeatureKey,
+    z.ZodNullable<z.ZodBoolean>
+  >,
 );
-
-const featureValuesSchema = z.strictObject({
-  apps: z.boolean().nullable(),
-  goals: z.boolean().nullable(),
-  hooks: z.boolean().nullable(),
-  fast_mode: z.boolean().nullable(),
-  memories: z.boolean().nullable(),
-  multi_agent: z.boolean().nullable(),
-  personality: z.boolean().nullable(),
-  remote_plugin: z.boolean().nullable(),
-  shell_snapshot: z.boolean().nullable(),
-  shell_tool: z.boolean().nullable(),
-  unified_exec: z.boolean().nullable(),
-});
 
 const featurePatchSchema = featureValuesSchema
   .partial()
   .refine((value) => Object.keys(value).length > 0, "At least one feature value is required");
 
-export const editableCodexConfigSchema = z.strictObject({
+const editableCodexConfigSchema = z.strictObject({
   model: nullableIdentifierSchema,
   model_provider: nullableIdentifierSchema,
   approval_policy: approvalPolicySchema.nullable(),
@@ -153,7 +109,7 @@ const configPatchSchema = editableCodexConfigSchema.partial().extend({
   features: featurePatchSchema.optional(),
 });
 
-export const configUpdateSchema = z.strictObject({
+const configUpdateSchema = z.strictObject({
   expectedVersion: z.string().min(1).nullable(),
   values: configPatchSchema.refine((value) => Object.keys(value).length > 0, {
     message: "At least one config value is required",
@@ -161,28 +117,7 @@ export const configUpdateSchema = z.strictObject({
 });
 
 export type EditableCodexConfig = z.infer<typeof editableCodexConfigSchema>;
-export type ConfigUpdate = z.infer<typeof configUpdateSchema>;
-
-type ProtocolEditableCodexConfig = Pick<
-  Config,
-  | "model"
-  | "model_provider"
-  | "approval_policy"
-  | "approvals_reviewer"
-  | "sandbox_mode"
-  | "web_search"
-  | "model_reasoning_effort"
-  | "model_reasoning_summary"
-  | "model_verbosity"
-  | "service_tier"
-> & { readonly personality: z.infer<typeof personalitySchema> | null };
-
-type AssertTrue<Value extends true> = Value;
-
-/** Fails the build if a generated Codex field becomes incompatible with the Mini App. */
-export type EditableConfigProtocolCompatibility = AssertTrue<
-  EditableCodexConfig extends ProtocolEditableCodexConfig ? true : false
->;
+type ConfigUpdate = z.infer<typeof configUpdateSchema>;
 
 export interface ModelCapability {
   readonly model: string;
@@ -317,20 +252,16 @@ export class CodexConfigService {
   public async validate(input: unknown): Promise<ConfigValidationResult> {
     const update = configUpdateSchema.parse(input);
     const state = await this.readState();
-    const issues = [...validateVersion(update.expectedVersion, state.version)];
     const candidate = mergeConfig(state.values, update.values);
-    issues.push(...validateConfig(candidate, state, update.values).issues);
-    return validationResult(issues);
+    return validateConfig(candidate, state, update.values);
   }
 
   public async update(input: unknown): Promise<ConfigWriteResponse> {
     const update = configUpdateSchema.parse(input);
     const state = await this.readState();
-    const issues = [...validateVersion(update.expectedVersion, state.version)];
     const candidate = mergeConfig(state.values, update.values);
-    issues.push(...validateConfig(candidate, state, update.values).issues);
-    const errors = issues.filter((issue) => issue.severity === "error");
-    if (errors.length > 0) throw new ConfigValidationError(issues);
+    const validation = validateConfig(candidate, state, update.values);
+    if (!validation.valid) throw new ConfigValidationError(validation.issues);
 
     const params: ConfigBatchWriteParams = {
       edits: editsForPatch(update.values),
@@ -380,9 +311,24 @@ export class CodexConfigService {
 
   private async loadCapabilities(): Promise<CachedConfigCapabilities> {
     const [models, permissionProfiles, remoteFeatures, requirementsResponse] = await Promise.all([
-      this.listModels(),
-      this.listPermissionProfiles(),
-      this.listFeatures(),
+      paginate("model", (cursor) =>
+        this.#rpc.request<ModelListResponse>({
+          method: "model/list",
+          params: { cursor, limit: PAGE_SIZE, includeHidden: false },
+        }),
+      ),
+      paginate("permission profile", (cursor) =>
+        this.#rpc.request<PermissionProfileListResponse>({
+          method: "permissionProfile/list",
+          params: { cursor, limit: PAGE_SIZE, cwd: this.#cwd },
+        }),
+      ),
+      paginate("feature", (cursor) =>
+        this.#rpc.request<ExperimentalFeatureListResponse>({
+          method: "experimentalFeature/list",
+          params: { cursor, limit: PAGE_SIZE },
+        }),
+      ),
       this.#rpc.request<ConfigRequirementsReadResponse>({
         method: "configRequirements/read",
         params: undefined,
@@ -397,97 +343,46 @@ export class CodexConfigService {
       requirements,
     };
   }
+}
 
-  private async listModels(): Promise<Model[]> {
-    const values: Model[] = [];
-    let cursor: string | null = null;
-    for (let page = 0; page < MAX_PAGES; page += 1) {
-      const response: ModelListResponse = await this.#rpc.request<ModelListResponse>({
-        method: "model/list",
-        params: { cursor, limit: PAGE_SIZE, includeHidden: false },
-      });
-      values.push(...response.data);
-      if (response.nextCursor === null) return values;
-      cursor = response.nextCursor;
-    }
-    throw new BridgeError("Codex model list exceeded the pagination limit", "CODEX_PAGINATION");
+async function paginate<Item>(
+  label: string,
+  fetchPage: (
+    cursor: string | null,
+  ) => Promise<{ readonly data: readonly Item[]; readonly nextCursor: string | null }>,
+): Promise<Item[]> {
+  const values: Item[] = [];
+  let cursor: string | null = null;
+  for (let page = 0; page < MAX_PAGES; page += 1) {
+    const response = await fetchPage(cursor);
+    values.push(...response.data);
+    if (response.nextCursor === null) return values;
+    cursor = response.nextCursor;
   }
-
-  private async listPermissionProfiles(): Promise<PermissionProfileSummary[]> {
-    const values: PermissionProfileSummary[] = [];
-    let cursor: string | null = null;
-    for (let page = 0; page < MAX_PAGES; page += 1) {
-      const response: PermissionProfileListResponse =
-        await this.#rpc.request<PermissionProfileListResponse>({
-          method: "permissionProfile/list",
-          params: { cursor, limit: PAGE_SIZE, cwd: this.#cwd },
-        });
-      values.push(...response.data);
-      if (response.nextCursor === null) return values;
-      cursor = response.nextCursor;
-    }
-    throw new BridgeError(
-      "Codex permission profile list exceeded the pagination limit",
-      "CODEX_PAGINATION",
-    );
-  }
-
-  private async listFeatures(): Promise<ExperimentalFeature[]> {
-    const values: ExperimentalFeature[] = [];
-    let cursor: string | null = null;
-    for (let page = 0; page < MAX_PAGES; page += 1) {
-      const response: ExperimentalFeatureListResponse =
-        await this.#rpc.request<ExperimentalFeatureListResponse>({
-          method: "experimentalFeature/list",
-          params: { cursor, limit: PAGE_SIZE },
-        });
-      values.push(...response.data);
-      if (response.nextCursor === null) return values;
-      cursor = response.nextCursor;
-    }
-    throw new BridgeError("Codex feature list exceeded the pagination limit", "CODEX_PAGINATION");
-  }
+  throw new BridgeError(`Codex ${label} list exceeded the pagination limit`, "CODEX_PAGINATION");
 }
 
 function parseUserValues(config: JsonValue | undefined): EditableCodexConfig {
   const root = asRecord(config);
-  return editableCodexConfigSchema.parse({
-    model: readPath(root, ["model"], nullableIdentifierSchema),
-    model_provider: readPath(root, ["model_provider"], nullableIdentifierSchema),
-    approval_policy: readPath(root, ["approval_policy"], approvalPolicySchema.nullable()),
-    approvals_reviewer: readPath(root, ["approvals_reviewer"], approvalsReviewerSchema.nullable()),
-    sandbox_mode: readPath(root, ["sandbox_mode"], sandboxModeSchema.nullable()),
-    default_permissions: readPath(root, ["default_permissions"], nullableIdentifierSchema),
-    web_search: readPath(root, ["web_search"], webSearchSchema.nullable()),
-    model_reasoning_effort: readPath(root, ["model_reasoning_effort"], nullableIdentifierSchema),
-    model_reasoning_summary: readPath(
-      root,
-      ["model_reasoning_summary"],
-      reasoningSummarySchema.nullable(),
-    ),
-    model_verbosity: readPath(root, ["model_verbosity"], verbositySchema.nullable()),
-    service_tier: readPath(root, ["service_tier"], nullableIdentifierSchema),
-    personality: readPath(root, ["personality"], personalitySchema.nullable()),
-    windows_sandbox: readPath(root, ["windows", "sandbox"], windowsSandboxSchema.nullable()),
-    shell_environment_include_only: readPath(
-      root,
-      ["shell_environment_policy", "include_only"],
-      environmentPatternsSchema,
-    ),
+  const values: Record<string, unknown> = {
     features: Object.fromEntries(
       basicFeatureKeys.map((key) => [
         key,
         readPath(root, ["features", key], z.boolean().nullable()),
       ]),
     ),
-  });
+  };
+  for (const [key, keyPath] of scalarConfigPaths) {
+    values[key] = readPath(root, keyPath.split("."), editableCodexConfigSchema.shape[key]);
+  }
+  return editableCodexConfigSchema.parse(values);
 }
 
-function readPath<Output>(
+function readPath(
   root: Readonly<Record<string, JsonValue | undefined>>,
   path: readonly string[],
-  schema: z.ZodType<Output>,
-): Output {
+  schema: z.ZodType<unknown>,
+): unknown {
   let value: JsonValue | undefined = root;
   for (const segment of path) {
     const record = asRecord(value);
@@ -659,8 +554,6 @@ function validateConfig(
     }
   }
 
-  validateRequirements(values, capabilities.requirements, issues);
-
   const effectiveApprovalPolicy =
     values.approval_policy ?? state.response.config.approval_policy ?? null;
   if (
@@ -726,67 +619,6 @@ function validateConfig(
   return validationResult(issues);
 }
 
-function validateRequirements(
-  values: EditableCodexConfig,
-  requirements: ConfigRequirements | null,
-  issues: ConfigValidationIssue[],
-): void {
-  if (requirements === null) return;
-
-  const approvalPolicy = values.approval_policy;
-  if (
-    approvalPolicy !== null &&
-    requirements.allowedApprovalPolicies !== null &&
-    !requirements.allowedApprovalPolicies.some((policy) =>
-      approvalPoliciesEqual(policy, approvalPolicy),
-    )
-  ) {
-    issues.push(errorIssue("approval_policy", "Managed requirements disallow this policy."));
-  }
-
-  if (
-    values.sandbox_mode !== null &&
-    requirements.allowedSandboxModes !== null &&
-    !requirements.allowedSandboxModes.includes(values.sandbox_mode)
-  ) {
-    issues.push(errorIssue("sandbox_mode", "Managed requirements disallow this sandbox mode."));
-  }
-
-  if (
-    values.web_search !== null &&
-    requirements.allowedWebSearchModes !== null &&
-    !requirements.allowedWebSearchModes.includes(values.web_search)
-  ) {
-    issues.push(errorIssue("web_search", "Managed requirements disallow this search mode."));
-  }
-
-  if (
-    values.windows_sandbox !== null &&
-    requirements.allowedWindowsSandboxImplementations !== null &&
-    !requirements.allowedWindowsSandboxImplementations.includes(values.windows_sandbox)
-  ) {
-    issues.push(errorIssue("windows_sandbox", "Managed requirements disallow this Windows mode."));
-  }
-
-  for (const key of basicFeatureKeys) {
-    const value = values.features[key];
-    const required = requirements.featureRequirements?.[key];
-    if (value !== null && required !== undefined && value !== required) {
-      issues.push(errorIssue(`features.${key}`, "This feature is fixed by managed requirements."));
-    }
-  }
-}
-
-function validateVersion(expected: string | null, current: string | null): ConfigValidationIssue[] {
-  if (expected === current) return [];
-  return [
-    errorIssue(
-      "expectedVersion",
-      "The config changed after this page loaded. Reload before saving.",
-    ),
-  ];
-}
-
 function selectedModel(
   configured: string | null,
   models: readonly ModelCapability[],
@@ -809,33 +641,26 @@ function toModelCapability(model: Model): ModelCapability {
   };
 }
 
+/** Telex is OpenAI-official-API-only; offer the builtin provider plus the one Codex runs with. */
 function toModelProviderCapabilities(response: ConfigReadResponse): ModelProviderCapability[] {
-  const providers = new Map<string, Omit<ModelProviderCapability, "id">>();
-  const addProvider = (id: string, description: string): void => {
-    const parsed = nullableIdentifierSchema.safeParse(id);
-    if (!parsed.success || parsed.data === null || providers.has(parsed.data)) return;
-    providers.set(parsed.data, {
-      displayName: parsed.data === "openai" ? "OpenAI" : parsed.data,
-      description,
+  const providers: ModelProviderCapability[] = [
+    {
+      id: "openai",
+      displayName: "OpenAI",
+      description: "Built-in OpenAI model provider.",
+      allowed: true,
+    },
+  ];
+  const current = nullableIdentifierSchema.safeParse(response.config.model_provider);
+  if (current.success && current.data !== null && current.data !== "openai") {
+    providers.push({
+      id: current.data,
+      displayName: current.data,
+      description: "Current model provider reported by Codex.",
       allowed: true,
     });
-  };
-
-  addProvider("openai", "Built-in OpenAI model provider.");
-  if (response.config.model_provider !== null) {
-    addProvider(response.config.model_provider, "Current model provider reported by Codex.");
   }
-  for (const layer of activeLayers(response.layers)) {
-    const config = asRecord(layer.config);
-    if (typeof config.model_provider === "string") {
-      addProvider(config.model_provider, "Model provider selected in an active config layer.");
-    }
-    for (const id of Object.keys(asRecord(config.model_providers))) {
-      addProvider(id, "Model provider configured in an active config layer.");
-    }
-  }
-
-  return [...providers].map(([id, capability]) => ({ id, ...capability }));
+  return providers;
 }
 
 function toFeatureCapabilities(
@@ -849,11 +674,10 @@ function toFeatureCapabilities(
     if (feature === undefined || feature.stage === "deprecated" || feature.stage === "removed") {
       continue;
     }
-    const definition = basicFeatureDefinitions[name];
     values.push({
       name,
-      displayName: feature.displayName ?? definition.label,
-      description: feature.description ?? definition.description,
+      displayName: feature.displayName ?? sentenceCase(name),
+      description: feature.description ?? "",
       stage: feature.stage,
       enabled: feature.enabled,
       defaultEnabled: feature.defaultEnabled,
@@ -861,6 +685,11 @@ function toFeatureCapabilities(
     });
   }
   return values;
+}
+
+function sentenceCase(name: string): string {
+  const spaced = name.replaceAll("_", " ");
+  return spaced.charAt(0).toUpperCase() + spaced.slice(1);
 }
 
 function activeLayers(layers: readonly ConfigLayer[] | null): readonly ConfigLayer[] {
@@ -889,17 +718,6 @@ function supportsInteractiveApproval(policy: AskForApproval | null): boolean {
     granular.skill_approval ||
     granular.request_permissions ||
     granular.mcp_elicitations
-  );
-}
-
-function approvalPoliciesEqual(left: AskForApproval, right: AskForApproval): boolean {
-  if (typeof left === "string" || typeof right === "string") return left === right;
-  return (
-    left.granular.sandbox_approval === right.granular.sandbox_approval &&
-    left.granular.rules === right.granular.rules &&
-    left.granular.skill_approval === right.granular.skill_approval &&
-    left.granular.request_permissions === right.granular.request_permissions &&
-    left.granular.mcp_elicitations === right.granular.mcp_elicitations
   );
 }
 

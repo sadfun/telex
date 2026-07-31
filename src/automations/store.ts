@@ -1,7 +1,6 @@
-import { readFile } from "node:fs/promises";
-import { dirname } from "node:path";
 import { z } from "zod";
-import { atomicWriteJson, ensureDirectory } from "../shared/fs.js";
+import { sameReference } from "../core/channel.js";
+import { JsonStore } from "../shared/json-store.js";
 import type { Logger } from "../shared/logger.js";
 import {
   type AutomationDefinition,
@@ -11,7 +10,6 @@ import {
   automationDefinitionSchema,
   automationNotificationSchema,
   automationRunSchema,
-  instantSchema,
   type ProviderReference,
 } from "./types.js";
 
@@ -45,44 +43,31 @@ function emptyState(): StoredState {
   return { version: 1, automations: {}, runs: {}, notifications: {} };
 }
 
-export class AutomationStore {
-  readonly #path: string;
-  readonly #logger: Logger;
-  #state: StoredState = emptyState();
-  #writeTail: Promise<void> = Promise.resolve();
-
+export class AutomationStore extends JsonStore<StoredState> {
   public constructor(path: string, logger: Logger) {
-    this.#path = path;
-    this.#logger = logger;
-  }
-
-  public async load(): Promise<void> {
-    await ensureDirectory(dirname(this.#path));
-    try {
-      this.#state = storedStateSchema.parse(JSON.parse(await readFile(this.#path, "utf8")));
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === "ENOENT") {
-        this.#state = emptyState();
-        return;
-      }
-      this.#logger.error("Could not load automation state", error, { path: this.#path });
-      throw new Error(`Could not load automation state at ${this.#path}`, { cause: error });
-    }
+    super(
+      path,
+      storedStateSchema,
+      emptyState(),
+      logger,
+      "Could not load automation state",
+      "throw",
+    );
   }
 
   public getAutomation(id: string): AutomationDefinition | undefined {
-    return clone(this.#state.automations[id]);
+    return clone(this.state.automations[id]);
   }
 
   public listAutomations(): AutomationDefinition[] {
-    return Object.values(this.#state.automations)
+    return Object.values(this.state.automations)
       .map((automation) => clone(automation))
       .sort((left, right) => left.createdAt.localeCompare(right.createdAt));
   }
 
   public listDueAutomations(at: string): AutomationDefinition[] {
-    const timestamp = parseInstant(at, "at");
-    return Object.values(this.#state.automations)
+    const timestamp = Date.parse(at);
+    return Object.values(this.state.automations)
       .filter((automation) => {
         if (automation.status !== "active" || automation.nextRunAt === null) return false;
         if (Date.parse(automation.nextRunAt) > timestamp) return false;
@@ -95,10 +80,9 @@ export class AutomationStore {
   }
 
   public async putAutomation(automation: AutomationDefinition): Promise<AutomationDefinition> {
-    const validated = automationDefinitionSchema.parse(automation);
-    return await this.write((draft) => {
-      draft.automations[validated.id] = validated;
-      return validated;
+    return await this.mutate((draft) => {
+      draft.automations[automation.id] = automation;
+      return automation;
     });
   }
 
@@ -106,34 +90,39 @@ export class AutomationStore {
     id: string,
     update: (current: AutomationDefinition) => AutomationDefinition,
   ): Promise<AutomationDefinition | undefined> {
-    return await this.write((draft) => {
+    return await this.mutate((draft) => {
       const current = draft.automations[id];
       if (current === undefined) return undefined;
-      const updated = automationDefinitionSchema.parse(update(clone(current)));
+      const updated = update(current);
       if (updated.id !== id) throw new Error("An automation update cannot change its id");
       draft.automations[id] = updated;
       return updated;
     });
   }
 
+  /** Removes the automation along with all of its runs and notifications. */
   public async deleteAutomation(id: string): Promise<boolean> {
-    return await this.write((draft) => {
+    return await this.mutate((draft) => {
       if (draft.automations[id] === undefined) return false;
       delete draft.automations[id];
+      for (const [runId, run] of Object.entries(draft.runs)) {
+        if (run.automationId === id) delete draft.runs[runId];
+      }
+      for (const [notificationId, notification] of Object.entries(draft.notifications)) {
+        if (notification.automationId === id) delete draft.notifications[notificationId];
+      }
       return true;
     });
   }
 
   /** Atomically advances a schedule and creates its running record. */
   public async claimRun(claim: AutomationRunClaim): Promise<boolean> {
-    instantSchema.parse(claim.expectedNextRunAt);
-    if (claim.nextRunAt !== null) instantSchema.parse(claim.nextRunAt);
-    const run = automationRunSchema.parse(claim.run);
+    const run = claim.run;
     if (run.status !== "running" || run.automationId !== claim.automationId) {
       throw new Error("A claimed run must be running and belong to the claimed automation");
     }
 
-    return await this.write((draft) => {
+    return await this.mutate((draft) => {
       const automation = draft.automations[claim.automationId];
       if (
         automation === undefined ||
@@ -144,7 +133,7 @@ export class AutomationStore {
         return false;
       }
 
-      draft.automations[automation.id] = automationDefinitionSchema.parse({
+      draft.automations[automation.id] = {
         ...automation,
         status: claim.nextRunAt === null ? "paused" : automation.status,
         nextRunAt: claim.nextRunAt,
@@ -153,7 +142,7 @@ export class AutomationStore {
         deferralReason: null,
         updatedAt: run.startedAt,
         revision: automation.revision + 1,
-      });
+      };
       draft.runs[run.id] = run;
       pruneAutomationHistory(draft, automation.id);
       return true;
@@ -161,9 +150,7 @@ export class AutomationStore {
   }
 
   public async deferAutomation(deferral: AutomationDeferral): Promise<boolean> {
-    instantSchema.parse(deferral.retryAt);
-    instantSchema.parse(deferral.updatedAt);
-    return await this.write((draft) => {
+    return await this.mutate((draft) => {
       const automation = draft.automations[deferral.automationId];
       if (
         automation === undefined ||
@@ -172,67 +159,55 @@ export class AutomationStore {
       ) {
         return false;
       }
-      draft.automations[automation.id] = automationDefinitionSchema.parse({
+      draft.automations[automation.id] = {
         ...automation,
         deferredUntil: deferral.retryAt,
         deferralReason: deferral.reason,
         updatedAt: deferral.updatedAt,
         revision: automation.revision + 1,
-      });
+      };
       return true;
     });
   }
 
   public getRun(id: string): AutomationRun | undefined {
-    return clone(this.#state.runs[id]);
+    return clone(this.state.runs[id]);
   }
 
   public listRuns(automationId?: string): AutomationRun[] {
-    return Object.values(this.#state.runs)
+    return Object.values(this.state.runs)
       .filter((run) => automationId === undefined || run.automationId === automationId)
       .map((run) => clone(run))
       .sort((left, right) => right.startedAt.localeCompare(left.startedAt));
   }
 
-  public async putRun(run: AutomationRun): Promise<AutomationRun> {
-    const validated = automationRunSchema.parse(run);
-    return await this.write((draft) => {
-      draft.runs[validated.id] = validated;
-      pruneAutomationHistory(draft, validated.automationId);
-      return validated;
-    });
-  }
-
   public async completeRun(id: string, completion: AutomationRunCompletion): Promise<boolean> {
-    instantSchema.parse(completion.finishedAt);
-    return await this.write((draft) => {
+    return await this.mutate((draft) => {
       const run = draft.runs[id];
       if (run === undefined || run.status !== "running") return false;
-      draft.runs[id] = automationRunSchema.parse({
+      draft.runs[id] = {
         ...run,
         status: completion.status,
         finishedAt: completion.finishedAt,
         threadId: completion.threadId ?? run.threadId,
-        summary: completion.summary ?? run.summary,
         error: completion.error ?? null,
-      });
+      };
       pruneAutomationHistory(draft, run.automationId);
       return true;
     });
   }
 
   public async recoverInterruptedRuns(at: string): Promise<AutomationRun[]> {
-    instantSchema.parse(at);
-    return await this.write((draft) => {
+    return await this.mutate((draft) => {
       const recovered: AutomationRun[] = [];
       for (const [id, run] of Object.entries(draft.runs)) {
         if (run.status !== "running") continue;
-        const interrupted = automationRunSchema.parse({
+        const interrupted: AutomationRun = {
           ...run,
           status: "interrupted",
           finishedAt: at,
           error: "Telex restarted before the scheduled run completed.",
-        });
+        };
         draft.runs[id] = interrupted;
         recovered.push(interrupted);
       }
@@ -240,31 +215,8 @@ export class AutomationStore {
     });
   }
 
-  public async recoverPendingNotifications(at: string): Promise<AutomationNotification[]> {
-    instantSchema.parse(at);
-    return await this.write((draft) => {
-      const recovered: AutomationNotification[] = [];
-      for (const [id, notification] of Object.entries(draft.notifications)) {
-        if (notification.status !== "pending") continue;
-        const failed = automationNotificationSchema.parse({
-          ...notification,
-          status: "failed",
-          error: "Telex restarted before notification delivery was confirmed.",
-          updatedAt: at,
-        });
-        draft.notifications[id] = failed;
-        recovered.push(failed);
-      }
-      return recovered;
-    });
-  }
-
-  public getNotification(id: string): AutomationNotification | undefined {
-    return clone(this.#state.notifications[id]);
-  }
-
   public listNotifications(runId?: string): AutomationNotification[] {
-    return Object.values(this.#state.notifications)
+    return Object.values(this.state.notifications)
       .filter((notification) => runId === undefined || notification.runId === runId)
       .map((notification) => clone(notification))
       .sort((left, right) => right.createdAt.localeCompare(left.createdAt));
@@ -273,13 +225,8 @@ export class AutomationStore {
   public findNotificationByPublishedMessage(
     reference: ProviderReference,
   ): AutomationNotification | undefined {
-    const notification = Object.values(this.#state.notifications).find((candidate) =>
-      candidate.publishedMessages.some(
-        (message) =>
-          message.provider === reference.provider &&
-          message.resource === reference.resource &&
-          message.id === reference.id,
-      ),
+    const notification = Object.values(this.state.notifications).find((candidate) =>
+      candidate.publishedMessages.some((message) => sameReference(message, reference)),
     );
     return clone(notification);
   }
@@ -287,55 +234,37 @@ export class AutomationStore {
   public async putNotification(
     notification: AutomationNotification,
   ): Promise<AutomationNotification> {
-    const validated = automationNotificationSchema.parse(notification);
-    return await this.write((draft) => {
-      for (const message of validated.publishedMessages) {
+    return await this.mutate((draft) => {
+      for (const message of notification.publishedMessages) {
         const owner = Object.values(draft.notifications).find(
           (candidate) =>
-            candidate.id !== validated.id &&
+            candidate.id !== notification.id &&
             candidate.publishedMessages.some((existing) => sameReference(existing, message)),
         );
         if (owner !== undefined) {
           throw new Error(`Published message is already associated with notification ${owner.id}`);
         }
       }
-      draft.notifications[validated.id] = validated;
-      pruneAutomationHistory(draft, validated.automationId);
-      return validated;
+      draft.notifications[notification.id] = notification;
+      pruneAutomationHistory(draft, notification.automationId);
+      return notification;
     });
   }
 
-  private async write<T>(operation: (draft: StoredState) => T): Promise<T> {
-    const pending = this.#writeTail
-      .catch(() => undefined)
-      .then(async () => {
-        const draft = clone(this.#state);
-        const result = operation(draft);
-        await atomicWriteJson(this.#path, draft);
-        this.#state = draft;
-        return clone(result);
-      });
-    this.#writeTail = pending.then(
-      () => undefined,
-      () => undefined,
-    );
-    return await pending;
+  /**
+   * Runs a synchronous mutation against a private draft and persists it. The
+   * persisted copy is re-cloned so state never aliases caller-held objects.
+   */
+  private async mutate<T>(operation: (draft: StoredState) => T): Promise<T> {
+    const draft = clone(this.state);
+    const result = operation(draft);
+    await this.persist(clone(draft));
+    return result;
   }
 }
 
 function clone<T>(value: T): T {
   return structuredClone(value);
-}
-
-function parseInstant(value: string, field: string): number {
-  if (!instantSchema.safeParse(value).success) throw new Error(`${field} must be an ISO instant`);
-  return Date.parse(value);
-}
-
-function sameReference(left: ProviderReference, right: ProviderReference): boolean {
-  return (
-    left.provider === right.provider && left.resource === right.resource && left.id === right.id
-  );
 }
 
 function pruneAutomationHistory(draft: StoredState, automationId: string): void {

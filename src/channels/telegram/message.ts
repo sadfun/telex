@@ -7,6 +7,7 @@ import type {
   RichBlockCaption,
   RichText,
 } from "grammy/types";
+import { assertNever } from "../../shared/errors.js";
 
 export interface TelegramFileReference {
   readonly fileId: string;
@@ -17,6 +18,21 @@ export interface TelegramFileReference {
   readonly size?: number;
   readonly nativeImage: boolean;
   readonly voiceMessage?: boolean;
+}
+
+export function describeTelegramFile(file: TelegramFileReference): string {
+  const metadata = [
+    file.suggestedName,
+    file.mimeType,
+    file.size === undefined ? undefined : formatBytes(file.size),
+  ].filter((value): value is string => value !== undefined);
+  return metadata.length === 0 ? file.description : `${file.description} (${metadata.join(", ")})`;
+}
+
+function formatBytes(bytes: number): string {
+  if (bytes < 1_024) return `${bytes} B`;
+  if (bytes < 1_024 * 1_024) return `${Math.round(bytes / 1_024)} KB`;
+  return `${Math.round((bytes / (1_024 * 1_024)) * 10) / 10} MB`;
 }
 
 export interface NormalizedTelegramMessage {
@@ -37,89 +53,30 @@ interface FileLike {
 interface NormalizeState {
   readonly files: TelegramFileReference[];
   readonly fileIds: Set<string>;
-  readonly scanned: WeakSet<object>;
 }
 
 const NATIVE_IMAGE_MIMES = new Set(["image/jpeg", "image/png", "image/gif", "image/webp"]);
 const NATIVE_IMAGE_EXTENSIONS = new Set([".jpg", ".jpeg", ".png", ".gif", ".webp"]);
-const FILE_SCAN_SKIP_KEYS = new Set([
-  "thumbnail",
-  "cover",
-  "qualities",
-  "passport_data",
-  "reply_to_message",
-  "external_reply",
-  "reference_messages",
-]);
 
-const HANDLED_MESSAGE_KEYS = new Set([
-  "message_id",
-  "message_thread_id",
-  "direct_messages_topic",
-  "from",
-  "sender_chat",
-  "sender_boost_count",
-  "sender_business_bot",
-  "sender_tag",
-  "receiver_user",
-  "ephemeral_message_id",
-  "date",
-  "guest_query_id",
-  "business_connection_id",
-  "chat",
-  "forward_origin",
-  "is_topic_message",
-  "is_automatic_forward",
-  "reply_to_message",
-  "external_reply",
-  "reference_messages",
-  "quote",
-  "reply_to_story",
-  "reply_to_checklist_task_id",
-  "reply_to_poll_option_id",
-  "via_bot",
-  "guest_bot_caller_user",
-  "guest_bot_caller_chat",
-  "edit_date",
-  "has_protected_content",
-  "is_from_offline",
-  "is_paid_post",
-  "media_group_id",
-  "author_signature",
-  "paid_star_count",
-  "entities",
-  "caption_entities",
-  "link_preview_options",
-  "effect_id",
-  "reply_markup",
-  "show_caption_above_media",
-  "has_media_spoiler",
-  "text",
-  "caption",
-  "rich_message",
-  "animation",
-  "audio",
-  "document",
-  "live_photo",
-  "paid_media",
-  "photo",
-  "sticker",
-  "story",
-  "video",
-  "video_note",
-  "voice",
-  "checklist",
-  "contact",
-  "dice",
-  "game",
-  "poll",
-  "venue",
-  "location",
-  "forum_topic_created",
-  "forum_topic_edited",
-  "forum_topic_closed",
-  "forum_topic_reopened",
-  "general_forum_topic_hidden",
+// Every key the describers in this file consume, plus routing and formatting
+// metadata that carries no user content. Unknown keys — new Telegram features —
+// surface through describeRemainder below.
+// biome-ignore format: grouped several keys per line for scanability
+const DESCRIBED_MESSAGE_KEYS = new Set([
+  "message_id", "message_thread_id", "direct_messages_topic", "from", "sender_chat",
+  "sender_boost_count", "sender_business_bot", "sender_tag", "receiver_user",
+  "date", "guest_query_id", "business_connection_id", "chat",
+  "forward_origin", "is_topic_message", "is_automatic_forward", "reply_to_message",
+  "external_reply", "reference_messages", "quote", "reply_to_story",
+  "reply_to_checklist_task_id", "reply_to_poll_option_id", "via_bot",
+  "guest_bot_caller_user", "guest_bot_caller_chat", "edit_date", "has_protected_content",
+  "is_from_offline", "is_paid_post", "media_group_id", "author_signature",
+  "paid_star_count", "entities", "caption_entities", "link_preview_options", "effect_id",
+  "reply_markup", "show_caption_above_media", "has_media_spoiler", "text", "caption",
+  "rich_message", "animation", "audio", "document", "live_photo", "paid_media", "photo",
+  "sticker", "story", "video", "video_note", "voice", "checklist", "contact", "dice",
+  "game", "poll", "venue", "location", "forum_topic_created", "forum_topic_edited",
+  "forum_topic_closed", "forum_topic_reopened", "general_forum_topic_hidden",
   "general_forum_topic_unhidden",
 ]);
 
@@ -141,7 +98,6 @@ export function normalizeTelegramMessage(
   const state: NormalizeState = {
     files: [],
     fileIds: new Set(),
-    scanned: new WeakSet(),
   };
   const lines: string[] = [];
   for (const reference of referenceMessages) {
@@ -172,7 +128,6 @@ function describeMessage(message: Message, state: NormalizeState, context: Conte
     lines.push(
       ...indent(describePayload(message.external_reply as unknown as Message, state, "external")),
     );
-    scanAccessibleFiles(message.external_reply, state, "external", "external reply");
   }
   if (message.quote !== undefined) {
     lines.push(`Quote: ${message.quote.text}`);
@@ -190,8 +145,7 @@ function describeMessage(message: Message, state: NormalizeState, context: Conte
   }
 
   lines.push(...describePayload(message, state, context));
-  lines.push(...genericMessageFallback(message));
-  scanAccessibleFiles(message, state, context, "message");
+  lines.push(...describeRemainder(message));
   return cleanLines(lines);
 }
 
@@ -227,7 +181,7 @@ function describePayload(message: Message, state: NormalizeState, context: Conte
     addStandardFile(state, context, "document", message.document, "document.bin");
     mediaLabels.push(
       message.document.file_name
-        ? `Document: ${safeName(message.document.file_name, "document")}`
+        ? `Document: ${safeFileName(message.document.file_name, "document")}`
         : "Document",
     );
   }
@@ -253,7 +207,7 @@ function describePayload(message: Message, state: NormalizeState, context: Conte
         case "preview":
           return "locked preview";
         default:
-          return "media";
+          return assertNever(media);
       }
     });
     lines.push(`Paid media (${message.paid_media.star_count} Stars): ${paidParts.join(", ")}`);
@@ -622,7 +576,7 @@ function addStandardFile(
   voiceMessage = false,
 ): void {
   const mimeType = file.mime_type ?? fallbackMime;
-  const suggestedName = safeName(file.file_name, fallbackName);
+  const suggestedName = safeFileName(file.file_name, fallbackName);
   addFile(state, {
     fileId: file.file_id,
     uniqueId: file.file_unique_id,
@@ -654,7 +608,7 @@ function addFile(
     fileId: input.fileId,
     uniqueId: input.uniqueId,
     description: input.description,
-    suggestedName: safeName(input.suggestedName, "telegram-file"),
+    suggestedName: safeFileName(input.suggestedName, "telegram-file"),
     ...(input.mimeType === undefined ? {} : { mimeType: input.mimeType }),
     ...(input.size === undefined ? {} : { size: input.size }),
     nativeImage: input.nativeImage,
@@ -662,110 +616,21 @@ function addFile(
   });
 }
 
-function scanAccessibleFiles(
-  value: unknown,
-  state: NormalizeState,
-  context: ContextKind,
-  hint: string,
-): void {
-  if (value === null || typeof value !== "object") return;
-  if (state.scanned.has(value)) return;
-  state.scanned.add(value);
-
-  if (Array.isArray(value)) {
-    if (isPhotoArray(value)) {
-      addPhoto(state, context, humanize(hint), value);
-      return;
-    }
-    for (const item of value) scanAccessibleFiles(item, state, context, hint);
-    return;
-  }
-
-  const record = value as Record<string, unknown>;
-  if (isFileLike(record)) {
-    addGenericFile(state, context, hint, record);
-    for (const [key, child] of Object.entries(record)) {
-      if (key === "photo" || key === "premium_animation") {
-        scanAccessibleFiles(child, state, context, key);
-      }
-    }
-    return;
-  }
-
-  for (const [key, child] of Object.entries(record)) {
-    if (FILE_SCAN_SKIP_KEYS.has(key)) continue;
-    if (key === "document" && record.animation !== undefined) continue;
-    if (key === "photo" && record.live_photo !== undefined) continue;
-    scanAccessibleFiles(child, state, context, key);
-  }
-}
-
-function addGenericFile(
-  state: NormalizeState,
-  context: ContextKind,
-  hint: string,
-  file: FileLike & Record<string, unknown>,
-): void {
-  const isSticker = typeof file.is_animated === "boolean" && typeof file.is_video === "boolean";
-  const isStaticSticker = isSticker && file.is_animated === false && file.is_video === false;
-  const isPhoto = hint.toLowerCase().includes("photo") && !hint.toLowerCase().includes("live");
-  const mimeType =
-    file.mime_type ?? (isStaticSticker ? "image/webp" : isPhoto ? "image/jpeg" : undefined);
-  const extension = isSticker
-    ? file.is_video
-      ? ".webm"
-      : file.is_animated
-        ? ".tgs"
-        : ".webp"
-    : extensionForMime(mimeType) || ".bin";
-  const suggestedName = safeName(file.file_name, `${slug(hint)}${extension}`);
-  addFile(state, {
-    fileId: file.file_id,
-    uniqueId: file.file_unique_id,
-    description: fileDescription(context, humanize(hint)),
-    suggestedName,
-    mimeType,
-    size: file.file_size,
-    nativeImage: isStaticSticker || isPhoto || isNativeImage(mimeType, suggestedName),
-  });
-}
-
-function genericMessageFallback(message: Message): string[] {
+function describeRemainder(message: Message): string[] {
   const lines: string[] = [];
-  let remaining = 1_200;
   const record = message as unknown as Record<string, unknown>;
   if (record.passport_data !== undefined) {
-    const line = "Telegram Passport data received (redacted).";
-    lines.push(line);
-    remaining -= line.length;
+    lines.push("Telegram Passport data received (redacted).");
   }
   for (const [key, value] of Object.entries(record)) {
-    if (remaining <= 0 || key === "passport_data" || HANDLED_MESSAGE_KEYS.has(key)) continue;
-    const label = titleCase(humanize(key));
-    const detail = value === true ? "" : `: ${compactValue(value, 0)}`;
-    const line = clip(`${label}${detail}.`, Math.min(400, remaining));
-    lines.push(line);
-    remaining -= line.length;
+    if (lines.length >= 6) break;
+    if (value === undefined || key === "passport_data" || DESCRIBED_MESSAGE_KEYS.has(key)) continue;
+    const json = JSON.stringify(value, (nested, child: unknown) =>
+      nested === "passport_data" ? undefined : child,
+    );
+    lines.push(clip(`${titleCase(humanize(key))}${value === true ? "" : `: ${json}`}.`, 200));
   }
   return lines;
-}
-
-function compactValue(value: unknown, depth: number): string {
-  if (value === null) return "null";
-  if (typeof value === "string") return clip(value, 240);
-  if (typeof value === "number" || typeof value === "boolean") return String(value);
-  if (typeof value !== "object") return String(value);
-  if (isFileLike(value as Record<string, unknown>)) return "[file]";
-  if (Array.isArray(value)) {
-    const shown = value.slice(0, 6).map((item) => compactValue(item, depth + 1));
-    return `[${shown.join(", ")}${value.length > shown.length ? ", …" : ""}]`;
-  }
-  if (depth >= 2) return "{…}";
-  const entries = Object.entries(value as Record<string, unknown>)
-    .filter(([key]) => key !== "passport_data" && key !== "file_id" && key !== "file_unique_id")
-    .slice(0, 8)
-    .map(([key, child]) => `${humanize(key)}=${compactValue(child, depth + 1)}`);
-  return `{${entries.join(", ")}}`;
 }
 
 function describeOrigin(origin: MessageOrigin): string {
@@ -821,23 +686,6 @@ function largestPhoto(photos: readonly PhotoSize[]): PhotoSize | undefined {
   }, undefined);
 }
 
-function isPhotoArray(value: readonly unknown[]): value is PhotoSize[] {
-  return (
-    value.length > 0 &&
-    value.every((item) => {
-      if (item === null || typeof item !== "object") return false;
-      const photo = item as Record<string, unknown>;
-      return (
-        isFileLike(photo) && typeof photo.width === "number" && typeof photo.height === "number"
-      );
-    })
-  );
-}
-
-function isFileLike(value: Record<string, unknown>): value is FileLike & Record<string, unknown> {
-  return typeof value.file_id === "string" && typeof value.file_unique_id === "string";
-}
-
 function fileDescription(context: ContextKind, kind: string): string {
   const prefix = {
     current: "Telegram",
@@ -890,7 +738,7 @@ function extensionForMime(mimeType: string | undefined): string {
   }
 }
 
-function safeName(raw: string | undefined, fallback: string): string {
+export function safeFileName(raw: string | undefined, fallback: string): string {
   const base = basename((raw ?? fallback).replaceAll("\\", "/"));
   const cleaned = [...base]
     .map((character) => (character < " " || character === "\u007f" ? "_" : character))
@@ -913,13 +761,6 @@ function humanize(value: string): string {
 
 function titleCase(value: string): string {
   return value.length === 0 ? value : `${value[0]?.toUpperCase()}${value.slice(1)}`;
-}
-
-function slug(value: string): string {
-  const normalized = humanize(value)
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, "-");
-  return normalized.replace(/^-|-$/g, "") || "telegram-file";
 }
 
 function clip(value: string, length: number): string {

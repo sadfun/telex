@@ -197,7 +197,7 @@ The service must be running when work becomes due; this is not a cloud scheduler
 
 ## Settings Mini App
 
-The Mini App is pinned to the bot's **Settings** menu button when its public URL is available; `/config` remains an equivalent entry point. At startup Telex reconciles both Telegram's default button and each allowlisted private chat, so a stale chat-specific command-menu override cannot hide the Mini App. It uses [TelegramUI](https://github.com/telegram-mini-apps-dev/TelegramUI) and accepts only signed Telegram `initData` from allowlisted private users. Its tab bar keeps the existing settings screen first and adds a **Skills** screen listing every enabled skill from Codex's native `skills/list` response. Opening a skill shows its `SKILL.md` instructions and a read-only browser for bundled scripts, references, images, and other files. Skill paths remain confined to that skill's directory, and oversized files are not loaded into the browser.
+The Mini App is pinned to the bot's **Settings** menu button when its public URL is available; `/config` remains an equivalent entry point. At startup Telex reconciles both Telegram's default button and each allowlisted private chat, so a stale chat-specific command-menu override cannot hide the Mini App. It uses source-owned UI components styled with Tailwind and accepts only signed Telegram `initData` from allowlisted private users. Its tab bar keeps the existing settings screen first and adds a **Skills** screen listing every enabled skill from Codex's native `skills/list` response. Opening a skill shows its `SKILL.md` instructions and a read-only browser for bundled scripts, references, images, and other files. Skill paths remain confined to that skill's directory, and oversized files are not loaded into the browser.
 
 The settings tab includes a default-on remote session context toggle and covers the everyday settings from Codex's [basic configuration guide](https://learn.chatgpt.com/docs/config-file/config-basic), including models, reasoning, approval policy, permission profiles, sandboxing, web search, shell environment, and supported feature flags. Turning remote session context off stops Telex from adding its connector-aware instructions to Codex turns.
 
@@ -206,11 +206,11 @@ Choices come from the running app-server and active configuration layers instead
 Telex keeps the running Codex process synchronized using the [app-server mechanisms designed for this purpose](https://learn.chatgpt.com/docs/app-server#api-overview):
 
 - Mini App saves hot-reload the effective user configuration and carry supported model, approval, and reasoning choices into the next turn.
-- File-backed active config layers are watched through `fs/watch`; valid external edits trigger the same reconciliation, while invalid edits leave the last healthy runtime active and show a degraded status.
+- External edits to config files are applied on demand: send `/reload` or press **Apply changes** in the Mini App to run the same reconciliation. An invalid edit leaves the last healthy runtime active and shows a degraded status.
 - Skills use Codex's built-in watcher plus a forced `skills/list` refresh. Explicit `$skill-name` mentions are sent as native skill inputs.
 - MCP definitions use `config/mcpServer/reload`. Codex queues refreshed MCP state for loaded threads, so it becomes active on their next turn.
 
-The runtime card in the Mini App shows the current outcome and offers **Apply changes** and **Restart Codex**. `/reload` and `/restart` provide the same private-chat controls. Restart is the fallback for startup-only state: Telex pauses new turns, lets active turns finish, restarts its child app-server with the same `CODEX_HOME`, reloads watches and resources, and lazily resumes persisted thread IDs. It does not restart the Telegram bridge or discard authentication and conversation history.
+The runtime card in the Mini App shows the current outcome and offers **Apply changes** and **Restart Codex**. `/reload` and `/restart` provide the same private-chat controls. Restart is the fallback for startup-only state: Telex pauses new turns, lets active turns finish, restarts its child app-server with the same `CODEX_HOME`, reloads its resources, and lazily resumes persisted thread IDs. It does not restart the Telegram bridge or discard authentication and conversation history.
 
 ## Source development
 
@@ -256,7 +256,7 @@ npm run codex:check
 npm run codex:update
 ```
 
-The check uses the candidate binary's `app-server generate-ts` and `generate-json-schema` output, validates it, compares the RPC surface, and compiles the application. Removed methods or compile failures are not applied.
+The check uses the candidate binary's `app-server generate-ts` output and compares the RPC surface; removed methods are never applied. Applying installs the bindings, typechecks the repository against them, and rolls the bindings back if the typecheck fails.
 
 ### Publishing a release
 

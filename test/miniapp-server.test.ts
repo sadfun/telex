@@ -6,6 +6,11 @@ import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 import { type CodexConfigService, ConfigValidationError } from "../src/codex/config-service.js";
+import type {
+  ApplyBankedResetOutcome,
+  CodexRuntimeStatus,
+  CodexUsageLimits,
+} from "../src/codex/runtime-service.js";
 import type { SkillResource } from "../src/codex/skill-browser.js";
 import type { TelexSettings, TelexSettingsStore } from "../src/core/settings-store.js";
 import type { ConfigWriteResponse } from "../src/generated/codex/v2/ConfigWriteResponse.js";
@@ -14,6 +19,14 @@ import { MiniAppServer } from "../src/miniapp/server.js";
 import type { Logger } from "../src/shared/logger.js";
 
 const botToken = "123456:abcdefghijklmnopqrstuvwxyzABCDE";
+
+const readyStatus: CodexRuntimeStatus = {
+  state: "ready",
+  restartRequired: false,
+  lastError: null,
+  lastAppliedAt: null,
+  configPath: null,
+};
 
 describe("MiniAppServer config API", () => {
   it("returns the fresh snapshot with the generated write outcome", async () => {
@@ -62,7 +75,7 @@ describe("MiniAppServer config API", () => {
       ...snapshot,
       writeOutcome,
       telex: { remoteClientContext: true },
-      runtime: { state: "ready" },
+      runtime: readyStatus,
     });
     expect(update).toHaveBeenCalledWith({
       expectedVersion: "revision-1",
@@ -103,7 +116,7 @@ describe("MiniAppServer config API", () => {
     expect(responseJson(response)).toEqual({
       ...snapshot,
       telex: { remoteClientContext: false },
-      runtime: { state: "ready" },
+      runtime: readyStatus,
     });
     expect(update).not.toHaveBeenCalled();
     expect(settings.update).toHaveBeenCalledWith({ remoteClientContext: false });
@@ -123,7 +136,7 @@ describe("MiniAppServer config API", () => {
     const response = await dispatch(server, request("POST", `/api/runtime/${path}`, undefined));
 
     expect(response.status).toBe(200);
-    expect(responseJson(response)).toEqual({ runtime: { state: "ready" } });
+    expect(responseJson(response)).toEqual({ runtime: readyStatus });
     expect(runtime[method]).toHaveBeenCalledOnce();
   });
 
@@ -345,42 +358,21 @@ function testServer(
 }
 
 interface TestRuntimeController extends MiniAppRuntimeController {
-  readonly usageLimits: ReturnType<
-    typeof vi.fn<
-      () => Promise<{
-        readonly weekly: { readonly remainingPercent: number; readonly resetsAt: number } | null;
-        readonly fiveHour: null;
-        readonly bankedResets: {
-          readonly availableCount: number;
-          readonly credits: readonly [
-            {
-              readonly id: string;
-              readonly resetType: "codexRateLimits";
-              readonly status: "available";
-              readonly grantedAt: number;
-              readonly expiresAt: number;
-              readonly title: string;
-              readonly description: null;
-            },
-          ];
-        };
-      }>
-    >
-  >;
+  readonly usageLimits: ReturnType<typeof vi.fn<() => Promise<CodexUsageLimits>>>;
   readonly applyBankedReset: ReturnType<
-    typeof vi.fn<(creditId: string, idempotencyKey: string) => Promise<"reset">>
+    typeof vi.fn<(creditId: string, idempotencyKey: string) => Promise<ApplyBankedResetOutcome>>
   >;
   readonly browseSkill: ReturnType<
     typeof vi.fn<(name: string, path: string) => Promise<SkillResource>>
   >;
-  readonly afterConfigWrite: ReturnType<typeof vi.fn<() => Promise<unknown>>>;
-  readonly reload: ReturnType<typeof vi.fn<() => Promise<unknown>>>;
-  readonly restart: ReturnType<typeof vi.fn<() => Promise<unknown>>>;
+  readonly afterConfigWrite: ReturnType<typeof vi.fn<() => Promise<CodexRuntimeStatus>>>;
+  readonly reload: ReturnType<typeof vi.fn<() => Promise<CodexRuntimeStatus>>>;
+  readonly restart: ReturnType<typeof vi.fn<() => Promise<CodexRuntimeStatus>>>;
 }
 
 function testRuntime(): TestRuntimeController {
   return {
-    status: () => ({ state: "ready" }),
+    status: () => readyStatus,
     usageLimits: vi.fn(async () => ({
       weekly: { remainingPercent: 68, resetsAt: 1_800_000_000 },
       fiveHour: null,
@@ -389,8 +381,8 @@ function testRuntime(): TestRuntimeController {
         credits: [
           {
             id: "reset-1",
-            resetType: "codexRateLimits",
-            status: "available",
+            resetType: "codexRateLimits" as const,
+            status: "available" as const,
             grantedAt: 1_799_000_000,
             expiresAt: 1_801_000_000,
             title: "Usage reset",
@@ -399,19 +391,19 @@ function testRuntime(): TestRuntimeController {
         ],
       },
     })),
-    applyBankedReset: vi.fn(async () => "reset"),
+    applyBankedReset: vi.fn(async () => "reset" as const),
     skills: () => [{ name: "github:yeet", description: "Publish changes" }],
     browseSkill: vi.fn(async () => ({
-      type: "file",
+      type: "file" as const,
       path: "references/release.md",
       size: 7,
       mediaType: "text/markdown",
-      encoding: "utf8",
+      encoding: "utf8" as const,
       content: "Release",
     })),
-    afterConfigWrite: vi.fn(async () => ({ state: "ready" })),
-    reload: vi.fn(async () => ({ state: "ready" })),
-    restart: vi.fn(async () => ({ state: "ready" })),
+    afterConfigWrite: vi.fn(async () => readyStatus),
+    reload: vi.fn(async () => readyStatus),
+    restart: vi.fn(async () => readyStatus),
   };
 }
 

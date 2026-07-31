@@ -6,10 +6,6 @@
     "fileCount": 617,
     "sha256": "125dea8051ad1d8ae9c9c527e30d1d6aada2965fd1e77771f7c18806c77a6724"
   },
-  "schemas": {
-    "fileCount": 273,
-    "sha256": "be5418b50d386d817e4870cb9e606558b0485d0ad90bae67b38ceffbb2ee4a0e"
-  },
   "methods": {
     "clientRequests": [
       "account/login/cancel",

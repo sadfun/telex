@@ -34,7 +34,7 @@ const buttonVariants = cva(
   },
 );
 
-export interface ButtonProps extends ButtonHTMLAttributes<HTMLButtonElement> {
+interface ButtonProps extends ButtonHTMLAttributes<HTMLButtonElement> {
   readonly mode?: "filled" | "bezeled" | "plain";
   readonly size?: "s" | "m" | "l";
   readonly stretched?: boolean;
@@ -99,7 +99,6 @@ export function Section({
 }
 
 interface CellProps extends Omit<ButtonHTMLAttributes<HTMLButtonElement>, "children"> {
-  readonly Component?: "button" | "div";
   readonly subtitle?: ReactNode;
   readonly before?: ReactNode;
   readonly after?: ReactNode;
@@ -108,7 +107,6 @@ interface CellProps extends Omit<ButtonHTMLAttributes<HTMLButtonElement>, "child
 }
 
 export function Cell({
-  Component = "div",
   subtitle,
   before,
   after,
@@ -118,14 +116,12 @@ export function Cell({
   type,
   ...props
 }: CellProps): ReactElement {
-  const Root = Component as ElementType;
   return (
-    <Root
-      type={Component === "button" ? (type ?? "button") : undefined}
+    <button
+      type={type ?? "button"}
       className={cn(
         "ui-cell flex min-h-14 w-full min-w-0 items-center gap-3 border-0 bg-transparent px-4 py-3 text-left text-foreground outline-none transition-colors",
-        Component === "button" &&
-          "cursor-pointer hover:bg-accent/70 focus-visible:bg-accent focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring active:bg-accent",
+        "cursor-pointer hover:bg-accent/70 focus-visible:bg-accent focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring active:bg-accent",
         className,
       )}
       {...props}
@@ -145,18 +141,16 @@ export function Cell({
         )}
       </span>
       {after === undefined ? undefined : <span className="ui-cell-after shrink-0">{after}</span>}
-    </Root>
+    </button>
   );
 }
 
 interface BannerProps extends HTMLAttributes<HTMLDivElement> {
-  readonly type?: "inline" | "section";
   readonly header: ReactNode;
   readonly subheader?: ReactNode;
 }
 
 export function Banner({
-  type: _type,
   header,
   subheader,
   className,

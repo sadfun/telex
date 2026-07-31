@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -28,16 +28,13 @@ describe("ConversationStore", () => {
     expect(JSON.parse(await readFile(path, "utf8"))).toMatchObject({ version: 2 });
   });
 
-  it("migrates legacy mappings and keeps explicit thread-switch history", async () => {
+  it("keeps explicit thread-switch history", async () => {
     const directory = await mkdtemp(join(tmpdir(), "telex-store-"));
     directories.push(directory);
     const path = join(directory, "conversations.json");
-    await writeFile(
-      path,
-      `${JSON.stringify({ version: 1, conversations: { "telegram:1": "thread-a" } })}\n`,
-    );
     const store = new ConversationStore(path, new Logger("error"));
     await store.load();
+    await store.set("telegram:1", "thread-a");
 
     await store.switchTo("telegram:1", "thread-b");
 

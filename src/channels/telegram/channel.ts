@@ -1,14 +1,23 @@
 import { join } from "node:path";
 import { type RunnerHandle, run } from "@grammyjs/runner";
 import { type Api, Bot } from "grammy";
-import type { BotCommand, CallbackQuery, Chat, MenuButton, Message, Update } from "grammy/types";
+import type {
+  BotCommand,
+  CallbackQuery,
+  Chat,
+  MenuButton,
+  Message,
+  Update,
+  User,
+} from "grammy/types";
+import { botCommands } from "../../core/bridge.js";
 import type {
   ChoiceOption,
   DeliveryReceipt,
   InboundAttachment,
+  InboundCommand,
   InboundMessage,
   MessageHandler,
-  MessageResponder,
   MessagingChannel,
   OutboundMessage,
   ProviderReference,
@@ -18,9 +27,9 @@ import { errorMessage } from "../../shared/errors.js";
 import type { Logger } from "../../shared/logger.js";
 import { downloadTelegramFile, TelegramFileDownloadError } from "./file.js";
 import {
+  describeTelegramFile,
   isTelegramTopicLifecycleMessage,
   normalizeTelegramMessage,
-  type TelegramFileReference,
 } from "./message.js";
 import {
   parseTelegramDeliveryTarget,
@@ -35,15 +44,12 @@ import {
   TelegramResponder,
   telegramSendParameters,
 } from "./reply.js";
-import { matchTelegramCommand, routeTelegramMessage, type TelegramReplyRoute } from "./route.js";
-
-type PendingChoiceMessage =
-  | { readonly kind: "normal"; readonly messageId: number }
-  | {
-      readonly kind: "ephemeral";
-      readonly receiverUserId: number;
-      readonly ephemeralMessageId: number;
-    };
+import {
+  matchTelegramCommand,
+  routeTelegramMessage,
+  type TelegramIncomingRoute,
+  type TelegramReplyRoute,
+} from "./route.js";
 
 interface PendingChoice {
   readonly userId: number;
@@ -51,7 +57,7 @@ interface PendingChoice {
   readonly result: Deferred<string>;
   readonly timer: NodeJS.Timeout;
   readonly chatId: number;
-  readonly message: PendingChoiceMessage;
+  readonly messageId: number;
 }
 
 interface GuestUpdateWithReferences extends Update {
@@ -62,21 +68,10 @@ interface GuestMessageWithReferences extends Message {
   readonly reference_messages?: readonly Message[];
 }
 
-export const telegramBotCommands = [
-  { command: "start", description: "Set up Telex" },
-  { command: "new", description: "Start a new Codex task" },
-  { command: "back", description: "Return to the previous Codex task" },
-  { command: "stop", description: "Stop the running turn" },
-  { command: "schedules", description: "List scheduled runs" },
-  { command: "status", description: "Show Codex status" },
-  { command: "login", description: "Sign in to Codex" },
-  { command: "logout", description: "Sign out of Codex" },
-  { command: "config", description: "Open Codex settings" },
-  { command: "reload", description: "Reload Codex resources" },
-  { command: "restart", description: "Restart the Codex app-server" },
-  { command: "update", description: "Update Telex" },
-  { command: "help", description: "Show commands" },
-] as const satisfies readonly BotCommand[];
+export const telegramBotCommands: readonly BotCommand[] = botCommands.map((entry) => ({
+  command: entry.command,
+  description: entry.menuDescription,
+}));
 
 export function telegramMenuButton(miniAppUrl: string | undefined): MenuButton {
   if (miniAppUrl === undefined) {
@@ -249,10 +244,7 @@ export class TelegramChannel implements MessagingChannel {
     message: OutboundMessage,
   ): Promise<DeliveryReceipt> {
     const target = parseTelegramDeliveryTarget(targetReference);
-    const route: TelegramReplyRoute = {
-      destination: target.destination,
-      visibility: { kind: "normal" },
-    };
+    const route: TelegramReplyRoute = { destination: target.destination };
     const messageIds = await publishTelegramMessage(
       this.#bot.api,
       target.chatId,
@@ -284,7 +276,7 @@ export class TelegramChannel implements MessagingChannel {
 
     const guestQueryId = message.guest_query_id;
     if (guest && guestQueryId === undefined) return;
-    const incomingRoute = guest ? undefined : routeTelegramMessage(message, sender.id);
+    const incomingRoute = guest ? undefined : routeTelegramMessage(message);
     if (!guest && incomingRoute === undefined) {
       this.#logger.warn("Ignored unroutable Telegram direct message", {
         chatId: message.chat.id,
@@ -294,8 +286,9 @@ export class TelegramChannel implements MessagingChannel {
     }
     const commandMatch = matchTelegramCommand(message, this.#botUsername);
     if (commandMatch.kind === "otherBot") return;
+    const command = commandMatch.kind === "command" ? commandMatch.command : undefined;
     const normalized =
-      commandMatch.kind === "command"
+      command !== undefined
         ? { text: message.text?.trim() ?? "", files: [] }
         : normalizeTelegramMessage(message, referenceMessages);
     const directory = join(this.#attachmentDirectory, crypto.randomUUID());
@@ -330,74 +323,87 @@ export class TelegramChannel implements MessagingChannel {
       }
     }
     const text = [normalized.text, ...failures].filter((part) => part.length > 0).join("\n\n");
-    const normalizedText = guest ? this.stripGuestMention(text) : text;
-    if (normalizedText.length === 0) return;
-    let responder: MessageResponder;
-    let conversationKey: string;
     if (guest) {
-      if (guestQueryId === undefined) return;
-      responder = new TelegramGuestResponder(api, guestQueryId);
-      conversationKey = `telegram:guest:${guestQueryId}`;
-    } else {
-      if (incomingRoute === undefined) return;
-      responder = new TelegramResponder(
-        api,
-        message.chat,
-        incomingRoute.reply,
-        sender.id,
-        this.requestChoice,
-        this.#logger,
-      );
-      conversationKey = `telegram:${message.chat.id}:${incomingRoute.conversationSuffix}`;
+      const normalizedText = this.stripGuestMention(text);
+      if (normalizedText.length === 0 || guestQueryId === undefined) return;
+      const responder = new TelegramGuestResponder(api, guestQueryId);
+      await this.invoke({
+        id: `guest:${guestQueryId}`,
+        address: {
+          channel: this.name,
+          key: `telegram:guest:${guestQueryId}`,
+          isPrivate: message.chat.type === "private",
+          isGuest: true,
+        },
+        sender: senderIdentity(sender),
+        text: normalizedText,
+        ...(command === undefined ? {} : { command }),
+        attachments,
+        responder,
+      });
+      return;
     }
-    const inbound: InboundMessage = {
-      id: guest
-        ? `guest:${guestQueryId}`
-        : message.ephemeral_message_id === undefined
-          ? String(message.message_id)
-          : `ephemeral:${message.ephemeral_message_id}`,
+    if (text.length === 0 || incomingRoute === undefined) return;
+    await this.dispatch(api, message, incomingRoute, sender, String(message.message_id), {
+      text,
+      ...(command === undefined ? {} : { command }),
+      attachments,
+      replyToMessageId: message.reply_to_message?.message_id,
+    });
+  }
+
+  private async dispatch(
+    api: Api,
+    message: Message,
+    incomingRoute: TelegramIncomingRoute,
+    from: User,
+    inboundId: string,
+    content: {
+      readonly text: string;
+      readonly command?: InboundCommand;
+      readonly attachments: readonly InboundAttachment[];
+      readonly replyToMessageId?: number | undefined;
+    },
+  ): Promise<void> {
+    const responder = new TelegramResponder(
+      api,
+      message.chat,
+      incomingRoute.reply,
+      from.id,
+      this.requestChoice,
+      this.#logger,
+    );
+    await this.invoke({
+      id: inboundId,
       address: {
         channel: this.name,
-        key: conversationKey,
+        key: `telegram:${message.chat.id}:${incomingRoute.conversationSuffix}`,
         isPrivate: message.chat.type === "private",
-        isGuest: guest,
-        ...(guest || incomingRoute === undefined || incomingRoute.reply.visibility.kind !== "normal"
-          ? {}
-          : {
-              deliveryTarget: telegramDeliveryTarget(
-                message.chat.id,
-                message.chat.type,
-                incomingRoute.reply,
-              ),
-            }),
+        isGuest: false,
+        deliveryTarget: telegramDeliveryTarget(message.chat.id, incomingRoute.reply),
       },
-      ...(guest
+      reference: telegramMessageReference(message.chat.id, message.message_id),
+      ...(content.replyToMessageId === undefined
         ? {}
-        : {
-            reference: telegramMessageReference(message.chat.id, message.message_id),
-            ...(message.reply_to_message === undefined
-              ? {}
-              : {
-                  replyTo: telegramMessageReference(
-                    message.chat.id,
-                    message.reply_to_message.message_id,
-                  ),
-                }),
-          }),
-      sender: {
-        id: String(sender.id),
-        displayName: [sender.first_name, sender.last_name].filter(Boolean).join(" "),
-      },
-      text: normalizedText,
-      ...(commandMatch.kind === "command" ? { command: commandMatch.command } : {}),
-      attachments,
+        : { replyTo: telegramMessageReference(message.chat.id, content.replyToMessageId) }),
+      sender: senderIdentity(from),
+      text: content.text,
+      ...(content.command === undefined ? {} : { command: content.command }),
+      attachments: content.attachments,
       responder,
-    };
+    });
+  }
+
+  private async invoke(inbound: InboundMessage): Promise<void> {
+    const handler = this.#handler;
+    if (handler === undefined) return;
     try {
       await handler(inbound);
     } catch (error) {
       this.#logger.error("Telegram message handler failed", error, { messageId: inbound.id });
-      await responder.sendText(`Bridge error: ${errorMessage(error)}`).catch(() => undefined);
+      await inbound.responder
+        .sendText(`Bridge error: ${errorMessage(error)}`)
+        .catch(() => undefined);
     }
   }
 
@@ -407,8 +413,9 @@ export class TelegramChannel implements MessagingChannel {
     userId: number,
     prompt: string,
     options: readonly ChoiceOption[],
+    signal?: AbortSignal,
   ): Promise<string> => {
-    if (options.length === 0) return "decline";
+    if (options.length === 0 || signal?.aborted === true) return "decline";
     const token = crypto.randomUUID().replaceAll("-", "").slice(0, 16);
     const details = options
       .filter((option) => option.description !== undefined)
@@ -430,7 +437,6 @@ export class TelegramChannel implements MessagingChannel {
         },
       },
     );
-    const sentMessage = pendingChoiceMessage(route, sent);
     const result = deferred<string>();
     const timer = setTimeout(
       () => {
@@ -446,9 +452,22 @@ export class TelegramChannel implements MessagingChannel {
       result,
       timer,
       chatId: chat.id,
-      message: sentMessage,
+      messageId: sent.message_id,
     });
-    return await result.promise;
+    const onAbort = (): void => {
+      const pending = this.#pendingChoices.get(token);
+      if (pending === undefined) return;
+      clearTimeout(pending.timer);
+      this.#pendingChoices.delete(token);
+      pending.result.resolve("decline");
+      void this.clearChoiceKeyboard(this.#bot.api, pending).catch(() => undefined);
+    };
+    signal?.addEventListener("abort", onAbort, { once: true });
+    try {
+      return await result.promise;
+    } finally {
+      signal?.removeEventListener("abort", onAbort);
+    }
   };
 
   private async handleCallback(query: CallbackQuery, api: Api): Promise<void> {
@@ -473,77 +492,39 @@ export class TelegramChannel implements MessagingChannel {
     clearTimeout(pending.timer);
     this.#pendingChoices.delete(token);
     pending.result.resolve(selected.id);
-    const clearKeyboard =
-      pending.message.kind === "normal"
-        ? api.editMessageReplyMarkup(pending.chatId, pending.message.messageId, {
-            reply_markup: { inline_keyboard: [] },
-          })
-        : api.editEphemeralMessageReplyMarkup(
-            pending.chatId,
-            pending.message.receiverUserId,
-            pending.message.ephemeralMessageId,
-            { reply_markup: { inline_keyboard: [] } },
-          );
     await Promise.allSettled([
       api.answerCallbackQuery(query.id, { text: selected.label.slice(0, 200) }),
-      clearKeyboard,
+      this.clearChoiceKeyboard(api, pending),
     ]);
+  }
+
+  private async clearChoiceKeyboard(api: Api, pending: PendingChoice): Promise<void> {
+    await api.editMessageReplyMarkup(pending.chatId, pending.messageId, {
+      reply_markup: { inline_keyboard: [] },
+    });
   }
 
   private async handleCommandCallback(
     query: CallbackQuery,
-    command: Readonly<{ name: string; args: string }>,
+    command: InboundCommand,
     api: Api,
   ): Promise<void> {
-    const handler = this.#handler;
     const message = query.message;
-    if (handler === undefined || message === undefined || !("date" in message)) {
+    if (this.#handler === undefined || message === undefined || !("date" in message)) {
       await api.answerCallbackQuery(query.id, { text: "This action is unavailable." });
       return;
     }
-    const incomingRoute = routeTelegramMessage(message, query.from.id);
+    const incomingRoute = routeTelegramMessage(message);
     if (incomingRoute === undefined) {
       await api.answerCallbackQuery(query.id, { text: "This action is unavailable." });
       return;
     }
-    const responder = new TelegramResponder(
-      api,
-      message.chat,
-      incomingRoute.reply,
-      query.from.id,
-      this.requestChoice,
-      this.#logger,
-    );
-    const inbound: InboundMessage = {
-      id: `callback:${query.id}`,
-      address: {
-        channel: this.name,
-        key: `telegram:${message.chat.id}:${incomingRoute.conversationSuffix}`,
-        isPrivate: message.chat.type === "private",
-        isGuest: false,
-        deliveryTarget: telegramDeliveryTarget(
-          message.chat.id,
-          message.chat.type,
-          incomingRoute.reply,
-        ),
-      },
-      reference: telegramMessageReference(message.chat.id, message.message_id),
-      sender: {
-        id: String(query.from.id),
-        displayName: [query.from.first_name, query.from.last_name].filter(Boolean).join(" "),
-      },
+    await api.answerCallbackQuery(query.id, { text: "Opening scheduled run…" });
+    await this.dispatch(api, message, incomingRoute, query.from, `callback:${query.id}`, {
       text: `/${command.name}${command.args.length === 0 ? "" : ` ${command.args}`}`,
       command,
       attachments: [],
-      responder,
-    };
-    await api.answerCallbackQuery(query.id, { text: "Opening scheduled run…" });
-    try {
-      await handler(inbound);
-    } catch (error) {
-      this.#logger.error("Telegram command action failed", error, { command: command.name });
-      await responder.sendText(`Bridge error: ${errorMessage(error)}`).catch(() => undefined);
-    }
+    });
   }
 
   private stripGuestMention(text: string): string {
@@ -553,32 +534,9 @@ export class TelegramChannel implements MessagingChannel {
   }
 }
 
-function pendingChoiceMessage(route: TelegramReplyRoute, sent: Message): PendingChoiceMessage {
-  if (route.visibility.kind === "normal") {
-    return { kind: "normal", messageId: sent.message_id };
-  }
-  const ephemeralMessageId = sent.ephemeral_message_id;
-  if (ephemeralMessageId === undefined) {
-    throw new Error("Telegram did not return an ephemeral message identifier");
-  }
+function senderIdentity(user: User): Readonly<{ id: string; displayName: string }> {
   return {
-    kind: "ephemeral",
-    receiverUserId: route.visibility.receiverUserId,
-    ephemeralMessageId,
+    id: String(user.id),
+    displayName: [user.first_name, user.last_name].filter(Boolean).join(" "),
   };
-}
-
-function describeTelegramFile(file: TelegramFileReference): string {
-  const metadata = [
-    file.suggestedName,
-    file.mimeType,
-    file.size === undefined ? undefined : formatBytes(file.size),
-  ].filter((value): value is string => value !== undefined);
-  return metadata.length === 0 ? file.description : `${file.description} (${metadata.join(", ")})`;
-}
-
-function formatBytes(bytes: number): string {
-  if (bytes < 1_024) return `${bytes} B`;
-  if (bytes < 1_024 * 1_024) return `${Math.round(bytes / 1_024)} KB`;
-  return `${Math.round((bytes / (1_024 * 1_024)) * 10) / 10} MB`;
 }

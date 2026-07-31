@@ -1,4 +1,4 @@
-import { mkdir, open, readFile, rename, rm } from "node:fs/promises";
+import { mkdir, open, rename, rm } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -31,10 +31,6 @@ export async function atomicWriteFile(
 
 export async function atomicWriteJson(path: string, value: unknown): Promise<void> {
   await atomicWriteFile(path, `${JSON.stringify(value, null, 2)}\n`);
-}
-
-export async function readUtf8(path: string): Promise<string> {
-  return await readFile(path, "utf8");
 }
 
 export function projectRootFrom(moduleUrl: string): string {

@@ -14,9 +14,12 @@ import type { Model } from "../src/generated/codex/v2/Model.js";
 
 describe("CodexConfigService", () => {
   it("reads explicit user values and account-specific capabilities", async () => {
-    const rpc = new FakeConfigRpc({
-      approval_policy: "on-request",
-    });
+    const rpc = new FakeConfigRpc(
+      {
+        approval_policy: "on-request",
+      },
+      { features: [appsFeature, turboFeature] },
+    );
     const snapshot = await service(rpc).read();
 
     expect(snapshot.values.approval_policy).toBe("on-request");
@@ -26,19 +29,25 @@ describe("CodexConfigService", () => {
       model: "gpt-test",
       defaultReasoningEffort: "medium",
     });
-    expect(snapshot.capabilities.features.map((feature) => feature.name)).toEqual(["apps"]);
+    expect(snapshot.capabilities.features).toEqual([
+      expect.objectContaining({ name: "apps", displayName: "Apps", description: "" }),
+      expect.objectContaining({
+        name: "fast_mode",
+        displayName: "Turbo mode",
+        description: "Native description from Codex.",
+      }),
+    ]);
     expect(snapshot.capabilities.modelProviders).toEqual([
       expect.objectContaining({ id: "openai", displayName: "OpenAI", allowed: true }),
     ]);
     expect(snapshot.validation.valid).toBe(true);
   });
 
-  it("preserves granular approvals and derives a safe provider selector from active config", async () => {
+  it("preserves granular approvals and offers the builtin plus the current provider", async () => {
     const approvalPolicy = granularApproval({ sandbox_approval: true });
     const rpc = new FakeConfigRpc(
       {
         model_provider: "workspace-provider",
-        model_providers: { "workspace-provider": { name: "Workspace" } },
         approval_policy: approvalPolicy,
         approvals_reviewer: "auto_review",
       },
@@ -82,14 +91,16 @@ describe("CodexConfigService", () => {
   });
 
   it("requires provider-dependent selections to reset during a provider switch", async () => {
-    const rpc = new FakeConfigRpc({
-      model_provider: "openai",
-      model_providers: { custom: { name: "Custom" } },
-      model: "gpt-test",
-      model_reasoning_effort: "medium",
-      service_tier: "priority",
-      personality: "friendly",
-    });
+    const rpc = new FakeConfigRpc(
+      {
+        model_provider: "openai",
+        model: "gpt-test",
+        model_reasoning_effort: "medium",
+        service_tier: "priority",
+        personality: "friendly",
+      },
+      { effectiveConfig: { model_provider: "custom" } },
+    );
     const config = service(rpc);
 
     const invalid = await config.validate({
@@ -119,7 +130,7 @@ describe("CodexConfigService", () => {
     });
   });
 
-  it("rejects a provider that is neither built in, current, nor actively configured", async () => {
+  it("rejects a provider that is neither built in nor currently running", async () => {
     const result = await service(new FakeConfigRpc({})).validate({
       expectedVersion: "revision-1",
       values: { model_provider: "invented-provider" },
@@ -161,28 +172,7 @@ describe("CodexConfigService", () => {
     expect(snapshot.validation.valid).toBe(true);
   });
 
-  it("compares granular managed approval policies structurally", async () => {
-    const allowed = granularApproval({ sandbox_approval: true, rules: true });
-    const rpc = new FakeConfigRpc({}, { requirements: requirementsWithPolicies([allowed]) });
-    const config = service(rpc);
-
-    expect(
-      await config.validate({
-        expectedVersion: "revision-1",
-        values: { approval_policy: allowed },
-      }),
-    ).toMatchObject({ valid: true });
-
-    const rejected = await config.validate({
-      expectedVersion: "revision-1",
-      values: { approval_policy: granularApproval({ sandbox_approval: true }) },
-    });
-    expect(rejected.issues).toContainEqual(
-      expect.objectContaining({ path: "approval_policy", severity: "error" }),
-    );
-  });
-
-  it("rejects stale revisions and conflicting sandbox systems", async () => {
+  it("flags conflicting sandbox systems and leaves version conflicts to Codex", async () => {
     const rpc = new FakeConfigRpc({ sandbox_mode: "workspace-write" });
     const result = await service(rpc).validate({
       expectedVersion: "stale",
@@ -191,8 +181,9 @@ describe("CodexConfigService", () => {
 
     expect(result.valid).toBe(false);
     expect(result.issues.map((issue) => issue.path)).toEqual(
-      expect.arrayContaining(["expectedVersion", "default_permissions", "sandbox_mode"]),
+      expect.arrayContaining(["default_permissions", "sandbox_mode"]),
     );
+    expect(result.issues.map((issue) => issue.path)).not.toContain("expectedVersion");
   });
 
   it("detects the reverse conflict when an active layer supplies default_permissions", async () => {
@@ -381,6 +372,16 @@ const appsFeature = {
   defaultEnabled: true,
 } satisfies ExperimentalFeature;
 
+const turboFeature = {
+  name: "fast_mode",
+  stage: "beta",
+  displayName: "Turbo mode",
+  description: "Native description from Codex.",
+  announcement: null,
+  enabled: false,
+  defaultEnabled: false,
+} satisfies ExperimentalFeature;
+
 type GranularApproval = Extract<AskForApproval, { granular: unknown }>["granular"];
 
 function granularApproval(overrides: Partial<GranularApproval>): AskForApproval {
@@ -393,26 +394,6 @@ function granularApproval(overrides: Partial<GranularApproval>): AskForApproval 
       mcp_elicitations: false,
       ...overrides,
     },
-  };
-}
-
-function requirementsWithPolicies(
-  allowedApprovalPolicies: readonly AskForApproval[],
-): ConfigRequirements {
-  return {
-    allowedApprovalPolicies: [...allowedApprovalPolicies],
-    allowedSandboxModes: null,
-    allowedWindowsSandboxImplementations: null,
-    allowedPermissionProfiles: null,
-    defaultPermissions: null,
-    allowedWebSearchModes: null,
-    allowManagedHooksOnly: null,
-    allowAppshots: null,
-    allowRemoteControl: null,
-    computerUse: null,
-    featureRequirements: null,
-    enforceResidency: null,
-    models: null,
   };
 }
 

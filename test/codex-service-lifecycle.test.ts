@@ -40,17 +40,16 @@ describe("CodexService lifecycle", () => {
       await vi.advanceTimersByTimeAsync(4 * 60 * 60 * 1_000);
 
       expect(rpc.requests.filter((request) => request.method === "turn/interrupt")).toHaveLength(0);
-      expect(output.stream.fail).not.toHaveBeenCalled();
+      expect(output.streams[0]?.fail).not.toHaveBeenCalled();
       rpc.completeNextTurn();
-      await vi.advanceTimersByTimeAsync(100);
       await run;
-      expect(output.stream.complete).toHaveBeenCalled();
+      expect(output.streams[0]?.complete).toHaveBeenCalled();
     } finally {
       vi.useRealTimers();
     }
   });
 
-  it("follows an automatic successor turn and returns its final output", async () => {
+  it("renders a Codex-initiated successor turn as its own chat message", async () => {
     const { rpc, service } = await testService();
     const output = responder();
     const run = service.runTurn(
@@ -63,17 +62,21 @@ describe("CodexService lifecycle", () => {
     await rpc.waitForRequests("turn/start", 1);
 
     rpc.completeNextTurn();
-    rpc.startSuccessor("thread-1", "mailbox-turn");
-    expect(output.stream.complete).not.toHaveBeenCalled();
-
-    rpc.completeTurn("thread-1", "mailbox-turn", "completed", [agentMessage("Successor result")]);
     await run;
+    expect(output.streams[0]?.complete).toHaveBeenCalledWith("Done.", []);
 
-    expect(output.stream.complete).toHaveBeenCalledWith("Successor result", []);
-    expect(output.stream.fail).not.toHaveBeenCalled();
+    rpc.startSuccessor("thread-1", "mailbox-turn");
+    rpc.completeTurn("thread-1", "mailbox-turn", "completed", [agentMessage("Successor result")]);
+
+    await vi.waitFor(() => {
+      expect(output.streams[1]?.complete).toHaveBeenCalledWith("Successor result", []);
+    });
+    expect(output.streams[1]?.start).toHaveBeenCalled();
+    expect(output.streams[0]?.fail).not.toHaveBeenCalled();
+    expect(output.streams[1]?.fail).not.toHaveBeenCalled();
   });
 
-  it("follows a successor announced before the original terminal notification", async () => {
+  it("renders a successor announced before the original terminal notification", async () => {
     const { rpc, service } = await testService();
     const output = responder();
     const run = service.runTurn(
@@ -86,15 +89,18 @@ describe("CodexService lifecycle", () => {
     await rpc.waitForRequests("turn/start", 1);
 
     rpc.startSuccessor("thread-1", "mailbox-turn");
-    rpc.completeNextTurn();
     rpc.completeTurn("thread-1", "mailbox-turn", "completed", [agentMessage("Reordered result")]);
+    rpc.completeNextTurn();
     await run;
 
-    expect(output.stream.complete).toHaveBeenCalledWith("Reordered result", []);
-    expect(output.stream.fail).not.toHaveBeenCalled();
+    await vi.waitFor(() => {
+      expect(output.streams[1]?.complete).toHaveBeenCalledWith("Reordered result", []);
+    });
+    expect(output.streams[0]?.complete).toHaveBeenCalledWith("Done.", []);
+    expect(output.streams[0]?.fail).not.toHaveBeenCalled();
   });
 
-  it("reconciles and retries an interrupt from Codex's authoritative active turn", async () => {
+  it("keeps the stop intent armed when Codex reports a different active turn", async () => {
     const { rpc, service } = await testService();
     const output = responder();
     const run = service.runTurn(
@@ -107,25 +113,31 @@ describe("CodexService lifecycle", () => {
     await rpc.waitForRequests("turn/start", 1);
     rpc.interruptActiveTurnId = "80432e00-b82b-4cbd-9de3-f4d846ace12c";
 
+    // The interrupt for turn-1 is rejected because Codex already swapped in a
+    // successor. Telex does not parse the error; the authoritative turn will
+    // announce itself and the standing stop intent interrupts it then.
     await expect(service.interrupt("telegram:interrupt-mismatch")).resolves.toBe(true);
     expect(rpc.requests.filter((request) => request.method === "turn/interrupt")).toEqual([
       {
         method: "turn/interrupt",
         params: { threadId: "thread-1", turnId: "turn-1" },
       },
-      {
-        method: "turn/interrupt",
-        params: {
-          threadId: "thread-1",
-          turnId: "80432e00-b82b-4cbd-9de3-f4d846ace12c",
-        },
-      },
     ]);
 
-    rpc.completeNextTurn();
+    rpc.startSuccessor("thread-1", "80432e00-b82b-4cbd-9de3-f4d846ace12c");
+    await rpc.waitForRequests("turn/interrupt", 2);
+    expect(rpc.requests.filter((request) => request.method === "turn/interrupt")[1]).toEqual({
+      method: "turn/interrupt",
+      params: {
+        threadId: "thread-1",
+        turnId: "80432e00-b82b-4cbd-9de3-f4d846ace12c",
+      },
+    });
+
+    rpc.completeNextTurn("interrupted");
     rpc.completeTurn("thread-1", "80432e00-b82b-4cbd-9de3-f4d846ace12c", "interrupted");
     await run;
-    expect(output.stream.complete).toHaveBeenCalledWith("Stopped.", []);
+    expect(output.streams[0]?.complete).toHaveBeenCalledWith("Stopped.", []);
   });
 
   it("interrupts the automatic successor instead of the stale original turn", async () => {
@@ -141,6 +153,7 @@ describe("CodexService lifecycle", () => {
     await rpc.waitForRequests("turn/start", 1);
 
     rpc.completeNextTurn();
+    await run;
     rpc.startSuccessor("thread-1", "mailbox-turn");
 
     await expect(service.interrupt("telegram:successor-stop")).resolves.toBe(true);
@@ -152,8 +165,6 @@ describe("CodexService lifecycle", () => {
     ]);
 
     rpc.completeTurn("thread-1", "mailbox-turn", "interrupted");
-    await run;
-    expect(output.stream.complete).toHaveBeenCalledWith("Stopped.", []);
   });
 
   it("propagates an earlier stop request to a successor turn", async () => {
@@ -186,7 +197,32 @@ describe("CodexService lifecycle", () => {
 
     rpc.completeTurn("thread-1", "mailbox-turn", "interrupted");
     await run;
-    expect(output.stream.complete).toHaveBeenCalledWith("Stopped.", []);
+    expect(output.streams[0]?.complete).toHaveBeenCalledWith("Stopped.", []);
+  });
+
+  it("clears the stop intent when new work starts on the thread", async () => {
+    const { rpc, service } = await testService();
+    const output = responder();
+    const run = service.runTurn("telegram:restart", "telegram", "work", output.responder, true);
+    await rpc.waitForRequests("turn/start", 1);
+    await expect(service.interrupt("telegram:restart")).resolves.toBe(true);
+    rpc.completeNextTurn("interrupted");
+    await run;
+
+    const second = responder();
+    const secondRun = service.runTurn(
+      "telegram:restart",
+      "telegram",
+      "again",
+      second.responder,
+      true,
+    );
+    await rpc.waitForRequests("turn/start", 2);
+    rpc.completeNextTurn();
+    await secondRun;
+
+    expect(rpc.requests.filter((request) => request.method === "turn/interrupt")).toHaveLength(1);
+    expect(second.streams[0]?.complete).toHaveBeenCalledWith("Done.", []);
   });
 
   it("gates queued jobs while paused and drains only jobs that passed the gate", async () => {
@@ -202,7 +238,7 @@ describe("CodexService lifecycle", () => {
     await service.waitForIdle();
 
     expect(rpc.requests.filter((request) => request.method === "turn/start")).toHaveLength(1);
-    expect(second.stream.start).toHaveBeenCalledWith({
+    expect(second.streams[0]?.start).toHaveBeenCalledWith({
       summary: "Queued behind earlier work…",
       actions: [],
       plan: [],
@@ -212,7 +248,7 @@ describe("CodexService lifecycle", () => {
     await rpc.waitForRequests("turn/start", 2);
     rpc.completeNextTurn();
     await Promise.all([firstRun, secondRun]);
-    expect(second.stream.complete).toHaveBeenCalled();
+    expect(second.streams[0]?.complete).toHaveBeenCalled();
   });
 
   it("counts work waiting for thread creation as non-idle", async () => {
@@ -245,7 +281,8 @@ describe("CodexService lifecycle", () => {
     rpc.emitExit();
     await Promise.all([run, service.waitForIdle()]);
 
-    expect(output.stream.fail).toHaveBeenCalledWith("transport exited");
+    expect(output.streams[0]?.fail).toHaveBeenCalledWith("transport exited");
+    expect(output.streams[0]?.fail).toHaveBeenCalledTimes(1);
   });
 
   it("reads live settings and skills per turn and resumes stored threads after an exit", async () => {
@@ -335,7 +372,7 @@ describe("CodexService lifecycle", () => {
     rpc.resumeError = new BridgeError("not running", "CODEX_NOT_RUNNING");
     const failed = responder();
     await service.runTurn("telegram:stored", "telegram", "while down", failed.responder);
-    expect(failed.stream.fail).toHaveBeenCalledWith("not running");
+    expect(failed.streams[0]?.fail).toHaveBeenCalledWith("not running");
 
     rpc.resumeError = undefined;
     const resumed = service.runTurn(
@@ -466,18 +503,25 @@ class ControlledRpc {
   }
 }
 
-function responder(): Readonly<{ responder: MessageResponder; stream: OutboundStream }> {
-  const stream: OutboundStream = {
-    start: vi.fn(async () => undefined),
-    setProgress: vi.fn(),
-    appendFinal: vi.fn(),
-    complete: vi.fn(async () => undefined),
-    fail: vi.fn(async () => undefined),
-  };
+function responder(): Readonly<{
+  responder: MessageResponder;
+  streams: readonly OutboundStream[];
+}> {
+  const streams: OutboundStream[] = [];
   return {
-    stream,
+    streams,
     responder: {
-      createStream: () => stream,
+      createStream: () => {
+        const stream: OutboundStream = {
+          start: vi.fn(async () => undefined),
+          setProgress: vi.fn(),
+          appendFinal: vi.fn(),
+          complete: vi.fn(async () => undefined),
+          fail: vi.fn(async () => undefined),
+        };
+        streams.push(stream);
+        return stream;
+      },
       sendText: vi.fn(async () => undefined),
       askChoice: vi.fn(async () => "decline"),
     },

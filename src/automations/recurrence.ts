@@ -12,7 +12,7 @@ export class RecurrenceError extends Error {
   public override readonly name = "RecurrenceError";
 }
 
-export interface ParsedRecurrence {
+interface ParsedRecurrence {
   readonly frequency: "MINUTELY" | "HOURLY" | "DAILY" | "WEEKLY";
   readonly interval: number;
   readonly byMinute: ReadonlySet<number> | undefined;

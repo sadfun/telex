@@ -9,7 +9,7 @@ import type { ThreadItem } from "../generated/codex/v2/ThreadItem.js";
 // Node does not expose macOS's whole-path O_NOFOLLOW_ANY flag.
 const DARWIN_O_NOFOLLOW_ANY = 0x20000000;
 
-export interface OutboundAttachmentResolution {
+interface OutboundAttachmentResolution {
   readonly attachments: readonly OutboundAttachment[];
   readonly unavailable: readonly string[];
 }

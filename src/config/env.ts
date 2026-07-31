@@ -3,11 +3,6 @@ import { z } from "zod";
 import type { LogLevel } from "../shared/logger.js";
 import type { UpdateMode } from "../update/monitor.js";
 
-const booleanString = z
-  .enum(["true", "false", "1", "0"])
-  .default("true")
-  .transform((value) => value === "true" || value === "1");
-
 const updateEnvSchema = z.object({
   TELEX_UPDATE_MODE: z.enum(["off", "notify", "auto"]).default("notify"),
   TELEX_UPDATE_INTERVAL_HOURS: z.coerce.number().min(1).max(168).default(6),
@@ -31,13 +26,12 @@ const envSchema = z.object({
   TELEX_TUNNEL: z.enum(["auto", "off"]).default("auto"),
   TELEX_DATA_DIR: z.string().min(1).default(".telex"),
   CODEX_WORKSPACE: z.string().min(1).default(".telex/workspace"),
-  CODEX_CHECK_UPDATES: booleanString,
   HOST: z.string().min(1).default("127.0.0.1"),
   PORT: z.coerce.number().int().min(1).max(65_535).default(8787),
   LOG_LEVEL: z.enum(["debug", "info", "warn", "error"]).default("info"),
 });
 
-export interface AppConfig {
+interface AppConfig {
   readonly telegramToken: string;
   readonly allowedUserIds: ReadonlySet<number>;
   readonly telegramApiBase: string;
@@ -46,7 +40,6 @@ export interface AppConfig {
   readonly tunnelMode: "auto" | "off";
   readonly dataDirectory: string;
   readonly workspace: string;
-  readonly checkCodexUpdates: boolean;
   readonly updateMode: UpdateMode;
   readonly updateIntervalMs: number;
   readonly updateRepository: string;
@@ -56,7 +49,7 @@ export interface AppConfig {
   readonly logLevel: LogLevel;
 }
 
-export interface UpdateConfig {
+interface UpdateConfig {
   readonly updateMode: UpdateMode;
   readonly updateIntervalMs: number;
   readonly updateRepository: string;
@@ -81,7 +74,6 @@ export function loadAppConfig(environment: NodeJS.ProcessEnv = process.env): App
     tunnelMode: parsed.TELEX_TUNNEL,
     dataDirectory: resolve(parsed.TELEX_DATA_DIR),
     workspace: resolve(parsed.CODEX_WORKSPACE),
-    checkCodexUpdates: parsed.CODEX_CHECK_UPDATES,
     host: parsed.HOST,
     port: parsed.PORT,
     logLevel: parsed.LOG_LEVEL,

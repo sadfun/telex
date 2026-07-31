@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ScheduledRunsEngine } from "../src/automations/engine.js";
 import { AutomationStore } from "../src/automations/store.js";
-import type { AutomationDefinition } from "../src/automations/types.js";
+import type { AutomationDefinition, AutomationRun } from "../src/automations/types.js";
 import type {
   CodexDynamicTool,
   CodexDynamicToolContext,
@@ -18,6 +18,7 @@ import type {
   OutboundMessage,
   ProviderReference,
 } from "../src/core/channel.js";
+import { deferred } from "../src/shared/async.js";
 import { Logger } from "../src/shared/logger.js";
 
 const directories: string[] = [];
@@ -43,15 +44,14 @@ describe("ScheduledRunsEngine", () => {
     const second = await fixture.codex.tool?.execute(operation, context);
     const automations = fixture.store.listAutomations();
 
-    expect(first).toMatchObject({ created: true });
+    expect(first).toMatchObject({ created: true, automation: { kind: "heartbeat" } });
     expect(second).toMatchObject({ created: false });
     expect(automations).toHaveLength(1);
     expect(automations[0]).toMatchObject({
       owner: context.owner,
       conversation: { provider: "telegram", resource: "conversation", id: "telegram:42:0" },
       deliveryTarget: context.deliveryTarget,
-      kind: "heartbeat",
-      execution: { mode: "existing-thread", threadId: "thread-current" },
+      threadId: "thread-current",
       nextRunAt: "2026-07-21T09:00:00.000Z",
     });
 
@@ -71,6 +71,10 @@ describe("ScheduledRunsEngine", () => {
     await expect(fixture.codex.tool?.execute(operation, withoutDelivery)).rejects.toThrow(
       "cannot receive scheduled results",
     );
+
+    await fixture.codex.tool?.execute({ mode: "delete", id: automationId }, context);
+    expect(fixture.store.getAutomation(automationId)).toBeUndefined();
+    expect(fixture.store.listAutomations()).toHaveLength(0);
   });
 
   it("runs a due cron in a detached thread and records every provider message", async () => {
@@ -131,6 +135,7 @@ describe("ScheduledRunsEngine", () => {
     expect(continued).toEqual({ automationName: "Build monitor", changed: true });
     expect(fixture.codex.activateConversationThread).toHaveBeenCalledWith(
       "telegram:42:0",
+      "telegram",
       "thread-scheduled",
     );
   });
@@ -140,8 +145,7 @@ describe("ScheduledRunsEngine", () => {
     await fixture.store.putAutomation({
       ...dueAutomation(),
       id: "heartbeat-1",
-      kind: "heartbeat",
-      execution: { mode: "existing-thread", threadId: "thread-current" },
+      threadId: "thread-current",
       notificationPolicy: "on-result",
     });
     fixture.codex.backgroundResult = JSON.stringify({
@@ -163,25 +167,19 @@ describe("ScheduledRunsEngine", () => {
   it("can continue from a persisted notification before run finalization", async () => {
     const fixture = await createFixture();
     await fixture.store.putAutomation(dueAutomation());
-    await fixture.store.putRun({
-      id: "run-pending",
+    await fixture.store.claimRun({
       automationId: "automation-1",
-      scheduledFor: "2026-07-21T08:00:00.000Z",
-      status: "running",
-      startedAt: "2026-07-21T08:30:00.000Z",
-      finishedAt: null,
-      threadId: null,
-      summary: null,
-      error: null,
+      expectedNextRunAt: "2026-07-21T08:00:00.000Z",
+      nextRunAt: "2026-07-21T09:00:00.000Z",
+      run: runningRun("run-pending", "2026-07-21T08:00:00.000Z"),
     });
     await fixture.store.putNotification({
       id: "notification-pending",
       automationId: "automation-1",
       runId: "run-pending",
-      target: deliveryTarget,
       publishedMessages: [],
       sourceThreadId: "thread-persisted-before-delivery",
-      status: "pending",
+      status: "delivered",
       title: "Build monitor",
       body: "A result",
       error: null,
@@ -194,6 +192,7 @@ describe("ScheduledRunsEngine", () => {
     ).resolves.toEqual({ automationName: "Build monitor", changed: true });
     expect(fixture.codex.activateConversationThread).toHaveBeenCalledWith(
       "telegram:42:0",
+      "telegram",
       "thread-persisted-before-delivery",
     );
   });
@@ -216,7 +215,147 @@ describe("ScheduledRunsEngine", () => {
     expect(fixture.codex.scheduledRequests).toHaveLength(0);
     expect(fixture.channel.publish).not.toHaveBeenCalled();
   });
+
+  it("coalesces missed occurrences and respects maximum concurrency", async () => {
+    let id = 0;
+    const fixture = await createFixture({
+      now: () => new Date("2026-07-21T10:00:00Z"),
+      maxConcurrency: 2,
+      createId: () => {
+        id += 1;
+        return `run-${id}`;
+      },
+    });
+    await Promise.all([
+      fixture.store.putAutomation(hourlyAutomation("automation-1", "2026-07-21T07:00:00Z")),
+      fixture.store.putAutomation(hourlyAutomation("automation-2", "2026-07-21T08:00:00Z")),
+      fixture.store.putAutomation(hourlyAutomation("automation-3", "2026-07-21T09:00:00Z")),
+    ]);
+    const completions = [deferred<void>(), deferred<void>(), deferred<void>()];
+    fixture.codex.backgroundResult = suppressedResult;
+    fixture.codex.onScheduledTurn = async (_request, index) => {
+      await completions[index]?.promise;
+    };
+
+    await fixture.engine.tick();
+    await vi.waitFor(() => {
+      expect(fixture.codex.scheduledRequests).toHaveLength(2);
+    });
+
+    expect(fixture.engine.activeCount).toBe(2);
+    expect(fixture.store.listRuns()).toHaveLength(2);
+    expect(fixture.store.getAutomation("automation-1")?.nextRunAt).toBe("2026-07-21T11:00:00.000Z");
+    expect(fixture.store.getAutomation("automation-2")?.nextRunAt).toBe("2026-07-21T11:00:00.000Z");
+    expect(fixture.store.getAutomation("automation-3")?.nextRunAt).toBe("2026-07-21T09:00:00Z");
+
+    completions[0]?.resolve();
+    completions[1]?.resolve();
+    await fixture.engine.waitForIdle();
+    await fixture.engine.tick();
+    await vi.waitFor(() => {
+      expect(fixture.codex.scheduledRequests).toHaveLength(3);
+    });
+    completions[2]?.resolve();
+    await fixture.engine.stop();
+  });
+
+  it("defers without claiming when the foreground conversation is busy", async () => {
+    const fixture = await createFixture({
+      now: () => new Date("2026-07-21T10:00:00Z"),
+      deferralMs: 45_000,
+    });
+    await fixture.store.putAutomation(hourlyAutomation("automation-1", "2026-07-21T10:00:00Z"));
+    fixture.codex.backgroundDecision = { acquired: false, reason: "A user turn is active." };
+
+    await fixture.engine.tick();
+
+    expect(fixture.codex.scheduledRequests).toHaveLength(0);
+    expect(fixture.store.listRuns()).toHaveLength(0);
+    expect(fixture.store.getAutomation("automation-1")).toMatchObject({
+      nextRunAt: "2026-07-21T10:00:00Z",
+      deferredUntil: "2026-07-21T10:00:45.000Z",
+      deferralReason: "A user turn is active.",
+    });
+  });
+
+  it("marks stale running records interrupted before scheduling resumes", async () => {
+    const fixture = await createFixture({ now: () => new Date("2026-07-21T10:05:00Z") });
+    await fixture.store.putAutomation(hourlyAutomation("automation-1", "2026-07-21T10:00:00Z"));
+    await fixture.store.claimRun({
+      automationId: "automation-1",
+      expectedNextRunAt: "2026-07-21T10:00:00Z",
+      nextRunAt: "2026-07-21T11:00:00Z",
+      run: runningRun("old-run", "2026-07-21T10:00:00Z"),
+    });
+
+    await fixture.engine.start();
+    await fixture.engine.stop();
+
+    expect(fixture.store.getRun("old-run")).toMatchObject({
+      status: "interrupted",
+      finishedAt: "2026-07-21T10:05:00.000Z",
+      error: "Telex restarted before the scheduled run completed.",
+    });
+    expect(fixture.codex.scheduledRequests).toHaveLength(0);
+    expect(fixture.store.getAutomation("automation-1")?.nextRunAt).toBe("2026-07-21T11:00:00Z");
+  });
+
+  it("records failures, delivers them, and releases the conversation lease", async () => {
+    const fixture = await createFixture({
+      now: () => new Date("2026-07-21T10:00:00Z"),
+      createId: () => "failed-run",
+    });
+    await fixture.store.putAutomation(hourlyAutomation("automation-1", "2026-07-21T10:00:00Z"));
+    fixture.codex.onScheduledTurn = () => {
+      throw new Error("Codex stopped");
+    };
+
+    await fixture.engine.tick();
+    await fixture.engine.waitForIdle();
+
+    expect(fixture.store.getRun("failed-run")).toMatchObject({
+      status: "failed",
+      error: "Codex stopped",
+    });
+    expect(fixture.codex.release).toHaveBeenCalledOnce();
+    expect(fixture.channel.publish.mock.calls[0]?.[1]?.text).toContain(
+      "Scheduled run failed: Codex stopped",
+    );
+    expect(fixture.store.listNotifications()[0]).toMatchObject({
+      status: "delivered",
+      sourceThreadId: null,
+    });
+  });
+
+  it("marks an in-flight run interrupted during shutdown", async () => {
+    const fixture = await createFixture({
+      now: () => new Date("2026-07-21T10:00:00Z"),
+      createId: () => "interrupted-run",
+    });
+    await fixture.store.putAutomation(hourlyAutomation("automation-1", "2026-07-21T10:00:00Z"));
+    const completion = deferred<void>();
+    fixture.codex.onScheduledTurn = async () => {
+      await completion.promise;
+    };
+
+    await fixture.engine.tick();
+    // The rejection may only fire once the run awaits the fake turn.
+    await vi.waitFor(() => {
+      expect(fixture.codex.scheduledRequests).toHaveLength(1);
+    });
+    const stopping = fixture.engine.stop();
+    completion.reject(new Error("Codex turn was interrupted"));
+    await stopping;
+
+    expect(fixture.store.getRun("interrupted-run")).toMatchObject({
+      status: "interrupted",
+      error: "Telex stopped before the scheduled run completed.",
+    });
+    expect(fixture.channel.publish).not.toHaveBeenCalled();
+  });
 });
+
+const suppressedResult = JSON.stringify({ notify: false, title: "", message: "No change." });
 
 class FakeCodex {
   public tool: CodexDynamicTool | undefined;
@@ -225,17 +364,28 @@ class FakeCodex {
   public readonly activateConversationThread = vi.fn(async () => true);
   public readonly interruptScheduledTurns = vi.fn(async () => undefined);
   public unavailableAttachments: readonly string[] = [];
+  public readonly release = vi.fn();
+  public backgroundDecision:
+    | { acquired: true; release: () => void }
+    | { acquired: false; reason: string; retryAt?: Date }
+    | undefined;
+  public onScheduledTurn:
+    | ((request: ScheduledTurnRequest, index: number) => void | Promise<void>)
+    | undefined;
 
   public registerDynamicTool(tool: CodexDynamicTool): void {
     this.tool = tool;
   }
 
   public tryAcquireBackground(): ReturnType<CodexService["tryAcquireBackground"]> {
-    return { acquired: true, release: () => undefined };
+    const decision = this.backgroundDecision ?? { acquired: true, release: this.release };
+    return decision as ReturnType<CodexService["tryAcquireBackground"]>;
   }
 
   public async runScheduledTurn(request: ScheduledTurnRequest) {
+    const index = this.scheduledRequests.length;
     this.scheduledRequests.push(request);
+    await this.onScheduledTurn?.(request, index);
     return {
       threadId: "thread-scheduled",
       turnId: "turn-scheduled",
@@ -268,7 +418,14 @@ class FakeChannel implements MessagingChannel {
   public async stop(): Promise<void> {}
 }
 
-async function createFixture() {
+interface FixtureOptions {
+  readonly now?: () => Date;
+  readonly createId?: () => string;
+  readonly maxConcurrency?: number;
+  readonly deferralMs?: number;
+}
+
+async function createFixture(options: FixtureOptions = {}) {
   const directory = await mkdtemp(join(tmpdir(), "telex-automation-engine-"));
   directories.push(directory);
   const workspace = join(directory, "workspace");
@@ -283,7 +440,10 @@ async function createFixture() {
     channels: [channel],
     workspace,
     logger: new Logger("error"),
-    now: () => new Date("2026-07-21T08:30:00.000Z"),
+    now: options.now ?? (() => new Date("2026-07-21T08:30:00.000Z")),
+    ...(options.createId === undefined ? {} : { createId: options.createId }),
+    ...(options.maxConcurrency === undefined ? {} : { maxConcurrency: options.maxConcurrency }),
+    ...(options.deferralMs === undefined ? {} : { deferralMs: options.deferralMs }),
   });
   return { store, codex, channel, engine, workspace };
 }
@@ -326,13 +486,8 @@ function dueAutomation(): AutomationDefinition {
   return {
     id: "automation-1",
     owner: ownerReference,
-    conversation: {
-      provider: "telegram",
-      resource: "conversation",
-      id: "telegram:42:0",
-    },
+    conversation: conversationReference,
     deliveryTarget,
-    kind: "cron",
     name: "Build monitor",
     prompt: "Check the build.",
     status: "active",
@@ -341,7 +496,7 @@ function dueAutomation(): AutomationDefinition {
       startAt: "2026-07-20T09:00:00.000Z",
       timeZone: "UTC",
     },
-    execution: { mode: "new-thread", cwd: "/workspace" },
+    threadId: null,
     notificationPolicy: "always",
     model: null,
     reasoningEffort: null,
@@ -352,5 +507,31 @@ function dueAutomation(): AutomationDefinition {
     createdAt: "2026-07-20T08:00:00.000Z",
     updatedAt: "2026-07-20T08:00:00.000Z",
     revision: 0,
+  };
+}
+
+function hourlyAutomation(id: string, nextRunAt: string): AutomationDefinition {
+  return {
+    ...dueAutomation(),
+    id,
+    name: id,
+    schedule: { rrule: "FREQ=HOURLY", startAt: nextRunAt, timeZone: "UTC" },
+    notificationPolicy: "on-result",
+    nextRunAt,
+    createdAt: nextRunAt,
+    updatedAt: nextRunAt,
+  };
+}
+
+function runningRun(id: string, scheduledFor: string): AutomationRun {
+  return {
+    id,
+    automationId: "automation-1",
+    scheduledFor,
+    status: "running",
+    startedAt: scheduledFor,
+    finishedAt: null,
+    threadId: null,
+    error: null,
   };
 }

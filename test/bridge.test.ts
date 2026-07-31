@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import type { ScheduledRunsEngine } from "../src/automations/engine.js";
+import type { CodexRuntimeStatus } from "../src/codex/runtime-service.js";
 import type { CodexService } from "../src/codex/service.js";
 import {
   CodexBridge,
@@ -53,6 +54,10 @@ function createMessage(
   };
 }
 
+function command(name: string, args = ""): InboundCommand {
+  return { name, args };
+}
+
 function createCodex(overrides: Record<string, unknown> = {}) {
   let loginListener: ((notification: AccountLoginCompletedNotification) => void) | undefined;
   const raw = {
@@ -86,17 +91,67 @@ function createCodex(overrides: Record<string, unknown> = {}) {
   };
 }
 
+const readyRuntimeStatus: CodexRuntimeStatus = {
+  state: "ready",
+  restartRequired: false,
+  lastError: null,
+  lastAppliedAt: null,
+  configPath: null,
+};
+
+function stubUpdate(): TelexUpdateCommand {
+  return { canInstall: false, run: vi.fn(), onInstalled: vi.fn() };
+}
+
+function stubRuntime(status: Partial<CodexRuntimeStatus> = {}): CodexRuntimeCommand {
+  return {
+    status: () => ({ ...readyRuntimeStatus, ...status }),
+    reload: vi.fn(async () => undefined),
+    restart: vi.fn(async () => undefined),
+  };
+}
+
+function stubScheduledRuns(overrides: Record<string, unknown> = {}): ScheduledRunsEngine {
+  return {
+    contextForReply: vi.fn(async () => undefined),
+    listForConversation: vi.fn(() => []),
+    continueRun: vi.fn(),
+    ...overrides,
+  } as unknown as ScheduledRunsEngine;
+}
+
+function createBridge(
+  codex: CodexService,
+  overrides: {
+    publicUrl?: string;
+    update?: TelexUpdateCommand;
+    runtime?: CodexRuntimeCommand;
+    scheduledRuns?: ScheduledRunsEngine;
+  } = {},
+): CodexBridge {
+  return new CodexBridge(
+    codex,
+    overrides.publicUrl,
+    logger,
+    overrides.update ?? stubUpdate(),
+    overrides.runtime ?? stubRuntime(),
+    overrides.scheduledRuns ?? stubScheduledRuns(),
+  );
+}
+
 const signedInAccount: GetAccountResponse = {
   account: { type: "chatgpt", email: "user@example.com", planType: "plus" },
   requiresOpenaiAuth: true,
 };
 
+const messageOwner = providerReference("user", "1");
+
 describe("CodexBridge onboarding", () => {
   it("welcomes a signed-in user on /start without starting a login", async () => {
     const { codex, raw } = createCodex({ account: vi.fn(async () => signedInAccount) });
-    const bridge = new CodexBridge(codex, undefined, logger);
+    const bridge = createBridge(codex);
     const responder = createResponder();
-    await bridge.handleMessage(createMessage("/start", responder));
+    await bridge.handleMessage(createMessage("/start", responder, {}, [], command("start")));
 
     expect(raw.startDeviceLogin).not.toHaveBeenCalled();
     const text = responder.sendText.mock.calls[0]?.[0];
@@ -104,23 +159,9 @@ describe("CodexBridge onboarding", () => {
     expect(text).toContain("ready to go");
   });
 
-  it.each(["/start payload", "/start@telex_bot payload"])(
-    "accepts Telegram's start payload syntax: %s",
-    async (text) => {
-      const { codex, raw } = createCodex({ account: vi.fn(async () => signedInAccount) });
-      const bridge = new CodexBridge(codex, undefined, logger);
-      const responder = createResponder();
-
-      await bridge.handleMessage(createMessage(text, responder));
-
-      expect(raw.runTurn).not.toHaveBeenCalled();
-      expect(responder.sendText.mock.calls[0]?.[0]).toContain("ready to go");
-    },
-  );
-
   it("prefers a transport command over normalized reply context and attachments", async () => {
     const { codex, raw } = createCodex({ account: vi.fn(async () => signedInAccount) });
-    const bridge = new CodexBridge(codex, undefined, logger);
+    const bridge = createBridge(codex);
     const responder = createResponder();
 
     await bridge.handleMessage(
@@ -129,7 +170,7 @@ describe("CodexBridge onboarding", () => {
         responder,
         {},
         [{ kind: "image", path: "/workspace/topic.jpg", description: "Topic root" }],
-        { name: "start", args: "" },
+        command("start"),
       ),
     );
 
@@ -137,11 +178,33 @@ describe("CodexBridge onboarding", () => {
     expect(responder.sendText.mock.calls[0]?.[0]).toContain("ready to go");
   });
 
+  it("runs a command-looking message as a turn when the channel sends no command", async () => {
+    const { codex, raw } = createCodex({ account: vi.fn(async () => signedInAccount) });
+    const bridge = createBridge(codex);
+    const responder = createResponder();
+    const attachments: readonly InboundAttachment[] = [
+      { kind: "image", path: "/workspace/photo.jpg", description: "Telegram photo" },
+    ];
+
+    await bridge.handleMessage(createMessage("/new\n[Photo]", responder, {}, attachments));
+
+    expect(raw.resetConversation).not.toHaveBeenCalled();
+    expect(raw.runTurn).toHaveBeenCalledWith(
+      "telegram:1:0",
+      "telegram",
+      "/new\n[Photo]",
+      responder,
+      false,
+      attachments,
+      { owner: messageOwner },
+    );
+  });
+
   it("starts the sign-in flow directly from /start in a private chat", async () => {
     const { codex, raw } = createCodex();
-    const bridge = new CodexBridge(codex, undefined, logger);
+    const bridge = createBridge(codex);
     const responder = createResponder();
-    await bridge.handleMessage(createMessage("/start", responder));
+    await bridge.handleMessage(createMessage("/start", responder, {}, [], command("start")));
 
     expect(raw.startDeviceLogin).toHaveBeenCalledTimes(1);
     const call = responder.sendText.mock.calls[0];
@@ -152,9 +215,11 @@ describe("CodexBridge onboarding", () => {
 
   it("points group members to a private chat on /start when sign-in is needed", async () => {
     const { codex, raw } = createCodex();
-    const bridge = new CodexBridge(codex, undefined, logger);
+    const bridge = createBridge(codex);
     const responder = createResponder();
-    await bridge.handleMessage(createMessage("/start", responder, { isPrivate: false }));
+    await bridge.handleMessage(
+      createMessage("/start", responder, { isPrivate: false }, [], command("start")),
+    );
 
     expect(raw.startDeviceLogin).not.toHaveBeenCalled();
     expect(responder.sendText.mock.calls[0]?.[0]).toContain("open a private chat");
@@ -162,7 +227,7 @@ describe("CodexBridge onboarding", () => {
 
   it("intercepts a task message when not signed in and resumes it after login", async () => {
     const { codex, raw, emitLoginCompleted } = createCodex();
-    const bridge = new CodexBridge(codex, undefined, logger);
+    const bridge = createBridge(codex);
     const responder = createResponder();
     const attachments: readonly InboundAttachment[] = [
       { kind: "image", path: "/workspace/photo.jpg", description: "Telegram photo" },
@@ -183,6 +248,7 @@ describe("CodexBridge onboarding", () => {
         responder,
         false,
         attachments,
+        { owner: messageOwner },
       );
     });
     const confirmation = responder.sendText.mock.calls[1]?.[0];
@@ -192,9 +258,9 @@ describe("CodexBridge onboarding", () => {
 
   it("confirms sign-in after /login completes", async () => {
     const { codex, emitLoginCompleted } = createCodex();
-    const bridge = new CodexBridge(codex, undefined, logger);
+    const bridge = createBridge(codex);
     const responder = createResponder();
-    await bridge.handleMessage(createMessage("/login", responder));
+    await bridge.handleMessage(createMessage("/login", responder, {}, [], command("login")));
 
     emitLoginCompleted({ loginId: "login-1", success: true, error: null });
     await vi.waitFor(() => {
@@ -205,9 +271,9 @@ describe("CodexBridge onboarding", () => {
 
   it("reports a failed sign-in", async () => {
     const { codex, emitLoginCompleted } = createCodex();
-    const bridge = new CodexBridge(codex, undefined, logger);
+    const bridge = createBridge(codex);
     const responder = createResponder();
-    await bridge.handleMessage(createMessage("/login", responder));
+    await bridge.handleMessage(createMessage("/login", responder, {}, [], command("login")));
 
     emitLoginCompleted({ loginId: "login-1", success: false, error: "code expired" });
     await vi.waitFor(() => {
@@ -220,7 +286,7 @@ describe("CodexBridge onboarding", () => {
 
   it("skips repeated account checks once sign-in is confirmed", async () => {
     const { codex, raw } = createCodex({ account: vi.fn(async () => signedInAccount) });
-    const bridge = new CodexBridge(codex, undefined, logger);
+    const bridge = createBridge(codex);
     const responder = createResponder();
     await bridge.handleMessage(createMessage("task one", responder));
     await bridge.handleMessage(createMessage("task two", responder));
@@ -231,7 +297,7 @@ describe("CodexBridge onboarding", () => {
 
   it("passes the current connector to Codex", async () => {
     const { codex, raw } = createCodex({ account: vi.fn(async () => signedInAccount) });
-    const bridge = new CodexBridge(codex, undefined, logger);
+    const bridge = createBridge(codex);
     const responder = createResponder();
 
     await bridge.handleMessage(
@@ -248,60 +314,15 @@ describe("CodexBridge onboarding", () => {
       responder,
       false,
       [],
-    );
-  });
-
-  it("does not treat a media caption that starts with a command as a command", async () => {
-    const { codex, raw } = createCodex({ account: vi.fn(async () => signedInAccount) });
-    const bridge = new CodexBridge(codex, undefined, logger);
-    const responder = createResponder();
-    const attachments: readonly InboundAttachment[] = [
-      { kind: "image", path: "/workspace/photo.jpg", description: "Telegram photo" },
-    ];
-
-    await bridge.handleMessage(createMessage("/new\n[Photo]", responder, {}, attachments));
-
-    expect(raw.resetConversation).not.toHaveBeenCalled();
-    expect(raw.runTurn).toHaveBeenCalledWith(
-      "telegram:1:0",
-      "telegram",
-      "/new\n[Photo]",
-      responder,
-      false,
-      attachments,
-    );
-  });
-
-  it("does not treat a voice-message caption as a command", async () => {
-    const { codex, raw } = createCodex({ account: vi.fn(async () => signedInAccount) });
-    const bridge = new CodexBridge(codex, undefined, logger);
-    const responder = createResponder();
-    const attachments: readonly InboundAttachment[] = [
-      {
-        kind: "voice",
-        path: "/workspace/voice.ogg",
-        description: "Telegram voice message",
-      },
-    ];
-
-    await bridge.handleMessage(createMessage("/new", responder, {}, attachments));
-
-    expect(raw.resetConversation).not.toHaveBeenCalled();
-    expect(raw.runTurn).toHaveBeenCalledWith(
-      "telegram:1:0",
-      "telegram",
-      "/new",
-      responder,
-      false,
-      attachments,
+      { owner: { provider: "discord", resource: "user", id: "1" } },
     );
   });
 
   it("tells an already signed-in user how to switch accounts on /login", async () => {
     const { codex, raw } = createCodex({ account: vi.fn(async () => signedInAccount) });
-    const bridge = new CodexBridge(codex, undefined, logger);
+    const bridge = createBridge(codex);
     const responder = createResponder();
-    await bridge.handleMessage(createMessage("/login", responder));
+    await bridge.handleMessage(createMessage("/login", responder, {}, [], command("login")));
 
     expect(raw.startDeviceLogin).not.toHaveBeenCalled();
     const text = responder.sendText.mock.calls[0]?.[0];
@@ -318,10 +339,10 @@ describe("CodexBridge updates", () => {
       run: vi.fn(async (): Promise<TelexUpdateResult> => ({ status: "current", version: "1.2.3" })),
       onInstalled: vi.fn(),
     };
-    const bridge = new CodexBridge(codex, undefined, logger, updateCommand);
+    const bridge = createBridge(codex, { update: updateCommand });
     const responder = createResponder();
 
-    await bridge.handleMessage(createMessage("/update", responder));
+    await bridge.handleMessage(createMessage("/update", responder, {}, [], command("update")));
 
     expect(updateCommand.run).toHaveBeenCalledTimes(1);
     expect(responder.sendText.mock.calls[0]?.[0]).toContain("Checking");
@@ -345,10 +366,10 @@ describe("CodexBridge updates", () => {
         expect(handlerReturned).toBe(true);
       }),
     };
-    const bridge = new CodexBridge(codex, undefined, logger, updateCommand);
+    const bridge = createBridge(codex, { update: updateCommand });
     const responder = createResponder();
 
-    await bridge.handleMessage(createMessage("/update", responder));
+    await bridge.handleMessage(createMessage("/update", responder, {}, [], command("update")));
     handlerReturned = true;
 
     expect(responder.sendText.mock.calls[1]?.[0]).toContain("Installed Telex 1.3.0");
@@ -365,10 +386,10 @@ describe("CodexBridge updates", () => {
       run: vi.fn(),
       onInstalled: vi.fn(),
     };
-    const bridge = new CodexBridge(codex, undefined, logger, updateCommand);
+    const bridge = createBridge(codex, { update: updateCommand });
     const responder = createResponder();
 
-    await bridge.handleMessage(createMessage("/update", responder));
+    await bridge.handleMessage(createMessage("/update", responder, {}, [], command("update")));
 
     expect(updateCommand.run).not.toHaveBeenCalled();
     expect(responder.sendText.mock.calls[0]?.[0]).toContain("source checkout");
@@ -378,15 +399,11 @@ describe("CodexBridge updates", () => {
 describe("CodexBridge runtime controls", () => {
   it.each(["reload", "restart"] as const)("runs /%s in a private chat", async (action) => {
     const { codex } = createCodex();
-    const runtime: CodexRuntimeCommand = {
-      status: () => ({ state: "ready" }),
-      reload: vi.fn(async () => ({ state: "ready" })),
-      restart: vi.fn(async () => ({ state: "ready" })),
-    };
-    const bridge = new CodexBridge(codex, undefined, logger, undefined, runtime);
+    const runtime = stubRuntime();
+    const bridge = createBridge(codex, { runtime });
     const responder = createResponder();
 
-    await bridge.handleMessage(createMessage(`/${action}`, responder));
+    await bridge.handleMessage(createMessage(`/${action}`, responder, {}, [], command(action)));
 
     expect(runtime[action]).toHaveBeenCalledOnce();
     expect(responder.sendText).toHaveBeenCalledTimes(2);
@@ -395,15 +412,13 @@ describe("CodexBridge runtime controls", () => {
 
   it("keeps restart controls out of group chats", async () => {
     const { codex } = createCodex();
-    const runtime: CodexRuntimeCommand = {
-      status: () => ({ state: "ready" }),
-      reload: vi.fn(),
-      restart: vi.fn(),
-    };
-    const bridge = new CodexBridge(codex, undefined, logger, undefined, runtime);
+    const runtime = stubRuntime();
+    const bridge = createBridge(codex, { runtime });
     const responder = createResponder();
 
-    await bridge.handleMessage(createMessage("/restart", responder, { isPrivate: false }));
+    await bridge.handleMessage(
+      createMessage("/restart", responder, { isPrivate: false }, [], command("restart")),
+    );
 
     expect(runtime.restart).not.toHaveBeenCalled();
     expect(responder.sendText.mock.calls[0]?.[0]).toContain("private bot chat");
@@ -413,15 +428,11 @@ describe("CodexBridge runtime controls", () => {
     const { codex } = createCodex({
       account: vi.fn(async () => Promise.reject(new Error("down"))),
     });
-    const runtime: CodexRuntimeCommand = {
-      status: () => ({ state: "degraded", lastError: "transport exited" }),
-      reload: vi.fn(),
-      restart: vi.fn(),
-    };
-    const bridge = new CodexBridge(codex, undefined, logger, undefined, runtime);
+    const runtime = stubRuntime({ state: "degraded", lastError: "transport exited" });
+    const bridge = createBridge(codex, { runtime });
     const responder = createResponder();
 
-    await bridge.handleMessage(createMessage("/status", responder));
+    await bridge.handleMessage(createMessage("/status", responder, {}, [], command("status")));
 
     expect(responder.sendText.mock.calls[0]?.[0]).toContain("/restart");
   });
@@ -435,18 +446,17 @@ describe("CodexBridge scheduled-run routing", () => {
     const applicationContext = {
       "telex.scheduled-result": { kind: "application" as const, value: "Complete result" },
     };
-    const scheduledRuns = {
+    const scheduledRuns = stubScheduledRuns({
       contextForReply: vi.fn(async () => applicationContext),
-    } as unknown as ScheduledRunsEngine;
-    const bridge = new CodexBridge(codex, undefined, logger, undefined, undefined, scheduledRuns);
+    });
+    const bridge = createBridge(codex, { scheduledRuns });
     const responder = createResponder();
     const base = createMessage("What does this mean?", responder, { deliveryTarget });
 
     await bridge.handleMessage({ ...base, replyTo });
 
     const conversation = providerReference("conversation", "telegram:1:0");
-    const owner = providerReference("user", "1");
-    expect(scheduledRuns.contextForReply).toHaveBeenCalledWith(replyTo, owner, conversation);
+    expect(scheduledRuns.contextForReply).toHaveBeenCalledWith(replyTo, messageOwner, conversation);
     expect(raw.runTurn).toHaveBeenCalledWith(
       "telegram:1:0",
       "telegram",
@@ -454,7 +464,7 @@ describe("CodexBridge scheduled-run routing", () => {
       responder,
       false,
       [],
-      { owner, deliveryTarget, additionalContext: applicationContext },
+      { owner: messageOwner, deliveryTarget, additionalContext: applicationContext },
     );
   });
 
@@ -462,26 +472,23 @@ describe("CodexBridge scheduled-run routing", () => {
     const { codex, raw } = createCodex({
       activatePreviousConversationThread: vi.fn(async () => "thread-previous"),
     });
-    const scheduledRuns = {
+    const scheduledRuns = stubScheduledRuns({
       continueRun: vi.fn(async () => ({ automationName: "Build monitor", changed: true })),
-    } as unknown as ScheduledRunsEngine;
-    const bridge = new CodexBridge(codex, undefined, logger, undefined, undefined, scheduledRuns);
+    });
+    const bridge = createBridge(codex, { scheduledRuns });
     const responder = createResponder();
 
     await bridge.handleMessage(
-      createMessage("/continue run-1", responder, {}, [], {
-        name: "continue",
-        args: "run-1",
-      }),
+      createMessage("/continue run-1", responder, {}, [], command("continue", "run-1")),
     );
-    await bridge.handleMessage(createMessage("/back", responder));
+    await bridge.handleMessage(createMessage("/back", responder, {}, [], command("back")));
 
     expect(scheduledRuns.continueRun).toHaveBeenCalledWith(
-      providerReference("user", "1"),
+      messageOwner,
       providerReference("conversation", "telegram:1:0"),
       "run-1",
     );
-    expect(raw.activatePreviousConversationThread).toHaveBeenCalledWith("telegram:1:0");
+    expect(raw.activatePreviousConversationThread).toHaveBeenCalledWith("telegram:1:0", "telegram");
   });
 });
 

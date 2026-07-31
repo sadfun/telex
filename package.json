@@ -1,6 +1,6 @@
 {
   "name": "telex",
-  "version": "0.0.25",
+  "version": "0.0.27",
   "private": true,
   "type": "module",
   "description": "Telex — a Telegram bridge for the OpenAI Codex app-server.",
@@ -22,11 +22,11 @@
   "scripts": {
     "build": "tsc -p tsconfig.json && node dist/cli/copy-assets.js && tailwindcss -i ./src/miniapp/styles.css -o ./dist/miniapp/public/app.css --minify",
     "check": "tsc -p tsconfig.test.json && biome check .",
-    "dev": "npm run build && node --env-file-if-exists=.env --watch dist/index.js",
-    "start": "node --env-file-if-exists=.env dist/index.js",
+    "dev": "npm run build && node --env-file-if-exists=.env --watch dist/cli/main.js start",
+    "start": "node --env-file-if-exists=.env dist/cli/main.js start",
     "test": "vitest run",
     "test:watch": "vitest",
-    "protocol:generate-bindings": "node --import tsx src/cli/generate-protocol-bindings.ts",
+    "protocol:generate-bindings": "node --import tsx src/cli/main.ts codex check --apply --version $(cat codex.version)",
     "codex:check": "node --import tsx src/cli/main.ts codex check",
     "codex:update": "node --import tsx src/cli/main.ts codex check --apply"
   },

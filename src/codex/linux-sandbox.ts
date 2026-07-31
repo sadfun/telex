@@ -16,7 +16,7 @@ export interface CodexLaunch {
 
 type CommandRunner = typeof runCommand;
 
-export interface CodexLaunchResolverOptions {
+interface CodexLaunchResolverOptions {
   readonly binaryPath: string;
   readonly args: readonly string[];
   readonly cwd: string;

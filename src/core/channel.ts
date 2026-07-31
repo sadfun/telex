@@ -19,6 +19,12 @@ export interface ProviderReference {
   readonly id: string;
 }
 
+export function sameReference(left: ProviderReference, right: ProviderReference): boolean {
+  return (
+    left.provider === right.provider && left.resource === right.resource && left.id === right.id
+  );
+}
+
 export interface SenderIdentity {
   readonly id: string;
   readonly displayName: string;
@@ -98,7 +104,16 @@ export interface OutboundStream {
 export interface MessageResponder {
   createStream(): OutboundStream;
   sendText(text: string, options?: SendOptions): Promise<void>;
-  askChoice(prompt: string, options: readonly ChoiceOption[]): Promise<string>;
+  /**
+   * Present a choice and resolve with the selected option id. When `signal`
+   * aborts (the requester no longer needs an answer), resolve promptly with
+   * "decline" and withdraw the prompt from the chat if possible.
+   */
+  askChoice(
+    prompt: string,
+    options: readonly ChoiceOption[],
+    signal?: AbortSignal,
+  ): Promise<string>;
 }
 
 export interface InboundMessage {

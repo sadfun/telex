@@ -2,6 +2,39 @@
 
 All notable changes to Telex are documented in this file.
 
+## [0.0.27] - 2026-08-01
+
+### Changed
+
+- The Mini App client now trusts the server's typed wire format directly — shared TypeScript types and JSX rendering replace ~900 lines of duplicated interfaces, hand-rolled JSON parsers, and `createElement` calls.
+- Flattened the Codex runtime status to a single state (`ready`/`reloading`/`restarting`/`degraded`) instead of per-component readiness tracking, typed end to end from the runtime service through the bridge and Mini App.
+- Merged the automations scheduler loop into the engine and generated the scheduling tool's JSON schema from its zod definition, so the model-facing contract can no longer drift from the validator.
+- Sourced experimental-feature names and descriptions from Codex's `experimentalFeature/list` instead of a hardcoded table, and reduced model providers to the official OpenAI API per the project philosophy.
+- Scheduled-run notifications now render markdown exactly like interactive replies.
+- `npm start` and `npm run dev` route through the CLI entry point; the standalone bindings-generation script became a thin alias for `codex check --apply`.
+
+### Removed
+
+- The committed protocol JSON-schema artifacts (273 files, ~3.5 MB, read by nothing) and the protocol tooling's staged-compile, fingerprint-guard, and legacy-manifest machinery — `codex:update` now typechecks the applied bindings in place and rolls back on failure.
+- Automatic reload when Codex config files change on disk outside Telex; the `/reload` command and the Mini App's **Apply changes** button perform the identical reconcile.
+- The unreachable Telegram ephemeral-message path, the reflective payload file scanner that duplicated the media catalog, the 70-key fallback field list (unknown payload fields now surface as a bounded JSON remainder), client-side enterprise-requirements validation, persisted-format migrations, automation soft-delete tombstones, and the notification pending/delivered lifecycle.
+
+### Fixed
+
+- Guest inline replies no longer silently drop text sent after the initial answer; it is appended to the inline message instead.
+
+## [0.0.26] - 2026-07-31
+
+### Changed
+
+- Rebuilt the Codex integration around the app-server's native per-thread event stream: every turn is rendered from its own `turn/started` → `item/*` → `turn/completed` notifications, so Codex-initiated turns (mailbox follow-ups, reviews) now arrive as their own chat messages instead of being spliced into the previous reply.
+- Removed the successor-following, terminal-settlement-delay, and interrupt-error-parsing workarounds that approximated this behavior on top of a request/response model.
+- Made `/stop` a standing stop intent on the thread: it interrupts every running turn and any successor Codex swaps in, until new work starts.
+
+### Added
+
+- Withdrew pending approval and question prompts when Codex resolves them elsewhere (`serverRequest/resolved`), so `/stop` no longer leaves live approval keyboards behind in Telegram.
+
 ## [0.0.24] - 2026-07-29
 
 ### Fixed

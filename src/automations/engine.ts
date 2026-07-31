@@ -9,17 +9,17 @@ import type {
   CodexService,
   CodexTurnResult,
 } from "../codex/service.js";
-import type {
-  DeliveryReceipt,
-  MessagingChannel,
-  OutboundMessage,
-  ProviderReference,
+import {
+  type DeliveryReceipt,
+  type MessagingChannel,
+  type OutboundMessage,
+  type ProviderReference,
+  sameReference,
 } from "../core/channel.js";
 import type { JsonValue } from "../generated/codex/serde_json/JsonValue.js";
 import { errorMessage } from "../shared/errors.js";
 import type { Logger } from "../shared/logger.js";
 import { nextOccurrence } from "./recurrence.js";
-import { AutomationScheduler } from "./scheduler.js";
 import type { AutomationStore } from "./store.js";
 import type { AutomationDefinition, AutomationNotification, AutomationRun } from "./types.js";
 
@@ -27,7 +27,8 @@ const reasoningEffortSchema = z.string().trim().min(1).max(100).nullable().optio
 const notificationPolicySchema = z.enum(["always", "on-result", "never"]);
 const maximumAutomationsPerConversation = 100;
 const maximumResultLength = 20_000;
-const maximumRunSummaryLength = 4_000;
+const rruleDescription =
+  "One bounded RRULE line using FREQ=MINUTELY, HOURLY, DAILY, or WEEKLY; no DTSTART.";
 
 const viewOperationSchema = z.strictObject({
   mode: z.literal("view"),
@@ -39,7 +40,7 @@ const createOperationSchema = z.strictObject({
   kind: z.enum(["cron", "heartbeat"]),
   name: z.string().trim().min(1).max(200),
   prompt: z.string().trim().min(1).max(20_000),
-  rrule: z.string().trim().min(1).max(4_096),
+  rrule: z.string().trim().min(1).max(4_096).describe(rruleDescription),
   time_zone: z.string().trim().min(1).max(128).optional(),
   notification_policy: notificationPolicySchema.optional(),
   model: z.string().trim().min(1).max(200).nullable().optional(),
@@ -51,7 +52,7 @@ const updateOperationSchema = z.strictObject({
   id: z.string().trim().min(1).max(256),
   name: z.string().trim().min(1).max(200).optional(),
   prompt: z.string().trim().min(1).max(20_000).optional(),
-  rrule: z.string().trim().min(1).max(4_096).optional(),
+  rrule: z.string().trim().min(1).max(4_096).describe(rruleDescription).optional(),
   time_zone: z.string().trim().min(1).max(128).optional(),
   status: z.enum(["active", "paused"]).optional(),
   notification_policy: notificationPolicySchema.optional(),
@@ -72,86 +73,18 @@ const automationOperationSchema = z.discriminatedUnion("mode", [
 ]);
 
 const scheduledResultSchema = z.strictObject({
-  notify: z.boolean(),
+  notify: z.boolean().describe("Whether this result is important enough to notify the user."),
   title: z.string().trim().max(500),
   message: z.string().trim().max(maximumResultLength),
 });
 
-const scheduledResultJsonSchema: JsonValue = {
-  type: "object",
-  properties: {
-    notify: {
-      type: "boolean",
-      description: "Whether this result is important enough to notify the user.",
-    },
-    title: { type: "string", maxLength: 500 },
-    message: { type: "string", maxLength: maximumResultLength },
-  },
-  required: ["notify", "title", "message"],
-  additionalProperties: false,
-};
+const scheduledResultJsonSchema = toolJsonSchema(scheduledResultSchema);
 
 const automationUpdateSpec = {
   type: "function",
   name: "automation_update",
   description: `Manage Telex scheduled runs. Use this whenever the user asks to schedule, repeat, monitor, remind, follow up later, list schedules, pause, resume, change, or delete a scheduled task. Use kind "heartbeat" to revisit this same Codex thread; use "cron" for a fresh persistent thread on every run. Telex accepts a bounded RFC 5545 RRULE subset: MINUTELY with INTERVAL; HOURLY with optional BYMINUTE; DAILY or WEEKLY with optional BYMINUTE, BYHOUR, and BYDAY; plus UNTIL, and WKST for WEEKLY. Use one line, no DTSTART, and keep BY lists small. Do not invent owners, destinations, or thread IDs: Telex binds them to the current conversation.`,
-  inputSchema: {
-    type: "object",
-    oneOf: [
-      {
-        properties: {
-          mode: { const: "view" },
-          id: { type: "string" },
-        },
-        required: ["mode"],
-        additionalProperties: false,
-      },
-      {
-        properties: {
-          mode: { const: "create" },
-          kind: { enum: ["cron", "heartbeat"] },
-          name: { type: "string" },
-          prompt: { type: "string" },
-          rrule: {
-            type: "string",
-            description:
-              "One bounded RRULE line using FREQ=MINUTELY, HOURLY, DAILY, or WEEKLY; no DTSTART.",
-          },
-          time_zone: { type: "string" },
-          notification_policy: { enum: ["always", "on-result", "never"] },
-          model: { type: ["string", "null"] },
-          reasoning_effort: { type: ["string", "null"] },
-        },
-        required: ["mode", "kind", "name", "prompt", "rrule"],
-        additionalProperties: false,
-      },
-      {
-        properties: {
-          mode: { const: "update" },
-          id: { type: "string" },
-          name: { type: "string" },
-          prompt: { type: "string" },
-          rrule: {
-            type: "string",
-            description:
-              "One bounded RRULE line using FREQ=MINUTELY, HOURLY, DAILY, or WEEKLY; no DTSTART.",
-          },
-          time_zone: { type: "string" },
-          status: { enum: ["active", "paused"] },
-          notification_policy: { enum: ["always", "on-result", "never"] },
-          model: { type: ["string", "null"] },
-          reasoning_effort: { type: ["string", "null"] },
-        },
-        required: ["mode", "id"],
-        additionalProperties: false,
-      },
-      {
-        properties: { mode: { const: "delete" }, id: { type: "string" } },
-        required: ["mode", "id"],
-        additionalProperties: false,
-      },
-    ],
-  },
+  inputSchema: toolJsonSchema(automationOperationSchema),
 } as const satisfies CodexDynamicTool["spec"];
 
 export interface ScheduledRunsEngineOptions {
@@ -160,8 +93,22 @@ export interface ScheduledRunsEngineOptions {
   readonly channels: readonly MessagingChannel[];
   readonly workspace: string;
   readonly logger: Logger;
+  /** Test seams; production relies on the defaults. */
+  readonly pollIntervalMs?: number;
+  readonly deferralMs?: number;
+  readonly maxConcurrency?: number;
   readonly now?: () => Date;
+  readonly createId?: () => string;
 }
+
+type LaneDecision =
+  | { readonly acquired: true; readonly release: () => void }
+  | {
+      readonly acquired: false;
+      readonly pause?: boolean;
+      readonly reason: string;
+      readonly retryAt?: Date;
+    };
 
 export class ScheduledRunsEngine {
   readonly #store: AutomationStore;
@@ -169,8 +116,15 @@ export class ScheduledRunsEngine {
   readonly #channels: ReadonlyMap<string, MessagingChannel>;
   readonly #workspace: string;
   readonly #logger: Logger;
+  readonly #pollIntervalMs: number;
+  readonly #deferralMs: number;
+  readonly #maxConcurrency: number;
   readonly #now: () => Date;
-  readonly #scheduler: AutomationScheduler;
+  readonly #createId: () => string;
+  readonly #inFlight = new Map<string, Promise<void>>();
+  #timer: NodeJS.Timeout | undefined;
+  #tickInProgress: Promise<void> | undefined;
+  #initialized = false;
   #stopping = false;
 
   public constructor(options: ScheduledRunsEngineOptions) {
@@ -179,62 +133,79 @@ export class ScheduledRunsEngine {
     this.#channels = new Map(options.channels.map((channel) => [channel.name, channel]));
     this.#workspace = options.workspace;
     this.#logger = options.logger;
+    this.#pollIntervalMs = options.pollIntervalMs ?? 30_000;
+    this.#deferralMs = options.deferralMs ?? 30_000;
+    this.#maxConcurrency = options.maxConcurrency ?? 3;
     this.#now = options.now ?? (() => new Date());
-    this.#scheduler = new AutomationScheduler({
-      store: this.#store,
-      logger: this.#logger,
-      gate: {
-        tryAcquire: async (automation) => {
-          const channel = this.#channels.get(automation.owner.provider);
-          if (channel === undefined || !(await channel.isAuthorized(automation.owner))) {
-            return {
-              acquired: false,
-              pause: true,
-              reason: "The messaging provider no longer authorizes this schedule's owner.",
-            };
-          }
-          const decision = this.#codex.tryAcquireBackground(automation.conversation.id);
-          return decision.acquired
-            ? { acquired: true, lease: { release: decision.release } }
-            : {
-                acquired: false,
-                reason: decision.reason,
-                retryAt: decision.retryAt,
-              };
-        },
-      },
-      runner: { run: async (context) => await this.runAutomation(context.automation, context.run) },
-      ...(options.now === undefined ? {} : { now: options.now }),
-    });
+    this.#createId = options.createId ?? (() => crypto.randomUUID());
     this.#codex.registerDynamicTool({
       spec: automationUpdateSpec,
       execute: async (argumentsValue, context) => await this.executeTool(argumentsValue, context),
     });
   }
 
+  public get activeCount(): number {
+    return this.#inFlight.size;
+  }
+
   public async start(): Promise<void> {
-    await this.#scheduler.start();
+    if (this.#timer !== undefined) return;
+    if (this.#stopping) throw new Error("Cannot restart a stopped scheduled-runs engine");
+    await this.tick();
+    this.#timer = setInterval(() => {
+      void this.tick().catch((error: unknown) => {
+        this.#logger.error("Scheduled-runs tick failed", error);
+      });
+    }, this.#pollIntervalMs);
+    this.#timer.unref();
+  }
+
+  /** Claims and launches due work; completion continues asynchronously. */
+  public async tick(): Promise<void> {
+    if (this.#stopping) return;
+    await this.ensureInitialized();
+    if (this.#tickInProgress !== undefined) return await this.#tickInProgress;
+    const operation = this.runTick();
+    this.#tickInProgress = operation;
+    try {
+      await operation;
+    } finally {
+      if (this.#tickInProgress === operation) this.#tickInProgress = undefined;
+    }
+  }
+
+  public async waitForIdle(): Promise<void> {
+    while (this.#inFlight.size > 0) {
+      await Promise.allSettled([...this.#inFlight.values()]);
+    }
   }
 
   public async stop(): Promise<void> {
     this.#stopping = true;
-    const schedulerStopped = this.#scheduler.stop();
+    if (this.#timer !== undefined) {
+      clearInterval(this.#timer);
+      this.#timer = undefined;
+    }
+    const drained = (async (): Promise<void> => {
+      if (this.#tickInProgress !== undefined) await this.#tickInProgress;
+      await this.waitForIdle();
+    })();
     await this.#codex.interruptScheduledTurns();
-    await schedulerStopped;
+    await drained;
   }
 
   public listForConversation(
     owner: ProviderReference,
     conversation: ProviderReference,
-  ): readonly AutomationDefinition[] {
+  ): readonly (AutomationDefinition & { readonly kind: "cron" | "heartbeat" })[] {
     return this.#store
       .listAutomations()
       .filter(
         (automation) =>
-          automation.status !== "deleted" &&
           sameReference(automation.owner, owner) &&
           sameReference(automation.conversation, conversation),
-      );
+      )
+      .map((automation) => ({ ...automation, kind: automationKind(automation) }));
   }
 
   public async contextForReply(
@@ -268,12 +239,7 @@ export class ScheduledRunsEngine {
   ): Promise<Readonly<{ automationName: string; changed: boolean }>> {
     const run = this.#store.getRun(runId);
     if (run === undefined) throw new Error("Scheduled run not found");
-    const automation = this.requireAccessibleAutomation(
-      run.automationId,
-      owner,
-      conversation,
-      true,
-    );
+    const automation = this.requireAccessibleAutomation(run.automationId, owner, conversation);
     const sourceThreadId =
       run.threadId ??
       this.#store
@@ -282,8 +248,225 @@ export class ScheduledRunsEngine {
     if (sourceThreadId === undefined || sourceThreadId === null) {
       throw new Error("The scheduled run has no resumable Codex task");
     }
-    const changed = await this.#codex.activateConversationThread(conversation.id, sourceThreadId);
+    const changed = await this.#codex.activateConversationThread(
+      conversation.id,
+      conversation.provider,
+      sourceThreadId,
+    );
     return { automationName: automation.name, changed };
+  }
+
+  private async ensureInitialized(): Promise<void> {
+    if (this.#initialized) return;
+    const recovered = await this.#store.recoverInterruptedRuns(this.currentDate().toISOString());
+    if (recovered.length > 0) {
+      this.#logger.warn("Recovered interrupted scheduled runs", { count: recovered.length });
+    }
+    this.#initialized = true;
+  }
+
+  private async runTick(): Promise<void> {
+    const now = this.currentDate();
+    let capacity = this.#maxConcurrency - this.#inFlight.size;
+    if (capacity <= 0) return;
+
+    for (const automation of this.#store.listDueAutomations(now.toISOString())) {
+      if (capacity <= 0) break;
+      if (this.#inFlight.has(automation.id) || automation.nextRunAt === null) continue;
+
+      const decision = await this.acquireLane(automation, now);
+      if (!decision.acquired) {
+        if (decision.pause === true) {
+          await this.pauseDeniedAutomation(automation, now, decision.reason);
+        } else {
+          await this.#store.deferAutomation({
+            automationId: automation.id,
+            expectedNextRunAt: automation.nextRunAt,
+            retryAt: validRetryAt(decision.retryAt, now, this.#deferralMs).toISOString(),
+            reason: decision.reason,
+            updatedAt: now.toISOString(),
+          });
+        }
+        continue;
+      }
+
+      let nextRunAt: Date | null;
+      try {
+        // Calculating from now deliberately coalesces all missed occurrences.
+        nextRunAt = nextOccurrence(automation.schedule, now);
+      } catch (error) {
+        this.releaseLane(decision.release);
+        await this.pauseInvalidSchedule(automation, now, error);
+        continue;
+      }
+
+      const run: AutomationRun = {
+        id: this.#createId(),
+        automationId: automation.id,
+        scheduledFor: automation.nextRunAt,
+        status: "running",
+        startedAt: now.toISOString(),
+        finishedAt: null,
+        threadId: null,
+        error: null,
+      };
+      const claimed = await this.#store.claimRun({
+        automationId: automation.id,
+        expectedNextRunAt: automation.nextRunAt,
+        nextRunAt: nextRunAt?.toISOString() ?? null,
+        run,
+      });
+      if (!claimed) {
+        this.releaseLane(decision.release);
+        continue;
+      }
+
+      this.launch(automation, run, decision.release);
+      capacity -= 1;
+    }
+  }
+
+  /**
+   * The engine owns foreground priority: a run may only start while the owner
+   * stays authorized and no user turn holds the conversation.
+   */
+  private async acquireLane(automation: AutomationDefinition, now: Date): Promise<LaneDecision> {
+    try {
+      const channel = this.#channels.get(automation.owner.provider);
+      if (channel === undefined || !(await channel.isAuthorized(automation.owner))) {
+        return {
+          acquired: false,
+          pause: true,
+          reason: "The messaging provider no longer authorizes this schedule's owner.",
+        };
+      }
+      const decision = this.#codex.tryAcquireBackground(automation.conversation.id);
+      return decision.acquired
+        ? { acquired: true, release: decision.release }
+        : { acquired: false, reason: decision.reason, retryAt: decision.retryAt };
+    } catch (error) {
+      this.#logger.warn("Could not acquire a scheduled-run conversation lease", {
+        automationId: automation.id,
+        error: errorMessage(error),
+      });
+      return {
+        acquired: false,
+        reason: "The conversation lane could not be acquired.",
+        retryAt: new Date(now.getTime() + this.#deferralMs),
+      };
+    }
+  }
+
+  private launch(automation: AutomationDefinition, run: AutomationRun, release: () => void): void {
+    const execution = this.execute(automation, run, release);
+    this.#inFlight.set(automation.id, execution);
+    void execution
+      .finally(() => {
+        if (this.#inFlight.get(automation.id) === execution) this.#inFlight.delete(automation.id);
+      })
+      .catch((error: unknown) => {
+        this.#logger.error("Scheduled-run finalization failed", error, {
+          automationId: automation.id,
+          runId: run.id,
+        });
+      });
+  }
+
+  private async execute(
+    automation: AutomationDefinition,
+    run: AutomationRun,
+    release: () => void,
+  ): Promise<void> {
+    let completion:
+      | { readonly status: "succeeded"; readonly threadId: string }
+      | { readonly status: "failed" | "interrupted"; readonly error: string };
+    try {
+      completion = { status: "succeeded", threadId: await this.runAutomation(automation, run) };
+    } catch (error) {
+      completion = {
+        status: this.#stopping ? "interrupted" : "failed",
+        error: this.#stopping
+          ? "Telex stopped before the scheduled run completed."
+          : errorMessage(error),
+      };
+      if (!this.#stopping) {
+        this.#logger.error("Scheduled run failed", error, {
+          automationId: automation.id,
+          runId: run.id,
+        });
+      }
+    }
+
+    try {
+      await this.#store.completeRun(run.id, {
+        ...completion,
+        finishedAt: this.currentDate().toISOString(),
+      });
+    } catch (error) {
+      this.#logger.error("Could not persist scheduled-run completion", error, {
+        automationId: automation.id,
+        runId: run.id,
+      });
+    } finally {
+      this.releaseLane(release);
+    }
+  }
+
+  private async pauseInvalidSchedule(
+    automation: AutomationDefinition,
+    now: Date,
+    error: unknown,
+  ): Promise<void> {
+    const message = `Invalid recurrence: ${errorMessage(error)}`;
+    await this.#store.updateAutomation(automation.id, (current) => {
+      if (current.revision !== automation.revision || current.nextRunAt !== automation.nextRunAt) {
+        return current;
+      }
+      return {
+        ...current,
+        status: "paused",
+        deferredUntil: null,
+        deferralReason: message,
+        updatedAt: now.toISOString(),
+        revision: current.revision + 1,
+      };
+    });
+    this.#logger.error("Paused automation with an invalid schedule", error, {
+      automationId: automation.id,
+    });
+  }
+
+  private async pauseDeniedAutomation(
+    automation: AutomationDefinition,
+    now: Date,
+    reason: string,
+  ): Promise<void> {
+    await this.#store.updateAutomation(automation.id, (current) => {
+      if (current.revision !== automation.revision || current.nextRunAt !== automation.nextRunAt) {
+        return current;
+      }
+      return {
+        ...current,
+        status: "paused",
+        nextRunAt: null,
+        deferredUntil: null,
+        deferralReason: reason,
+        updatedAt: now.toISOString(),
+        revision: current.revision + 1,
+      };
+    });
+    this.#logger.warn("Paused an unauthorized scheduled run", {
+      automationId: automation.id,
+      reason,
+    });
+  }
+
+  private releaseLane(release: () => void): void {
+    try {
+      release();
+    } catch (error) {
+      this.#logger.error("Could not release a scheduled-run conversation lease", error);
+    }
   }
 
   private async executeTool(
@@ -339,15 +522,11 @@ export class ScheduledRunsEngine {
           owner,
           conversation,
           deliveryTarget: context.deliveryTarget,
-          kind: operation.kind,
           name: operation.name,
           prompt: operation.prompt,
           status: "active",
           schedule,
-          execution:
-            operation.kind === "heartbeat"
-              ? { mode: "existing-thread", threadId: context.threadId }
-              : { mode: "new-thread", cwd: this.#workspace },
+          threadId: operation.kind === "heartbeat" ? context.threadId : null,
           notificationPolicy:
             operation.notification_policy ??
             (operation.kind === "heartbeat" ? "on-result" : "always"),
@@ -369,12 +548,6 @@ export class ScheduledRunsEngine {
         this.requireAccessibleAutomation(operation.id, owner, conversation);
         const now = this.currentDate();
         const updated = await this.#store.updateAutomation(operation.id, (current) => {
-          if (
-            !sameReference(current.owner, owner) ||
-            !sameReference(current.conversation, conversation)
-          ) {
-            throw new Error("Automation not found");
-          }
           const schedule = {
             ...current.schedule,
             ...(operation.rrule === undefined ? {} : { rrule: operation.rrule }),
@@ -411,24 +584,7 @@ export class ScheduledRunsEngine {
       }
       case "delete": {
         this.requireAccessibleAutomation(operation.id, owner, conversation);
-        const now = this.currentDate().toISOString();
-        await this.#store.updateAutomation(operation.id, (current) => {
-          if (
-            !sameReference(current.owner, owner) ||
-            !sameReference(current.conversation, conversation)
-          ) {
-            throw new Error("Automation not found");
-          }
-          return {
-            ...current,
-            status: "deleted",
-            nextRunAt: null,
-            deferredUntil: null,
-            deferralReason: null,
-            updatedAt: now,
-            revision: current.revision + 1,
-          };
-        });
+        await this.#store.deleteAutomation(operation.id);
         return { deleted: true, id: operation.id };
       }
     }
@@ -437,7 +593,7 @@ export class ScheduledRunsEngine {
   private async runAutomation(
     automation: AutomationDefinition,
     run: AutomationRun,
-  ): Promise<Readonly<{ threadId?: string; summary?: string }>> {
+  ): Promise<string> {
     let result: CodexTurnResult | undefined;
     try {
       const memoryPath = await this.ensureMemoryFile(automation.id);
@@ -447,12 +603,9 @@ export class ScheduledRunsEngine {
         connector: automation.conversation.provider,
         prompt,
         thread:
-          automation.execution.mode === "existing-thread"
-            ? { mode: "existing", threadId: automation.execution.threadId }
-            : {
-                mode: "new",
-                developerInstructions: scheduledDeveloperInstructions(memoryPath),
-              },
+          automation.threadId === null
+            ? { mode: "new", developerInstructions: scheduledDeveloperInstructions(memoryPath) }
+            : { mode: "existing", threadId: automation.threadId },
         invocation: {
           owner: automation.owner,
           deliveryTarget: automation.deliveryTarget,
@@ -465,26 +618,22 @@ export class ScheduledRunsEngine {
         outputSchema: scheduledResultJsonSchema,
       });
       const parsed = parseScheduledResult(result.rawText);
-      const deliverable = {
-        ...parsed,
-        message: appendUnavailableAttachmentWarning(parsed.message, result.unavailableAttachments),
-      };
-      const shouldNotify = notificationDecision(automation, deliverable.notify);
-      await this.recordAndMaybeDeliver(
-        automation,
-        run,
-        result.threadId,
-        deliverable,
-        shouldNotify,
-        result.attachments,
-      );
-      return {
-        threadId: result.threadId,
-        summary: truncate(deliverable.message, maximumRunSummaryLength),
-      };
+      await this.deliver(automation, run, {
+        notify: notificationDecision(automation, parsed.notify),
+        title: parsed.title || automation.name,
+        body: appendUnavailableAttachmentWarning(parsed.message, result.unavailableAttachments),
+        sourceThreadId: result.threadId,
+        attachments: result.attachments,
+      });
+      return result.threadId;
     } catch (error) {
       if (!this.#stopping) {
-        await this.deliverFailure(automation, run, error).catch((deliveryError: unknown) => {
+        await this.deliver(automation, run, {
+          notify: true,
+          title: automation.name,
+          body: truncate(`Scheduled run failed: ${errorMessage(error)}`, maximumResultLength),
+          sourceThreadId: null,
+        }).catch((deliveryError: unknown) => {
           this.#logger.error("Could not deliver scheduled-run failure", deliveryError, {
             automationId: automation.id,
             runId: run.id,
@@ -497,105 +646,64 @@ export class ScheduledRunsEngine {
     }
   }
 
-  private async recordAndMaybeDeliver(
+  /** Records the run's notification exactly once, with its final outcome. */
+  private async deliver(
     automation: AutomationDefinition,
     run: AutomationRun,
-    sourceThreadId: string,
-    result: z.infer<typeof scheduledResultSchema>,
-    shouldNotify: boolean,
-    attachments: OutboundMessage["attachments"],
+    result: Readonly<{
+      notify: boolean;
+      title: string;
+      body: string;
+      sourceThreadId: string | null;
+      attachments?: OutboundMessage["attachments"];
+    }>,
   ): Promise<void> {
-    const now = this.currentDate().toISOString();
-    const notificationId = crypto.randomUUID();
-    const notification: AutomationNotification = {
-      id: notificationId,
-      automationId: automation.id,
-      runId: run.id,
-      target: automation.deliveryTarget,
-      publishedMessages: [],
-      sourceThreadId,
-      status: shouldNotify ? "pending" : "suppressed",
-      title: result.title || automation.name,
-      body: result.message,
-      error: null,
-      createdAt: now,
-      updatedAt: now,
+    const record = (
+      status: AutomationNotification["status"],
+      outcome: Partial<Pick<AutomationNotification, "publishedMessages" | "error">> = {},
+    ): AutomationNotification => {
+      const now = this.currentDate().toISOString();
+      return {
+        id: crypto.randomUUID(),
+        automationId: automation.id,
+        runId: run.id,
+        publishedMessages: [],
+        sourceThreadId: result.sourceThreadId,
+        status,
+        title: result.title,
+        body: result.body,
+        error: null,
+        createdAt: now,
+        updatedAt: now,
+        ...outcome,
+      };
     };
-    await this.#store.putNotification(notification);
-    if (!shouldNotify) return;
-
+    if (!result.notify) {
+      await this.#store.putNotification(record("suppressed"));
+      return;
+    }
     try {
       const receipt = await this.publish(automation.deliveryTarget, {
-        text: notificationText(notification.title ?? automation.name, result.message),
-        ...(attachments === undefined ? {} : { attachments }),
-        actions: [
-          {
-            label: "Continue this run",
-            command: { name: "continue", args: run.id },
-          },
-        ],
+        text: notificationText(result.title, result.body),
+        ...(result.attachments === undefined ? {} : { attachments: result.attachments }),
+        ...(result.sourceThreadId === null
+          ? {}
+          : {
+              actions: [
+                { label: "Continue this run", command: { name: "continue", args: run.id } },
+              ],
+            }),
       });
-      await this.#store.putNotification({
-        ...notification,
-        publishedMessages: receipt.publishedMessages,
-        status: "delivered",
-        updatedAt: this.currentDate().toISOString(),
-      });
+      await this.#store.putNotification(
+        record("delivered", { publishedMessages: receipt.publishedMessages }),
+      );
     } catch (error) {
-      await this.#store.putNotification({
-        ...notification,
-        status: "failed",
-        error: errorMessage(error),
-        updatedAt: this.currentDate().toISOString(),
-      });
+      await this.#store.putNotification(record("failed", { error: errorMessage(error) }));
       this.#logger.warn("Scheduled result could not be delivered", {
         automationId: automation.id,
         runId: run.id,
         error: errorMessage(error),
       });
-    }
-  }
-
-  private async deliverFailure(
-    automation: AutomationDefinition,
-    run: AutomationRun,
-    error: unknown,
-  ): Promise<void> {
-    const now = this.currentDate().toISOString();
-    const message = truncate(`Scheduled run failed: ${errorMessage(error)}`, maximumResultLength);
-    const notification: AutomationNotification = {
-      id: crypto.randomUUID(),
-      automationId: automation.id,
-      runId: run.id,
-      target: automation.deliveryTarget,
-      publishedMessages: [],
-      sourceThreadId: null,
-      status: "pending",
-      title: automation.name,
-      body: message,
-      error: null,
-      createdAt: now,
-      updatedAt: now,
-    };
-    await this.#store.putNotification(notification);
-    try {
-      const receipt = await this.publish(automation.deliveryTarget, {
-        text: notificationText(automation.name, message),
-      });
-      await this.#store.putNotification({
-        ...notification,
-        status: "delivered",
-        publishedMessages: receipt.publishedMessages,
-        updatedAt: this.currentDate().toISOString(),
-      });
-    } catch (deliveryError) {
-      await this.#store.putNotification({
-        ...notification,
-        status: "failed",
-        error: errorMessage(deliveryError),
-        updatedAt: this.currentDate().toISOString(),
-      });
-      throw deliveryError;
     }
   }
 
@@ -612,12 +720,10 @@ export class ScheduledRunsEngine {
     id: string,
     owner: ProviderReference,
     conversation: ProviderReference,
-    includeDeleted = false,
   ): AutomationDefinition {
     const automation = this.#store.getAutomation(id);
     if (
       automation === undefined ||
-      (!includeDeleted && automation.status === "deleted") ||
       !sameReference(automation.owner, owner) ||
       !sameReference(automation.conversation, conversation)
     ) {
@@ -647,15 +753,14 @@ export class ScheduledRunsEngine {
   }
 }
 
+function toolJsonSchema(schema: z.ZodType): JsonValue {
+  const { $schema: _$schema, ...jsonSchema } = z.toJSONSchema(schema);
+  return jsonSchema as JsonValue;
+}
+
 function stableAutomationId(threadId: string, callId: string): string {
   const value = createHash("sha256").update(threadId).update("\0").update(callId).digest("hex");
   return `auto_${value.slice(0, 32)}`;
-}
-
-function sameReference(left: ProviderReference, right: ProviderReference): boolean {
-  return (
-    left.provider === right.provider && left.resource === right.resource && left.id === right.id
-  );
 }
 
 function conversationReference(provider: string, id: string): ProviderReference {
@@ -664,6 +769,10 @@ function conversationReference(provider: string, id: string): ProviderReference 
 
 function localTimeZone(): string {
   return Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
+}
+
+function automationKind(automation: AutomationDefinition): "cron" | "heartbeat" {
+  return automation.threadId === null ? "cron" : "heartbeat";
 }
 
 function notificationDecision(automation: AutomationDefinition, modelDecision: boolean): boolean {
@@ -694,7 +803,7 @@ function parseScheduledResult(text: string): z.infer<typeof scheduledResultSchem
 function summarizeAutomation(automation: AutomationDefinition): unknown {
   return {
     id: automation.id,
-    kind: automation.kind,
+    kind: automationKind(automation),
     name: automation.name,
     prompt: automation.prompt,
     status: automation.status,
@@ -714,14 +823,15 @@ function scheduledPrompt(
   memoryPath: string,
   now: Date,
 ): string {
-  const envelope = automation.kind === "heartbeat" ? "heartbeat" : "scheduled_run";
+  const envelope = automation.threadId === null ? "scheduled_run" : "heartbeat";
+  // The envelope is advisory structure for the model, not a parser boundary.
   return `<${envelope}>
 <automation_id>${automation.id}</automation_id>
 <run_id>${run.id}</run_id>
-<name>${escapeXml(automation.name)}</name>
+<name>${automation.name}</name>
 <scheduled_for>${run.scheduledFor}</scheduled_for>
 <current_time_iso>${now.toISOString()}</current_time_iso>
-<memory_path>${escapeXml(memoryPath)}</memory_path>
+<memory_path>${memoryPath}</memory_path>
 <instructions>
 ${automation.prompt}
 </instructions>
@@ -738,12 +848,15 @@ function notificationText(title: string, message: string): string {
   return `⏱ ${title}\n\n${message}\n\nReply to this message to discuss it in your current task.`;
 }
 
-function escapeXml(value: string): string {
-  return value.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;");
-}
-
 function truncate(value: string, length: number): string {
   return value.length <= length ? value : value.slice(0, length);
+}
+
+function validRetryAt(candidate: Date | undefined, now: Date, deferralMs: number): Date {
+  if (candidate !== undefined && Number.isFinite(candidate.getTime()) && candidate > now) {
+    return candidate;
+  }
+  return new Date(now.getTime() + deferralMs);
 }
 
 function appendUnavailableAttachmentWarning(

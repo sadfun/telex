@@ -16,29 +16,20 @@ describe("telegramBotCommands", () => {
 
 describe("routeTelegramMessage", () => {
   it("routes true forum topics with the existing conversation suffix", () => {
-    const route = routeTelegramMessage(
-      message({ message_thread_id: 17, is_topic_message: true }),
-      42,
-    );
+    const route = routeTelegramMessage(message({ message_thread_id: 17, is_topic_message: true }));
 
     expect(route).toEqual({
       conversationSuffix: "17",
-      reply: {
-        destination: { kind: "topic", messageThreadId: 17 },
-        visibility: { kind: "normal" },
-      },
+      reply: { destination: { kind: "topic", messageThreadId: 17 } },
     });
   });
 
   it("keeps a generic message thread distinct without treating it as a forum topic", () => {
-    const route = routeTelegramMessage(message({ message_thread_id: 55 }), 42);
+    const route = routeTelegramMessage(message({ message_thread_id: 55 }));
 
     expect(route).toEqual({
       conversationSuffix: "55",
-      reply: {
-        destination: { kind: "genericThread", replyToMessageId: 55 },
-        visibility: { kind: "normal" },
-      },
+      reply: { destination: { kind: "genericThread", replyToMessageId: 55 } },
     });
   });
 
@@ -58,7 +49,6 @@ describe("routeTelegramMessage", () => {
           user: { id: 42, is_bot: false, first_name: "Ada" },
         },
       }),
-      42,
     );
 
     expect(route).toMatchObject({
@@ -77,31 +67,9 @@ describe("routeTelegramMessage", () => {
           is_direct_messages: true,
         },
       }),
-      42,
     );
 
     expect(route).toBeUndefined();
-  });
-
-  it("keeps ephemeral visibility separate and targets the sender", () => {
-    const route = routeTelegramMessage(
-      message({
-        message_id: 0,
-        message_thread_id: 17,
-        is_topic_message: true,
-        ephemeral_message_id: 700,
-      }),
-      42,
-    );
-
-    expect(route?.reply).toEqual({
-      destination: { kind: "topic", messageThreadId: 17 },
-      visibility: {
-        kind: "ephemeral",
-        receiverUserId: 42,
-        incomingEphemeralMessageId: 700,
-      },
-    });
   });
 });
 

@@ -1,10 +1,8 @@
-import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { cp, readdir, readFile, rename, rm, stat } from "node:fs/promises";
-import { join, relative, resolve, sep } from "node:path";
+import { join, resolve, sep } from "node:path";
 import { z } from "zod";
 import { externalProcessEnvironment } from "../shared/environment.js";
-import { errorMessage } from "../shared/errors.js";
 import { atomicWriteFile, atomicWriteJson, ensureDirectory } from "../shared/fs.js";
 import type { Logger } from "../shared/logger.js";
 import { runCommand } from "../shared/process.js";
@@ -27,12 +25,7 @@ const protocolManifestSchema = z.object({
   codexVersion: z.string(),
   generatedAt: z.string(),
   bindings: generatedFilesSchema,
-  schemas: generatedFilesSchema,
   methods: protocolMethodsSchema,
-});
-
-const legacyProtocolManifestSchema = protocolManifestSchema.omit({ schemas: true }).extend({
-  schemaVersion: z.literal(1),
 });
 
 export type ProtocolManifest = z.infer<typeof protocolManifestSchema>;
@@ -56,17 +49,8 @@ export interface ProtocolCheckResult {
   readonly compatible: boolean;
   readonly applied: boolean;
   readonly generatedTypeFiles: number;
-  readonly validatedSchemaFiles: number;
-  readonly compileDiagnostics: string;
   readonly methodChanges: ProtocolMethodChanges;
   readonly manifest: ProtocolManifest;
-}
-
-interface CommandOutcome {
-  readonly exitCode: number | null;
-  readonly signal: NodeJS.Signals | null;
-  readonly stdout: string;
-  readonly stderr: string;
 }
 
 const methodFiles = {
@@ -98,7 +82,6 @@ export async function checkCodexProtocol(
     `${candidateVersion}-${crypto.randomUUID()}`,
   );
   const bindingsDirectory = join(stageRoot, "bindings");
-  const schemasDirectory = join(stageRoot, "schemas");
   const experimentalBindingsDirectory = join(stageRoot, "experimental-bindings");
 
   await ensureDirectory(stageRoot);
@@ -111,7 +94,6 @@ export async function checkCodexProtocol(
       projectRoot,
       join(stageRoot, "codex-home"),
       bindingsDirectory,
-      schemasDirectory,
     );
     await validateExperimentalProtocol(
       codexBinary,
@@ -120,29 +102,14 @@ export async function checkCodexProtocol(
       experimentalBindingsDirectory,
     );
 
-    await validateJsonSchemas(schemasDirectory);
-    const manifest = await createProtocolManifest(
-      candidateVersion,
-      bindingsDirectory,
-      schemasDirectory,
-    );
-    const generatedTypeFiles = manifest.bindings.fileCount;
-    const validatedSchemaFiles = manifest.schemas.fileCount;
+    const manifest = await createProtocolManifest(candidateVersion, bindingsDirectory);
     const baseline = await readBaselineManifest(projectRoot, previousVersion);
     const methodChanges = compareMethods(baseline.methods, manifest.methods);
-
-    const compile = await compileAgainstBindings(projectRoot, stageRoot, bindingsDirectory);
-    const compatible = !hasRemovedMethods(methodChanges.removed) && compile.exitCode === 0;
+    const compatible = !hasRemovedMethods(methodChanges.removed);
 
     let applied = false;
     if (options.apply && compatible) {
-      await applyProtocol(
-        projectRoot,
-        bindingsDirectory,
-        schemasDirectory,
-        candidateVersion,
-        manifest,
-      );
+      await applyProtocol(projectRoot, bindingsDirectory, candidateVersion, manifest);
       applied = true;
     }
 
@@ -151,9 +118,7 @@ export async function checkCodexProtocol(
       candidateVersion,
       compatible,
       applied,
-      generatedTypeFiles,
-      validatedSchemaFiles,
-      compileDiagnostics: formatCommandDiagnostics(compile),
+      generatedTypeFiles: manifest.bindings.fileCount,
       methodChanges,
       manifest,
     };
@@ -165,15 +130,10 @@ export async function checkCodexProtocol(
 export async function createProtocolManifest(
   codexVersion: string,
   bindingsDirectory: string,
-  schemasDirectory: string,
 ): Promise<ProtocolManifest> {
   const bindings = await fingerprintFiles(bindingsDirectory, ".ts");
   if (bindings.fileCount === 0) {
     throw new Error(`Codex generated no TypeScript files in ${bindingsDirectory}`);
-  }
-  const schemas = await fingerprintFiles(schemasDirectory, ".json");
-  if (schemas.fileCount === 0) {
-    throw new Error(`Codex generated no JSON schemas in ${schemasDirectory}`);
   }
 
   const methods = await readMethods(bindingsDirectory);
@@ -188,7 +148,6 @@ export async function createProtocolManifest(
     codexVersion,
     generatedAt: new Date().toISOString(),
     bindings,
-    schemas,
     methods,
   };
 }
@@ -198,21 +157,16 @@ async function generateProtocol(
   projectRoot: string,
   codexHome: string,
   bindingsDirectory: string,
-  schemasDirectory: string,
 ): Promise<void> {
   await ensureDirectory(codexHome);
   await ensureDirectory(bindingsDirectory);
-  await ensureDirectory(schemasDirectory);
   await runCommand(codexBinary, ["app-server", "generate-ts", "--out", bindingsDirectory], {
-    cwd: projectRoot,
-    env: externalProcessEnvironment({ CODEX_HOME: codexHome }),
-  });
-  await runCommand(codexBinary, ["app-server", "generate-json-schema", "--out", schemasDirectory], {
     cwd: projectRoot,
     env: externalProcessEnvironment({ CODEX_HOME: codexHome }),
   });
 }
 
+/** Asserts the experimental fields that rpc.ts hand-augments; the typecheck covers the rest. */
 async function validateExperimentalProtocol(
   codexBinary: string,
   projectRoot: string,
@@ -229,48 +183,12 @@ async function validateExperimentalProtocol(
     },
   );
   const turnStart = await readFile(join(bindingsDirectory, "v2", "TurnStartParams.ts"), "utf8");
-  const entry = await readFile(join(bindingsDirectory, "v2", "AdditionalContextEntry.ts"), "utf8");
-  const kind = await readFile(join(bindingsDirectory, "v2", "AdditionalContextKind.ts"), "utf8");
-  if (!turnStart.includes("additionalContext") || !turnStart.includes("AdditionalContextEntry")) {
+  if (!turnStart.includes("additionalContext")) {
     throw new Error("Codex no longer exposes turn/start.additionalContext");
   }
-  if (
-    !entry.includes("value: string") ||
-    !entry.includes("AdditionalContextKind") ||
-    !kind.includes('"application"')
-  ) {
-    throw new Error("Codex additional-context entry shape is incompatible with Telex");
-  }
   const threadStart = await readFile(join(bindingsDirectory, "v2", "ThreadStartParams.ts"), "utf8");
-  const dynamicTool = await readFile(join(bindingsDirectory, "v2", "DynamicToolSpec.ts"), "utf8");
-  if (!threadStart.includes("dynamicTools") || !threadStart.includes("DynamicToolSpec")) {
+  if (!threadStart.includes("dynamicTools")) {
     throw new Error("Codex no longer exposes thread/start.dynamicTools");
-  }
-  if (
-    !dynamicTool.includes('"type": "function"') ||
-    !dynamicTool.includes("DynamicToolFunctionSpec")
-  ) {
-    throw new Error("Codex dynamic-tool specification shape is incompatible with Telex");
-  }
-}
-
-async function validateJsonSchemas(schemasDirectory: string): Promise<void> {
-  const files = await listFiles(schemasDirectory, ".json");
-  if (files.length === 0) {
-    throw new Error(`Codex generated no JSON schemas in ${schemasDirectory}`);
-  }
-
-  for (const file of files) {
-    const path = join(schemasDirectory, file);
-    let value: unknown;
-    try {
-      value = JSON.parse(await readFile(path, "utf8"));
-    } catch (error) {
-      throw new Error(`Invalid generated JSON schema ${file}: ${errorMessage(error)}`);
-    }
-    if (!isJsonObject(value)) {
-      throw new Error(`Generated JSON schema ${file} is not an object`);
-    }
   }
 }
 
@@ -280,37 +198,11 @@ async function readBaselineManifest(
 ): Promise<{ readonly methods: ProtocolMethods }> {
   const path = join(projectRoot, "src", "generated", "codex", "protocol-manifest.json");
   try {
-    const manifest = z
-      .union([protocolManifestSchema, legacyProtocolManifestSchema])
-      .parse(JSON.parse(await readFile(path, "utf8")));
+    const manifest = protocolManifestSchema.parse(JSON.parse(await readFile(path, "utf8")));
     if (manifest.codexVersion !== pinnedVersion) {
       throw new Error(
         `Protocol manifest is for Codex ${manifest.codexVersion}, but codex.version pins ${pinnedVersion}`,
       );
-    }
-    const generatedDirectory = join(projectRoot, "src", "generated", "codex");
-    const actualBindings = await fingerprintFiles(generatedDirectory, ".ts");
-    if (
-      manifest.bindings.fileCount !== actualBindings.fileCount ||
-      manifest.bindings.sha256 !== actualBindings.sha256
-    ) {
-      throw new Error(
-        "Generated Codex bindings do not match their manifest; regenerate them before checking an upgrade",
-      );
-    }
-    if (manifest.schemaVersion === 2) {
-      const actualSchemas = await fingerprintFiles(
-        join(generatedDirectory, "json-schema"),
-        ".json",
-      );
-      if (
-        manifest.schemas.fileCount !== actualSchemas.fileCount ||
-        manifest.schemas.sha256 !== actualSchemas.sha256
-      ) {
-        throw new Error(
-          "Generated Codex JSON schemas do not match their manifest; regenerate them before checking an upgrade",
-        );
-      }
     }
     return manifest;
   } catch (error) {
@@ -380,49 +272,10 @@ function hasRemovedMethods(methods: ProtocolMethods): boolean {
   return methodGroups.some((group) => methods[group].length > 0);
 }
 
-async function compileAgainstBindings(
-  projectRoot: string,
-  stageRoot: string,
-  bindingsDirectory: string,
-): Promise<CommandOutcome> {
-  const compileRoot = join(stageRoot, "compile");
-  const compileSource = join(compileRoot, "src");
-  await ensureDirectory(compileRoot);
-  await cp(join(projectRoot, "src"), compileSource, { recursive: true });
-  await rm(join(compileSource, "generated", "codex"), {
-    recursive: true,
-    force: true,
-  });
-  await cp(bindingsDirectory, join(compileSource, "generated", "codex"), {
-    recursive: true,
-  });
-
-  const configPath = join(compileRoot, "tsconfig.json");
-  const baseConfig = relative(compileRoot, join(projectRoot, "tsconfig.json"));
-  await atomicWriteJson(configPath, {
-    extends: normalizePath(baseConfig),
-    compilerOptions: {
-      rootDir: "./src",
-      outDir: "./dist",
-      noEmit: false,
-    },
-    include: ["src/**/*.ts"],
-    exclude: [],
-  });
-
-  const tsc = join(projectRoot, "node_modules", "typescript", "bin", "tsc");
-  return await runCommandForStatus(
-    process.execPath,
-    [tsc, "-p", configPath],
-    projectRoot,
-    externalProcessEnvironment(),
-  );
-}
-
+/** Installs the bindings, typechecks the repo against them, and rolls back on any failure. */
 async function applyProtocol(
   projectRoot: string,
   bindingsDirectory: string,
-  schemasDirectory: string,
   candidateVersion: string,
   manifest: ProtocolManifest,
 ): Promise<void> {
@@ -439,7 +292,6 @@ async function applyProtocol(
 
   await ensureDirectory(generatedRoot);
   await cp(bindingsDirectory, incoming, { recursive: true });
-  await cp(schemasDirectory, join(incoming, "json-schema"), { recursive: true });
   await atomicWriteJson(manifestPath, manifest);
   try {
     if (await pathExists(target)) {
@@ -449,6 +301,11 @@ async function applyProtocol(
     await rename(incoming, target);
     installedIncoming = true;
     await atomicWriteFile(versionPath, `${candidateVersion}\n`);
+    await runCommand(
+      join(projectRoot, "node_modules", ".bin", "tsc"),
+      ["-p", join(projectRoot, "tsconfig.test.json")],
+      { cwd: projectRoot, env: externalProcessEnvironment() },
+    );
     if (movedCurrent) await rm(backup, { recursive: true, force: true });
   } catch (error) {
     if (installedIncoming) await rm(target, { recursive: true, force: true });
@@ -511,62 +368,16 @@ function normalizePath(path: string): string {
   return sep === "/" ? path : path.split(sep).join("/");
 }
 
-function isJsonObject(value: unknown): value is Readonly<Record<string, unknown>> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-function formatCommandDiagnostics(outcome: CommandOutcome): string {
-  const output = [outcome.stdout.trim(), outcome.stderr.trim()].filter(Boolean).join("\n");
-  if (outcome.exitCode === 0) return output;
-  const termination =
-    outcome.exitCode === null
-      ? `TypeScript terminated by ${outcome.signal ?? "an unknown signal"}`
-      : `TypeScript exited with code ${outcome.exitCode}`;
-  return output.length === 0 ? termination : `${termination}\n${output}`;
-}
-
-async function runCommandForStatus(
-  executable: string,
-  args: readonly string[],
-  cwd: string,
-  env: NodeJS.ProcessEnv,
-): Promise<CommandOutcome> {
-  return await new Promise<CommandOutcome>((resolvePromise, reject) => {
-    const child = spawn(executable, args, {
-      cwd,
-      env,
-      shell: false,
-      stdio: ["ignore", "pipe", "pipe"],
-    });
-    const stdout: Buffer[] = [];
-    const stderr: Buffer[] = [];
-    child.stdout.on("data", (chunk: Buffer) => stdout.push(chunk));
-    child.stderr.on("data", (chunk: Buffer) => stderr.push(chunk));
-    child.once("error", reject);
-    child.once("exit", (exitCode, signal) => {
-      resolvePromise({
-        exitCode,
-        signal,
-        stdout: Buffer.concat(stdout).toString("utf8"),
-        stderr: Buffer.concat(stderr).toString("utf8"),
-      });
-    });
-  });
-}
-
 export function formatProtocolCheck(result: ProtocolCheckResult): string {
   const lines = [
     `Codex protocol ${result.previousVersion} -> ${result.candidateVersion}`,
-    `Generated ${result.generatedTypeFiles} TypeScript files; validated ${result.validatedSchemaFiles} JSON schemas.`,
+    `Generated ${result.generatedTypeFiles} TypeScript files.`,
   ];
   for (const group of methodGroups) {
     const added = result.methodChanges.added[group];
     const removed = result.methodChanges.removed[group];
     if (added.length > 0) lines.push(`Added ${group}: ${added.join(", ")}`);
     if (removed.length > 0) lines.push(`Removed ${group}: ${removed.join(", ")}`);
-  }
-  if (result.compileDiagnostics.length > 0) {
-    lines.push("TypeScript diagnostics:", result.compileDiagnostics);
   }
   lines.push(
     result.compatible

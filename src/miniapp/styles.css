@@ -203,12 +203,6 @@ button {
   font-size: 0.95rem;
 }
 
-.usageUnavailable .ui-caption,
-.usageLoading .ui-caption {
-  max-width: 30rem;
-  color: var(--muted-foreground);
-}
-
 .usageWindows {
   min-width: 0;
 }
@@ -335,12 +329,6 @@ button {
   font-size: 0.95rem;
 }
 
-.bankedResetsSummaryCopy .ui-caption {
-  color: var(--muted-foreground);
-  font-size: 0.75rem;
-  line-height: 1.4;
-}
-
 .bankedResetsChevron {
   flex: 0 0 auto;
   color: var(--primary);
@@ -370,10 +358,6 @@ button {
 .bankedResetEmpty {
   gap: 5px;
   text-align: center;
-}
-
-.bankedResetEmpty .ui-caption {
-  color: var(--muted-foreground);
 }
 
 .bankedResetHeader {
@@ -610,7 +594,7 @@ button {
   box-shadow: 0 0 0 4px color-mix(in srgb, #31b545 16%, transparent);
 }
 
-.runtimeDot-applying,
+.runtimeDot-reloading,
 .runtimeDot-restarting {
   background: var(--primary);
   box-shadow: 0 0 0 4px color-mix(in srgb, var(--primary) 16%, transparent);
@@ -957,10 +941,6 @@ button {
   max-height: min(58svh, 560px);
   border-radius: 12px;
   object-fit: contain;
-}
-
-.featureStage {
-  text-transform: capitalize;
 }
 
 .toggleField {

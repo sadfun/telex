@@ -9,12 +9,8 @@ import {
   type ConfigValidationIssue,
 } from "../codex/config-service.js";
 import { CodexRpcError } from "../codex/rpc.js";
-import type {
-  ApplyBankedResetOutcome,
-  AvailableSkill,
-  CodexUsageLimits,
-} from "../codex/runtime-service.js";
-import { SkillBrowserError, type SkillResource } from "../codex/skill-browser.js";
+import type { CodexRuntimeService } from "../codex/runtime-service.js";
+import { SkillBrowserError } from "../codex/skill-browser.js";
 import type { TelexSettingsStore } from "../core/settings-store.js";
 import { BridgeError } from "../shared/errors.js";
 import type { Logger } from "../shared/logger.js";
@@ -48,34 +44,32 @@ export interface MiniAppServerOptions {
   readonly runtime: MiniAppRuntimeController;
   readonly settings: TelexSettingsStore;
   readonly logger: Logger;
-  readonly maxAuthAgeSeconds?: number;
   readonly assetDirectory?: string;
 }
 
 /** Narrow runtime surface exposed to the authenticated settings Mini App. */
-export interface MiniAppRuntimeController {
-  status(): unknown;
-  usageLimits(): Promise<CodexUsageLimits>;
-  applyBankedReset(creditId: string, idempotencyKey: string): Promise<ApplyBankedResetOutcome>;
-  skills(): readonly AvailableSkill[];
-  browseSkill(name: string, path: string): Promise<SkillResource>;
-  afterConfigWrite(): Promise<unknown>;
-  reload(): Promise<unknown>;
-  restart(): Promise<unknown>;
-}
+export type MiniAppRuntimeController = Pick<
+  CodexRuntimeService,
+  | "status"
+  | "usageLimits"
+  | "applyBankedReset"
+  | "skills"
+  | "browseSkill"
+  | "afterConfigWrite"
+  | "reload"
+  | "restart"
+>;
 
 export class MiniAppServer {
   private readonly options: MiniAppServerOptions;
   readonly #server: Server;
   readonly #assetDirectory: string;
-  readonly #maxAuthAgeSeconds: number;
   #started = false;
 
   public constructor(options: MiniAppServerOptions) {
     this.options = options;
     this.#assetDirectory =
       options.assetDirectory ?? fileURLToPath(new URL("./public", import.meta.url));
-    this.#maxAuthAgeSeconds = options.maxAuthAgeSeconds ?? DEFAULT_MAX_AUTH_AGE_SECONDS;
     this.#server = createServer((request, response) => {
       void this.handle(request, response).catch((error: unknown) => {
         this.options.logger.error("Mini App request failed", error, {
@@ -288,7 +282,7 @@ export class MiniAppServer {
     validateTelegramInitData(authorization.slice(4), {
       botToken: this.options.botToken,
       allowedUserIds: this.options.allowedUserIds,
-      maxAgeSeconds: this.#maxAuthAgeSeconds,
+      maxAgeSeconds: DEFAULT_MAX_AUTH_AGE_SECONDS,
     });
   }
 
@@ -409,7 +403,7 @@ export class MiniAppServer {
   }
 }
 
-export function normalizeZodIssues(error: ZodError): ConfigValidationIssue[] {
+function normalizeZodIssues(error: ZodError): ConfigValidationIssue[] {
   return error.issues.map((issue) => ({
     path: issue.path.map((segment) => String(segment)).join("."),
     severity: "error",

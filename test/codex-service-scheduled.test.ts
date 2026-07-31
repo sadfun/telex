@@ -98,7 +98,7 @@ describe("CodexService scheduled execution", () => {
     expect(result).toMatchObject({
       threadId: "thread-1",
       turnId: "turn-1",
-      text: rpc.finalText,
+      rawText: rpc.finalText,
     });
     expect(rpc.requests.find((request) => request.method === "thread/start")?.params).toMatchObject(
       {
@@ -114,6 +114,28 @@ describe("CodexService scheduled execution", () => {
       outputSchema: { type: "object" },
     });
     await result.dispose();
+  });
+
+  it("abandons a pending approval when Codex resolves the server request", async () => {
+    const { service, rpc } = await fixture();
+    rpc.approvalRequest = true;
+    let observedSignal: AbortSignal | undefined;
+    const output = responder();
+    const withApproval: MessageResponder = {
+      ...output.responder,
+      askChoice: vi.fn(
+        async (_prompt: string, _options, signal?: AbortSignal) =>
+          await new Promise<string>((resolve) => {
+            observedSignal = signal;
+            signal?.addEventListener("abort", () => resolve("abandoned"), { once: true });
+          }),
+      ),
+    };
+
+    await service.runTurn("telegram:42:0", "telegram", "work", withApproval, true);
+
+    expect(observedSignal?.aborted).toBe(true);
+    expect(rpc.replies[0]).toMatchObject({ decision: "decline" });
   });
 
   it("ignores late deltas from another turn on the same thread", async () => {
@@ -133,7 +155,11 @@ describe("CodexService scheduled execution", () => {
     const resumeGate = deferred<void>();
     rpc.resumeGate = resumeGate;
 
-    const activating = service.activateConversationThread("telegram:42:0", "thread-scheduled");
+    const activating = service.activateConversationThread(
+      "telegram:42:0",
+      "telegram",
+      "thread-scheduled",
+    );
     await vi.waitFor(() => {
       expect(rpc.requests.some((request) => request.method === "thread/resume")).toBe(true);
     });
@@ -153,7 +179,7 @@ describe("CodexService scheduled execution", () => {
       });
     });
     await expect(
-      service.activateConversationThread("telegram:42:0", "thread-other"),
+      service.activateConversationThread("telegram:42:0", "telegram", "thread-other"),
     ).rejects.toMatchObject({ code: "CONVERSATION_BUSY" });
 
     resumeGate.resolve();
@@ -181,6 +207,7 @@ class FakeRpc {
   public readonly replies: unknown[] = [];
   public finalText = "Finished.";
   public callDynamicTool = false;
+  public approvalRequest = false;
   public emitWrongTurnDelta = false;
   public resumeGate: Deferred<void> | undefined;
   readonly #listeners = new Set<NotificationListener>();
@@ -245,6 +272,20 @@ class FakeRpc {
           arguments: { mode: "view" },
         },
       } as ServerRequest);
+    }
+    if (this.approvalRequest) {
+      const handled = this.#handler?.({
+        method: "item/commandExecution/requestApproval",
+        id: 7,
+        params: { threadId, turnId, itemId: "call-1", command: "rm -rf ./scratch", reason: null },
+      } as unknown as ServerRequest);
+      // Give the bridge time to surface the prompt, then resolve it server-side.
+      await new Promise((resolve) => setImmediate(resolve));
+      this.notify({
+        method: "serverRequest/resolved",
+        params: { threadId, requestId: 7 },
+      } as ServerNotification);
+      await handled;
     }
     if (this.emitWrongTurnDelta) {
       this.notify({

@@ -1,9 +1,8 @@
 import {
-  type ChangeEvent,
   type FormEvent,
-  createElement as h,
   type MouseEvent,
   type ReactElement,
+  useCallback,
   useEffect,
   useMemo,
   useState,
@@ -11,8 +10,27 @@ import {
 import { createRoot } from "react-dom/client";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import type { EditableCodexConfig } from "../codex/config-service.js";
-import type { AskForApproval } from "../generated/codex/v2/AskForApproval.js";
+import type {
+  ConfigCapabilities,
+  ConfigValidationIssue,
+  ConfigValidationResult,
+  EditableCodexConfig,
+  EditableConfigSnapshot,
+  FeatureCapability,
+  ModelCapability,
+} from "../codex/config-service.js";
+import type {
+  ApplyBankedResetOutcome,
+  AvailableSkill,
+  CodexBankedReset,
+  CodexBankedResets,
+  CodexRuntimeStatus,
+  CodexUsageLimits,
+  CodexUsageLimitWindow,
+} from "../codex/runtime-service.js";
+import type { SkillDirectory, SkillFile, SkillResource } from "../codex/skill-browser.js";
+import type { TelexSettings } from "../core/settings-store.js";
+import type { ConfigWriteResponse } from "../generated/codex/v2/ConfigWriteResponse.js";
 import {
   AppRoot,
   Banner,
@@ -46,27 +64,18 @@ declare global {
   }
 }
 
-const featureNames = [
-  "apps",
-  "goals",
-  "hooks",
-  "fast_mode",
-  "memories",
-  "multi_agent",
-  "personality",
-  "remote_plugin",
-  "shell_snapshot",
-  "shell_tool",
-  "unified_exec",
-] as const;
-
-type FeatureName = (typeof featureNames)[number];
+type FeatureName = FeatureCapability["name"];
 type TriState = "" | "false" | "true";
-type GranularApprovalPolicy = Extract<AskForApproval, { readonly granular: unknown }>;
-type GranularApproval = GranularApprovalPolicy["granular"];
-type ClientEditableCodexConfig = Omit<EditableCodexConfig, "approval_policy"> & {
-  readonly model_provider: string | null;
-  readonly approval_policy: AskForApproval | null;
+type ApprovalPolicy = NonNullable<EditableCodexConfig["approval_policy"]>;
+type ApprovalMode = Exclude<ApprovalPolicy, { granular: unknown }> | "granular";
+type GranularApproval = Extract<ApprovalPolicy, { granular: unknown }>["granular"];
+type ConfigRequirements = NonNullable<ConfigCapabilities["requirements"]>;
+
+/** The `/api/config` wire shape; the client trusts the server's typed JSON as-is. */
+type LoadedSnapshot = EditableConfigSnapshot & {
+  readonly telex: TelexSettings;
+  readonly runtime: CodexRuntimeStatus;
+  readonly writeOutcome?: ConfigWriteResponse | undefined;
 };
 
 interface ConfigDraft {
@@ -90,255 +99,80 @@ interface ConfigDraft {
 
 type ScalarDraftKey = Exclude<keyof ConfigDraft, "approval_granular" | "features">;
 
-interface ReasoningEffortCapability {
-  readonly reasoningEffort: string;
-  readonly description: string;
-}
-
-interface ServiceTierCapability {
-  readonly id: string;
-  readonly name: string;
-  readonly description: string;
-}
-
-interface ModelCapability {
-  readonly model: string;
-  readonly displayName: string;
-  readonly description: string;
-  readonly supportedReasoningEfforts: readonly ReasoningEffortCapability[];
-  readonly defaultReasoningEffort: string;
-  readonly serviceTiers: readonly ServiceTierCapability[];
-  readonly defaultServiceTier: string | null;
-  readonly isDefault: boolean;
-}
-
-interface PermissionProfileCapability {
-  readonly id: string;
-  readonly description: string | null;
-  readonly allowed: boolean;
-}
-
-interface ModelProviderCapability {
-  readonly id: string;
-  readonly displayName: string;
-  readonly description: string;
-  readonly allowed: boolean;
-}
-
-interface FeatureCapability {
-  readonly name: string;
-  readonly stage: string;
-  readonly displayName: string | null;
-  readonly description: string | null;
-  readonly enabled: boolean;
-  readonly defaultEnabled: boolean;
-  readonly locked: boolean;
-}
-
-interface ConfigCapabilities {
-  readonly platform: string;
-  readonly modelProviders: readonly ModelProviderCapability[];
-  readonly models: readonly ModelCapability[];
-  readonly permissionProfiles: readonly PermissionProfileCapability[];
-  readonly features: readonly FeatureCapability[];
-  readonly requirements: Readonly<Record<string, unknown>> | null;
-}
-
-interface LoadedSnapshot {
-  readonly version: string | null;
-  readonly values: ClientEditableCodexConfig;
-  readonly capabilities: ConfigCapabilities;
-  readonly validation: ValidationResult;
-  readonly telex: TelexSettings;
-  readonly runtime: RuntimeStatus;
-  readonly writeOutcome: WriteOutcome | undefined;
-}
-
-interface RuntimeComponentStatus {
-  readonly state: string;
-  readonly message: string | null;
-}
-
-interface RuntimeStatus {
-  readonly state: string;
-  readonly lastAppliedAt: string | null;
-  readonly configPath: string | null;
-  readonly restartRequired: boolean;
-  readonly lastError: string | null;
-  readonly config: RuntimeComponentStatus | undefined;
-  readonly mcp: RuntimeComponentStatus | undefined;
-  readonly skills: RuntimeComponentStatus | undefined;
-}
-
-interface TelexSettings {
-  readonly remoteClientContext: boolean;
-}
-
-interface UsageLimitWindow {
-  readonly remainingPercent: number;
-  readonly resetsAt: number | null;
-}
-
-interface BankedReset {
-  readonly id: string;
-  readonly resetType: "codexRateLimits" | "unknown";
-  readonly status: "available" | "redeeming" | "redeemed" | "unknown";
-  readonly grantedAt: number;
-  readonly expiresAt: number | null;
-  readonly title: string | null;
-  readonly description: string | null;
-}
-
-interface BankedResets {
-  readonly availableCount: number;
-  readonly credits: readonly BankedReset[] | null;
-}
-
-interface UsageLimits {
-  readonly weekly: UsageLimitWindow | null;
-  readonly fiveHour: UsageLimitWindow | null;
-  readonly bankedResets: BankedResets | null;
-}
-
 interface ResetConfirmation {
-  readonly credit: BankedReset;
+  readonly credit: CodexBankedReset;
   readonly idempotencyKey: string;
 }
 
-type ApplyResetOutcome = "reset" | "nothingToReset" | "noCredit" | "alreadyRedeemed";
-
-interface WriteOutcome {
-  readonly status: "ok" | "okOverridden";
-  readonly overriddenMetadata: OverrideMetadata | null;
-}
-
-interface OverrideMetadata {
-  readonly message: string;
-  readonly effectiveValue: unknown;
-}
-
-interface ValidationIssue {
-  readonly path: string;
-  readonly severity: "error" | "info" | "warning";
-  readonly message: string;
-}
-
-interface ValidationResult {
-  readonly valid: boolean;
-  readonly issues: readonly ValidationIssue[];
-}
-
-interface UiOption {
-  readonly value: string;
+interface UiOption<Value extends string = string> {
+  readonly value: Value;
   readonly label: string;
   readonly disabled?: boolean;
 }
 
-interface AvailableSkill {
-  readonly name: string;
-  readonly description: string;
-}
-
-interface SkillDirectoryEntry {
-  readonly name: string;
-  readonly path: string;
-  readonly type: "directory" | "file";
-  readonly size: number | null;
-}
-
-interface SkillDirectory {
-  readonly type: "directory";
-  readonly path: string;
-  readonly entries: readonly SkillDirectoryEntry[];
-}
-
-interface SkillFile {
-  readonly type: "file";
-  readonly path: string;
-  readonly size: number;
-  readonly mediaType: string;
-  readonly encoding: "base64" | "utf8";
-  readonly content: string;
-}
-
-type SkillResource = SkillDirectory | SkillFile;
-
 interface FieldProps {
   readonly draftKey: string;
-  readonly configPath: string;
   readonly label: string;
   readonly description: string;
   readonly value: string;
   readonly disabled: boolean;
-  readonly issues: readonly ValidationIssue[];
+  readonly issues: readonly ConfigValidationIssue[];
   readonly onChange: (value: string) => void;
 }
 
-const emptyCapabilities: ConfigCapabilities = {
-  platform: "unknown",
-  modelProviders: [],
-  models: [],
-  permissionProfiles: [],
-  features: [],
-  requirements: null,
-};
-
-const approvalOptions = [
+const approvalOptions: readonly UiOption<ApprovalMode>[] = [
   { value: "untrusted", label: "Only untrusted commands" },
   { value: "on-request", label: "When Codex requests it" },
   { value: "granular", label: "Choose by category" },
   { value: "never", label: "Never ask" },
-] as const;
+];
 
-const reviewerOptions = [
-  { value: "user", label: "Me" },
-  { value: "auto_review", label: "Automatic reviewer" },
-] as const;
+const reviewerOptions: readonly UiOption<NonNullable<EditableCodexConfig["approvals_reviewer"]>>[] =
+  [
+    { value: "user", label: "Me" },
+    { value: "auto_review", label: "Automatic reviewer" },
+  ];
 
-const sandboxOptions = [
+const sandboxOptions: readonly UiOption<NonNullable<EditableCodexConfig["sandbox_mode"]>>[] = [
   { value: "read-only", label: "Read only" },
   { value: "workspace-write", label: "Workspace write" },
   { value: "danger-full-access", label: "Full access" },
-] as const;
+];
 
-const searchOptions = [
+const searchOptions: readonly UiOption<NonNullable<EditableCodexConfig["web_search"]>>[] = [
   { value: "disabled", label: "Disabled" },
   { value: "cached", label: "Cached" },
   { value: "indexed", label: "Indexed" },
   { value: "live", label: "Live" },
-] as const;
+];
 
-const summaryOptions = [
+const summaryOptions: readonly UiOption<
+  NonNullable<EditableCodexConfig["model_reasoning_summary"]>
+>[] = [
   { value: "auto", label: "Automatic" },
   { value: "concise", label: "Concise" },
   { value: "detailed", label: "Detailed" },
   { value: "none", label: "None" },
-] as const;
+];
 
-const verbosityOptions = [
+const verbosityOptions: readonly UiOption<NonNullable<EditableCodexConfig["model_verbosity"]>>[] = [
   { value: "low", label: "Low" },
   { value: "medium", label: "Medium" },
   { value: "high", label: "High" },
-] as const;
+];
 
-const personalityOptions = [
+const personalityOptions: readonly UiOption<NonNullable<EditableCodexConfig["personality"]>>[] = [
   { value: "none", label: "None" },
   { value: "friendly", label: "Friendly" },
   { value: "pragmatic", label: "Pragmatic" },
-] as const;
+];
 
-const windowsSandboxOptions = [
+const windowsSandboxOptions: readonly UiOption<
+  NonNullable<EditableCodexConfig["windows_sandbox"]>
+>[] = [
   { value: "elevated", label: "Elevated" },
   { value: "unelevated", label: "Unelevated" },
-] as const;
-
-const granularApprovalKeys = [
-  "sandbox_approval",
-  "rules",
-  "skill_approval",
-  "request_permissions",
-  "mcp_elicitations",
-] as const satisfies readonly (keyof GranularApproval)[];
+];
 
 const defaultGranularApproval: GranularApproval = {
   sandbox_approval: true,
@@ -348,25 +182,42 @@ const defaultGranularApproval: GranularApproval = {
   mcp_elicitations: true,
 };
 
-const editableKeys = [
-  "model_provider",
-  "model",
-  "model_reasoning_effort",
-  "model_reasoning_summary",
-  "model_verbosity",
-  "service_tier",
-  "personality",
-  "approval_policy",
-  "approvals_reviewer",
-  "sandbox_mode",
-  "default_permissions",
-  "web_search",
-  "windows_sandbox",
-  "shell_environment_include_only",
-  "features",
-] as const satisfies readonly (keyof ClientEditableCodexConfig)[];
-
 const webApp = window.Telegram?.WebApp;
+const telegramReady = webApp !== undefined && webApp.initData.length > 0;
+
+interface AsyncState<Value> {
+  readonly value?: Value | undefined;
+  readonly error?: string | undefined;
+}
+
+/**
+ * Shared fetch effect: clears its state and reloads when the dependencies
+ * change, dropping results from superseded attempts. A missing loader keeps
+ * the state empty.
+ */
+function useAsync<Value>(
+  load: (() => Promise<Value>) | undefined,
+  deps: readonly unknown[],
+): AsyncState<Value> {
+  const [state, setState] = useState<AsyncState<Value>>({});
+  useEffect(() => {
+    setState({});
+    if (load === undefined) return;
+    let active = true;
+    load()
+      .then((value) => {
+        if (active) setState({ value });
+      })
+      .catch((error: unknown) => {
+        if (active) setState({ error: messageOf(error) });
+      });
+    return () => {
+      active = false;
+    };
+    // biome-ignore lint/correctness/useExhaustiveDependencies: the caller owns the dependency list.
+  }, deps);
+  return state;
+}
 
 function SettingsApp(): ReactElement {
   const [appearance, setAppearance] = useState<"dark" | "light">(webApp?.colorScheme ?? "light");
@@ -375,13 +226,12 @@ function SettingsApp(): ReactElement {
   const [snapshot, setSnapshot] = useState<LoadedSnapshot>();
   const [draft, setDraft] = useState<ConfigDraft>();
   const [remoteClientContext, setRemoteClientContext] = useState(true);
-  const [loadError, setLoadError] = useState<string>();
   const [saving, setSaving] = useState(false);
   const [runtimeAction, setRuntimeAction] = useState<"reload" | "restart">();
-  const [validation, setValidation] = useState<ValidationResult>({ valid: true, issues: [] });
+  const [validation, setValidation] = useState<ConfigValidationResult>({ valid: true, issues: [] });
   const [validating, setValidating] = useState(false);
   const [notice, setNotice] = useState("Settings are up to date.");
-  const [usage, setUsage] = useState<UsageLimits>();
+  const [usage, setUsage] = useState<CodexUsageLimits>();
   const [usageError, setUsageError] = useState<string>();
   const [usageRefreshing, setUsageRefreshing] = useState(false);
   const [bankedResetsExpanded, setBankedResetsExpanded] = useState(false);
@@ -399,44 +249,43 @@ function SettingsApp(): ReactElement {
     return () => webApp.offEvent("themeChanged", handleThemeChanged);
   }, []);
 
-  useEffect(() => {
-    const requestedAttempt = loadAttempt;
-    if (webApp === undefined || webApp.initData.length === 0) {
-      setLoadError("Open this settings page from the bot in Telegram.");
-      return;
-    }
-    let active = true;
-    setLoadError(undefined);
-    void requestSnapshot("GET")
-      .then((loaded) => {
-        if (!active || requestedAttempt !== loadAttempt) return;
-        setSnapshot(loaded);
-        setDraft(draftFromConfig(loaded.values));
-        setRemoteClientContext(loaded.telex.remoteClientContext);
-        setValidation(loaded.validation);
-        setNotice("Settings are up to date.");
-      })
-      .catch((error: unknown) => {
-        if (active) setLoadError(messageOf(error));
-      });
-    return () => {
-      active = false;
-    };
-  }, [loadAttempt]);
+  const snapshotLoad = useAsync(telegramReady ? () => requestSnapshot("GET") : undefined, [
+    loadAttempt,
+  ]);
+  const loadError = telegramReady
+    ? snapshotLoad.error
+    : "Open this settings page from the bot in Telegram.";
 
-  const refreshUsage = async (): Promise<void> => {
-    setUsageRefreshing(true);
+  useEffect(() => {
+    const loaded = snapshotLoad.value;
+    if (loaded === undefined) return;
+    setSnapshot(loaded);
+    setDraft(draftFromConfig(loaded.values));
+    setRemoteClientContext(loaded.telex.remoteClientContext);
+    setValidation(loaded.validation);
+    setNotice("Settings are up to date.");
+  }, [snapshotLoad.value]);
+
+  const refreshUsage = useCallback(async (showRefreshing = true): Promise<void> => {
+    if (showRefreshing) setUsageRefreshing(true);
     try {
       setUsage(await requestUsage());
       setUsageError(undefined);
     } catch (error) {
       setUsageError(messageOf(error));
     } finally {
-      setUsageRefreshing(false);
+      if (showRefreshing) setUsageRefreshing(false);
     }
-  };
+  }, []);
 
-  const chooseBankedReset = (credit: BankedReset): void => {
+  useEffect(() => {
+    if (!telegramReady) return;
+    void refreshUsage();
+    const timer = window.setInterval(() => void refreshUsage(false), 60_000);
+    return () => window.clearInterval(timer);
+  }, [refreshUsage]);
+
+  const chooseBankedReset = (credit: CodexBankedReset): void => {
     setResetError(undefined);
     setResetConfirmation({
       credit,
@@ -486,31 +335,6 @@ function SettingsApp(): ReactElement {
       setResetApplying(false);
     }
   };
-
-  useEffect(() => {
-    if (webApp === undefined || webApp.initData.length === 0) return;
-    let active = true;
-    const load = async (): Promise<void> => {
-      try {
-        const next = await requestUsage();
-        if (active) {
-          setUsage(next);
-          setUsageError(undefined);
-        }
-      } catch (error) {
-        if (active) setUsageError(messageOf(error));
-      } finally {
-        if (active) setUsageRefreshing(false);
-      }
-    };
-    setUsageRefreshing(true);
-    void load();
-    const timer = window.setInterval(() => void load(), 60_000);
-    return () => {
-      active = false;
-      window.clearInterval(timer);
-    };
-  }, []);
 
   const normalizedValues = useMemo(
     () => (draft === undefined ? undefined : configFromDraft(draft)),
@@ -611,22 +435,13 @@ function SettingsApp(): ReactElement {
     event.preventDefault();
     if (!dirty || snapshot === undefined || saving || runtimeAction !== undefined) return;
     setSaving(true);
-    setNotice("Checking and saving…");
+    setNotice("Saving…");
     try {
       const body = {
         expectedVersion: snapshot.version,
         values: changes,
         ...(remoteClientContextDirty ? { telex: { remoteClientContext } } : {}),
       };
-      const result = configDirty
-        ? await requestValidation({ expectedVersion: snapshot.version, values: changes })
-        : { valid: true, issues: [] };
-      setValidation(result);
-      if (!result.valid) {
-        setNotice("Fix the highlighted settings before saving.");
-        webApp?.HapticFeedback?.notificationOccurred("warning");
-        return;
-      }
       const loaded = await requestSnapshot("PUT", body);
       setSnapshot(loaded);
       setDraft(draftFromConfig(loaded.values));
@@ -709,158 +524,97 @@ function SettingsApp(): ReactElement {
           updateRemoteClientContext: setRemoteClientContext,
         });
 
-  return h(
-    AppRoot,
-    { appearance, className: "appRoot" },
-    activeTab === "settings" ? settingsContent : h(SkillsBrowser),
-    resetConfirmation === undefined
-      ? undefined
-      : h(ResetConfirmationDialog, {
-          confirmation: resetConfirmation,
-          applying: resetApplying,
-          error: resetError,
-          onCancel: closeResetConfirmation,
-          onApply: applyBankedReset,
-        }),
-    h(
-      Tabbar,
-      {
-        className: "mainTabbar",
-        "aria-label": "Main navigation",
-      },
-      h(
-        Tabbar.Item,
-        {
-          selected: activeTab === "settings",
-          text: "Settings",
-          onClick: () => setActiveTab("settings"),
-          "aria-label": "Settings",
-        },
-        tabIcon("settings"),
-      ),
-      h(
-        Tabbar.Item,
-        {
-          selected: activeTab === "skills",
-          text: "Skills",
-          onClick: () => setActiveTab("skills"),
-          "aria-label": "Skills",
-        },
-        tabIcon("skills"),
-      ),
-    ),
+  return (
+    <AppRoot appearance={appearance} className="appRoot">
+      {activeTab === "settings" ? settingsContent : <SkillsBrowser />}
+      {resetConfirmation === undefined ? undefined : (
+        <ResetConfirmationDialog
+          confirmation={resetConfirmation}
+          applying={resetApplying}
+          error={resetError}
+          onCancel={closeResetConfirmation}
+          onApply={applyBankedReset}
+        />
+      )}
+      <Tabbar aria-label="Main navigation">
+        <Tabbar.Item
+          selected={activeTab === "settings"}
+          text="Settings"
+          onClick={() => setActiveTab("settings")}
+          aria-label="Settings"
+        >
+          {tabIcon("settings")}
+        </Tabbar.Item>
+        <Tabbar.Item
+          selected={activeTab === "skills"}
+          text="Skills"
+          onClick={() => setActiveTab("skills")}
+          aria-label="Skills"
+        >
+          {tabIcon("skills")}
+        </Tabbar.Item>
+      </Tabbar>
+    </AppRoot>
   );
 }
 
 function SkillsBrowser(): ReactElement {
   const [loadAttempt, setLoadAttempt] = useState(0);
-  const [skills, setSkills] = useState<readonly AvailableSkill[]>();
-  const [loadError, setLoadError] = useState<string>();
   const [selectedSkill, setSelectedSkill] = useState<AvailableSkill>();
-  const [skillDocument, setSkillDocument] = useState<SkillFile>();
-  const [skillDocumentError, setSkillDocumentError] = useState<string>();
   const [directoryPath, setDirectoryPath] = useState("");
-  const [directory, setDirectory] = useState<SkillDirectory>();
-  const [directoryError, setDirectoryError] = useState<string>();
   const [selectedFilePath, setSelectedFilePath] = useState<string>();
-  const [selectedFile, setSelectedFile] = useState<SkillFile>();
-  const [selectedFileError, setSelectedFileError] = useState<string>();
 
-  useEffect(() => {
-    const requestedAttempt = loadAttempt;
-    let active = true;
-    setSkills(undefined);
-    setLoadError(undefined);
-    void requestSkills()
-      .then((available) => {
-        if (active && requestedAttempt === loadAttempt) setSkills(available);
-      })
-      .catch((error: unknown) => {
-        if (active && requestedAttempt === loadAttempt) setLoadError(messageOf(error));
-      });
-    return () => {
-      active = false;
-    };
-  }, [loadAttempt]);
-
-  useEffect(() => {
-    if (selectedSkill === undefined) return;
-    let active = true;
-    setSkillDocument(undefined);
-    setSkillDocumentError(undefined);
-    void requestSkillResource(selectedSkill.name, "SKILL.md")
-      .then((resource) => {
-        if (!active) return;
-        if (resource.type !== "file" || resource.encoding !== "utf8") {
-          throw new Error("SKILL.md is not a readable text file.");
-        }
-        setSkillDocument(resource);
-      })
-      .catch((error: unknown) => {
-        if (active) setSkillDocumentError(messageOf(error));
-      });
-    return () => {
-      active = false;
-    };
-  }, [selectedSkill]);
-
-  useEffect(() => {
-    if (selectedSkill === undefined) return;
-    let active = true;
-    setDirectory(undefined);
-    setDirectoryError(undefined);
-    void requestSkillResource(selectedSkill.name, directoryPath)
-      .then((resource) => {
-        if (!active) return;
-        if (resource.type !== "directory") throw new Error("This path is not a directory.");
-        setDirectory(resource);
-      })
-      .catch((error: unknown) => {
-        if (active) setDirectoryError(messageOf(error));
-      });
-    return () => {
-      active = false;
-    };
-  }, [directoryPath, selectedSkill]);
-
-  useEffect(() => {
-    if (selectedSkill === undefined || selectedFilePath === undefined) return;
-    let active = true;
-    setSelectedFile(undefined);
-    setSelectedFileError(undefined);
-    void requestSkillResource(selectedSkill.name, selectedFilePath)
-      .then((resource) => {
-        if (!active) return;
-        if (resource.type !== "file") throw new Error("This path is not a file.");
-        setSelectedFile(resource);
-      })
-      .catch((error: unknown) => {
-        if (active) setSelectedFileError(messageOf(error));
-      });
-    return () => {
-      active = false;
-    };
-  }, [selectedFilePath, selectedSkill]);
+  const skillsLoad = useAsync(requestSkills, [loadAttempt]);
+  const documentLoad = useAsync(
+    selectedSkill === undefined
+      ? undefined
+      : async (): Promise<SkillFile> => {
+          const resource = await requestSkillResource(selectedSkill.name, "SKILL.md");
+          if (resource.type !== "file" || resource.encoding !== "utf8") {
+            throw new Error("SKILL.md is not a readable text file.");
+          }
+          return resource;
+        },
+    [selectedSkill],
+  );
+  const directoryLoad = useAsync(
+    selectedSkill === undefined
+      ? undefined
+      : async (): Promise<SkillDirectory> => {
+          const resource = await requestSkillResource(selectedSkill.name, directoryPath);
+          if (resource.type !== "directory") throw new Error("This path is not a directory.");
+          return resource;
+        },
+    [directoryPath, selectedSkill],
+  );
+  const fileLoad = useAsync(
+    selectedSkill === undefined || selectedFilePath === undefined
+      ? undefined
+      : async (): Promise<SkillFile> => {
+          const resource = await requestSkillResource(selectedSkill.name, selectedFilePath);
+          if (resource.type !== "file") throw new Error("This path is not a file.");
+          return resource;
+        },
+    [selectedFilePath, selectedSkill],
+  );
 
   const openSkill = (skill: AvailableSkill): void => {
     setSelectedSkill(skill);
     setDirectoryPath("");
     setSelectedFilePath(undefined);
-    setSelectedFile(undefined);
-    setSelectedFileError(undefined);
   };
 
   if (selectedSkill !== undefined) {
     return renderSkillDetail({
       skill: selectedSkill,
-      skillDocument,
-      skillDocumentError,
+      skillDocument: documentLoad.value,
+      skillDocumentError: documentLoad.error,
       directoryPath,
-      directory,
-      directoryError,
+      directory: directoryLoad.value,
+      directoryError: directoryLoad.error,
       selectedFilePath,
-      selectedFile,
-      selectedFileError,
+      selectedFile: fileLoad.value,
+      selectedFileError: fileLoad.error,
       onBack: () => setSelectedSkill(undefined),
       onDirectory: (path) => {
         setDirectoryPath(path);
@@ -870,77 +624,71 @@ function SkillsBrowser(): ReactElement {
     });
   }
 
+  const skills = skillsLoad.value;
   if (skills === undefined) {
-    if (loadError !== undefined) {
-      return h(
-        "div",
-        { className: "loadingRoot tabbedLoadingRoot" },
-        h(Placeholder, {
-          header: "Couldn’t load skills",
-          description: loadError,
-          action: h(
-            Button,
-            { mode: "filled", onClick: () => setLoadAttempt((attempt) => attempt + 1) },
-            "Try again",
-          ),
-        }),
+    if (skillsLoad.error !== undefined) {
+      return (
+        <div className="loadingRoot tabbedLoadingRoot">
+          <Placeholder
+            header="Couldn’t load skills"
+            description={skillsLoad.error}
+            action={
+              <Button onClick={() => setLoadAttempt((attempt) => attempt + 1)}>Try again</Button>
+            }
+          />
+        </div>
       );
     }
-    return h(
-      "div",
-      { className: "loadingRoot tabbedLoadingRoot" },
-      h(
-        Placeholder,
-        {
-          header: "Loading Codex skills",
-          description: "Reading the skills currently available to this workspace…",
-        },
-        h(Spinner, { size: "l" }),
-      ),
+    return (
+      <div className="loadingRoot tabbedLoadingRoot">
+        <Placeholder
+          header="Loading Codex skills"
+          description="Reading the skills currently available to this workspace…"
+        >
+          <Spinner size="l" />
+        </Placeholder>
+      </div>
     );
   }
 
-  return h(
-    "main",
-    { className: "page skillsPage" },
-    h(
-      "header",
-      { className: "pageHeader" },
-      h(
-        "div",
-        null,
-        h(Headline, { Component: "h1" }, "Skills"),
-        h(Caption, { className: "pageSubtitle" }, "Available to Codex in this workspace"),
-      ),
-      h(Caption, { className: "revision" }, String(skills.length)),
-    ),
-    skills.length === 0
-      ? h(Placeholder, {
-          header: "No skills available",
-          description: "Reload Codex after installing or enabling a skill.",
-        })
-      : h(
-          Section,
-          {
-            header: `${skills.length} ${skills.length === 1 ? "skill" : "skills"}`,
-            footer: "Open a skill to read its instructions and browse its bundled files.",
-          },
-          ...skills.map((skill) =>
-            h(
-              Cell,
-              {
-                key: skill.name,
-                Component: "button",
-                className: "skillCell",
-                subtitle: skill.description,
-                multiline: true,
-                after: h("span", { className: "cellChevron", "aria-hidden": "true" }, "›"),
-                onClick: () => openSkill(skill),
-              },
-              skill.name,
-            ),
-          ),
-        ),
+  return (
+    <main className="page skillsPage">
+      <header className="pageHeader">
+        <div>
+          <Headline Component="h1">Skills</Headline>
+          <Caption className="pageSubtitle">Available to Codex in this workspace</Caption>
+        </div>
+        <Caption className="revision">{String(skills.length)}</Caption>
+      </header>
+      {skills.length === 0 ? (
+        <Placeholder
+          header="No skills available"
+          description="Reload Codex after installing or enabling a skill."
+        />
+      ) : (
+        <Section
+          header={`${skills.length} ${skills.length === 1 ? "skill" : "skills"}`}
+          footer="Open a skill to read its instructions and browse its bundled files."
+        >
+          {skills.map((skill) => (
+            <Cell
+              key={skill.name}
+              className="skillCell"
+              subtitle={skill.description}
+              multiline
+              after={
+                <span className="cellChevron" aria-hidden="true">
+                  ›
+                </span>
+              }
+              onClick={() => openSkill(skill)}
+            >
+              {skill.name}
+            </Cell>
+          ))}
+        </Section>
+      )}
+    </main>
   );
 }
 
@@ -961,141 +709,130 @@ interface SkillDetailOptions {
 
 function renderSkillDetail(options: SkillDetailOptions): ReactElement {
   const parentPath = parentDirectory(options.directoryPath);
-  return h(
-    "main",
-    { className: "page skillsPage" },
-    h(
-      "header",
-      { className: "skillDetailHeader" },
-      h(
-        Button,
-        { mode: "plain", size: "s", onClick: options.onBack, "aria-label": "Back to skills" },
-        "‹ Skills",
-      ),
-      h(Headline, { Component: "h1" }, options.skill.name),
-      h(Caption, { className: "pageSubtitle" }, options.skill.description),
-    ),
-    h(
-      "div",
-      { className: "sectionStack" },
-      h(
-        Section,
-        {
-          header: "SKILL.md",
-          footer: "These are the instructions Codex reads when the skill is selected.",
-        },
-        options.skillDocumentError === undefined
-          ? options.skillDocument === undefined
-            ? h("div", { className: "resourceLoading" }, h(Spinner, { size: "m" }))
-            : renderMarkdownPreview(options.skillDocument.content, true)
-          : h(Banner, {
-              type: "inline",
-              header: "Couldn’t read SKILL.md",
-              subheader: options.skillDocumentError,
-            }),
-      ),
-      h(
-        Section,
-        {
-          header: options.directoryPath.length === 0 ? "Files" : options.directoryPath,
-          footer:
-            "Folders, scripts, references, images, and other resources bundled with this skill.",
-        },
-        options.directoryPath.length === 0
-          ? undefined
-          : h(
-              Cell,
-              {
-                Component: "button",
-                className: "skillCell",
-                before: h("span", { className: "fileIcon", "aria-hidden": "true" }, "↰"),
-                onClick: () => options.onDirectory(parentPath),
-              },
-              parentPath.length === 0 ? "Skill root" : parentPath,
-            ),
-        options.directoryError === undefined
-          ? options.directory === undefined
-            ? h("div", { className: "resourceLoading" }, h(Spinner, { size: "m" }))
-            : options.directory.entries.length === 0
-              ? h(Caption, { className: "emptyDirectory" }, "This folder is empty.")
-              : options.directory.entries.map((entry) =>
-                  h(
-                    Cell,
-                    {
-                      key: entry.path,
-                      Component: "button",
-                      className: "skillCell",
-                      before: h(
-                        "span",
-                        { className: "fileIcon", "aria-hidden": "true" },
-                        entry.type === "directory" ? "▸" : "·",
-                      ),
-                      subtitle:
-                        entry.type === "file" && entry.size !== null
-                          ? formatBytes(entry.size)
-                          : undefined,
-                      after: h("span", { className: "cellChevron", "aria-hidden": "true" }, "›"),
-                      onClick: () =>
-                        entry.type === "directory"
-                          ? options.onDirectory(entry.path)
-                          : options.onFile(entry.path),
-                    },
-                    entry.name,
-                  ),
-                )
-          : h(Banner, {
-              type: "inline",
-              header: "Couldn’t open this folder",
-              subheader: options.directoryError,
-            }),
-      ),
-      options.selectedFilePath === undefined
-        ? undefined
-        : h(
-            Section,
-            {
-              header: options.selectedFilePath,
-              footer:
-                options.selectedFile === undefined
-                  ? undefined
-                  : `${formatBytes(options.selectedFile.size)} · ${options.selectedFile.mediaType}`,
-            },
-            renderFilePreview(options.selectedFile, options.selectedFileError),
-          ),
-    ),
+  return (
+    <main className="page skillsPage">
+      <header className="skillDetailHeader">
+        <Button mode="plain" size="s" onClick={options.onBack} aria-label="Back to skills">
+          ‹ Skills
+        </Button>
+        <Headline Component="h1">{options.skill.name}</Headline>
+        <Caption className="pageSubtitle">{options.skill.description}</Caption>
+      </header>
+      <div className="sectionStack">
+        <Section
+          header="SKILL.md"
+          footer="These are the instructions Codex reads when the skill is selected."
+        >
+          {options.skillDocumentError !== undefined ? (
+            <Banner header="Couldn’t read SKILL.md" subheader={options.skillDocumentError} />
+          ) : options.skillDocument === undefined ? (
+            <div className="resourceLoading">
+              <Spinner />
+            </div>
+          ) : (
+            renderMarkdownPreview(options.skillDocument.content, true)
+          )}
+        </Section>
+        <Section
+          header={options.directoryPath.length === 0 ? "Files" : options.directoryPath}
+          footer="Folders, scripts, references, images, and other resources bundled with this skill."
+        >
+          {options.directoryPath.length === 0 ? undefined : (
+            <Cell
+              className="skillCell"
+              before={
+                <span className="fileIcon" aria-hidden="true">
+                  ↰
+                </span>
+              }
+              onClick={() => options.onDirectory(parentPath)}
+            >
+              {parentPath.length === 0 ? "Skill root" : parentPath}
+            </Cell>
+          )}
+          {options.directoryError !== undefined ? (
+            <Banner header="Couldn’t open this folder" subheader={options.directoryError} />
+          ) : options.directory === undefined ? (
+            <div className="resourceLoading">
+              <Spinner />
+            </div>
+          ) : options.directory.entries.length === 0 ? (
+            <Caption className="emptyDirectory">This folder is empty.</Caption>
+          ) : (
+            options.directory.entries.map((entry) => (
+              <Cell
+                key={entry.path}
+                className="skillCell"
+                before={
+                  <span className="fileIcon" aria-hidden="true">
+                    {entry.type === "directory" ? "▸" : "·"}
+                  </span>
+                }
+                subtitle={
+                  entry.type === "file" && entry.size !== null ? formatBytes(entry.size) : undefined
+                }
+                after={
+                  <span className="cellChevron" aria-hidden="true">
+                    ›
+                  </span>
+                }
+                onClick={() =>
+                  entry.type === "directory"
+                    ? options.onDirectory(entry.path)
+                    : options.onFile(entry.path)
+                }
+              >
+                {entry.name}
+              </Cell>
+            ))
+          )}
+        </Section>
+        {options.selectedFilePath === undefined ? undefined : (
+          <Section
+            header={options.selectedFilePath}
+            footer={
+              options.selectedFile === undefined
+                ? undefined
+                : `${formatBytes(options.selectedFile.size)} · ${options.selectedFile.mediaType}`
+            }
+          >
+            {renderFilePreview(options.selectedFile, options.selectedFileError)}
+          </Section>
+        )}
+      </div>
+    </main>
   );
 }
 
 function renderFilePreview(file: SkillFile | undefined, error: string | undefined): ReactElement {
   if (error !== undefined) {
-    return h(Banner, {
-      type: "inline",
-      header: "Couldn’t preview this file",
-      subheader: error,
-    });
+    return <Banner header="Couldn’t preview this file" subheader={error} />;
   }
   if (file === undefined) {
-    return h("div", { className: "resourceLoading" }, h(Spinner, { size: "m" }));
-  }
-  if (file.encoding === "utf8") {
-    return file.mediaType === "text/markdown" || file.path.toLowerCase().endsWith(".md")
-      ? renderMarkdownPreview(file.content)
-      : h("pre", { className: "skillSource" }, file.content);
-  }
-  if (file.mediaType.startsWith("image/")) {
-    return h(
-      "div",
-      { className: "imagePreview" },
-      h("img", {
-        src: `data:${file.mediaType};base64,${file.content}`,
-        alt: file.path,
-      }),
+    return (
+      <div className="resourceLoading">
+        <Spinner />
+      </div>
     );
   }
-  return h(
-    Caption,
-    { className: "binaryPreview" },
-    "This binary file can be browsed, but it cannot be previewed in the Mini App.",
+  if (file.encoding === "utf8") {
+    return file.mediaType === "text/markdown" || file.path.toLowerCase().endsWith(".md") ? (
+      renderMarkdownPreview(file.content)
+    ) : (
+      <pre className="skillSource">{file.content}</pre>
+    );
+  }
+  if (file.mediaType.startsWith("image/")) {
+    return (
+      <div className="imagePreview">
+        <img src={`data:${file.mediaType};base64,${file.content}`} alt={file.path} />
+      </div>
+    );
+  }
+  return (
+    <Caption className="binaryPreview">
+      This binary file can be browsed, but it cannot be previewed in the Mini App.
+    </Caption>
   );
 }
 
@@ -1103,43 +840,39 @@ function renderMarkdownPreview(content: string, stripFrontmatter = false): React
   const markdown = stripFrontmatter
     ? content.replace(/^---\r?\n[\s\S]*?\r?\n---\r?\n?/, "")
     : content;
-  return h(
-    "div",
-    { className: "markdown" },
-    h(ReactMarkdown, { remarkPlugins: [remarkGfm] }, markdown),
+  return (
+    <div className="markdown">
+      <ReactMarkdown remarkPlugins={[remarkGfm]}>{markdown}</ReactMarkdown>
+    </div>
   );
 }
 
 function tabIcon(kind: "settings" | "skills"): ReactElement {
-  return h(
-    "svg",
-    {
-      width: 28,
-      height: 28,
-      viewBox: "0 0 28 28",
-      fill: "none",
-      stroke: "currentColor",
-      strokeWidth: 2,
-      strokeLinecap: "round",
-      strokeLinejoin: "round",
-      "aria-hidden": "true",
-    },
-    ...(kind === "settings"
-      ? [
-          h("path", { key: "a", d: "M5 8h18M5 20h18M9 5v6M19 17v6" }),
-          h("circle", { key: "b", cx: 9, cy: 8, r: 2 }),
-          h("circle", { key: "c", cx: 19, cy: 20, r: 2 }),
-        ]
-      : [
-          h("path", {
-            key: "a",
-            d: "M14 3l1.8 6.2L22 11l-6.2 1.8L14 19l-1.8-6.2L6 11l6.2-1.8L14 3z",
-          }),
-          h("path", {
-            key: "b",
-            d: "M21.5 18l.8 2.7L25 21.5l-2.7.8-.8 2.7-.8-2.7-2.7-.8 2.7-.8.8-2.7z",
-          }),
-        ]),
+  return (
+    <svg
+      width={28}
+      height={28}
+      viewBox="0 0 28 28"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={2}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      {kind === "settings" ? (
+        <>
+          <path d="M5 8h18M5 20h18M9 5v6M19 17v6" />
+          <circle cx={9} cy={8} r={2} />
+          <circle cx={19} cy={20} r={2} />
+        </>
+      ) : (
+        <>
+          <path d="M14 3l1.8 6.2L22 11l-6.2 1.8L14 19l-1.8-6.2L6 11l6.2-1.8L14 3z" />
+          <path d="M21.5 18l.8 2.7L25 21.5l-2.7.8-.8 2.7-.8-2.7-2.7-.8 2.7-.8.8-2.7z" />
+        </>
+      )}
+    </svg>
   );
 }
 
@@ -1159,13 +892,13 @@ interface FormRenderOptions {
   readonly snapshot: LoadedSnapshot;
   readonly draft: ConfigDraft;
   readonly remoteClientContext: boolean;
-  readonly issues: readonly ValidationIssue[];
+  readonly issues: readonly ConfigValidationIssue[];
   readonly dirty: boolean;
   readonly saving: boolean;
   readonly validating: boolean;
   readonly runtimeAction: "reload" | "restart" | undefined;
   readonly notice: string;
-  readonly usage: UsageLimits | undefined;
+  readonly usage: CodexUsageLimits | undefined;
   readonly usageError: string | undefined;
   readonly usageRefreshing: boolean;
   readonly bankedResetsExpanded: boolean;
@@ -1174,7 +907,7 @@ interface FormRenderOptions {
   readonly onRuntimeAction: (action: "reload" | "restart") => Promise<void>;
   readonly onRefreshUsage: () => Promise<void>;
   readonly onToggleBankedResets: () => void;
-  readonly onChooseBankedReset: (credit: BankedReset) => void;
+  readonly onChooseBankedReset: (credit: CodexBankedReset) => void;
   readonly updateScalar: (key: ScalarDraftKey, value: string) => void;
   readonly updateModel: (value: string) => void;
   readonly updateGranularApproval: (key: keyof GranularApproval, value: boolean) => void;
@@ -1195,9 +928,9 @@ function renderForm(options: FormRenderOptions): ReactElement {
     selectedModel?.serviceTiers.map((tier) => ({ value: tier.id, label: tier.name })) ?? [];
   const serviceTierOptions = [{ value: "", label: "Standard" }, ...serviceTiers];
   const allowedApprovalPolicies = approvalModeSet(requirements?.allowedApprovalPolicies);
-  const allowedSandboxModes = stringSet(requirements?.allowedSandboxModes);
-  const allowedSearchModes = stringSet(requirements?.allowedWebSearchModes);
-  const allowedWindowsSandboxes = stringSet(requirements?.allowedWindowsSandboxImplementations);
+  const allowedSandboxModes = valueSet(requirements?.allowedSandboxModes);
+  const allowedSearchModes = valueSet(requirements?.allowedWebSearchModes);
+  const allowedWindowsSandboxes = valueSet(requirements?.allowedWindowsSandboxImplementations);
   const issueSummary = renderIssueSummary(issues);
 
   const usageSection = renderUsageSection(
@@ -1211,109 +944,79 @@ function renderForm(options: FormRenderOptions): ReactElement {
     options.onChooseBankedReset,
   );
   const runtime = snapshot.runtime;
-  const runtimeComponents = [
-    ["Config", runtime.config],
-    ["MCP", runtime.mcp],
-    ["Skills", runtime.skills],
-  ] as const;
-  const runtimeDetail =
-    runtime.lastError ??
-    runtimeComponents
-      .map(([label, component]) =>
-        component?.message === null || component?.message === undefined
-          ? undefined
-          : `${label}: ${component.message}`,
-      )
-      .filter(isDefined)
-      .join(" · ");
   const runtimeControlsDisabled = options.dirty || options.runtimeAction !== undefined;
-  const runtimeSection = h(
-    Section,
-    {
-      header: "Codex runtime",
-      footer: options.dirty
-        ? "Save the draft before applying it to Codex."
-        : "Reload uses Codex's native config, MCP, and skill refresh APIs. MCP changes become active on the next turn.",
-    },
-    h(
-      "div",
-      { className: "runtimePanel" },
-      h(
-        "div",
-        { className: "runtimeSummary" },
-        h("span", {
-          className: `runtimeDot runtimeDot-${runtime.restartRequired ? "degraded" : runtime.state}`,
-          "aria-hidden": "true",
-        }),
-        h(
-          "div",
-          { className: "runtimeCopy" },
-          h("strong", null, runtimeStateLabel(runtime)),
-          h(
-            Caption,
-            { className: "runtimeDetail" },
-            runtimeDetail.length > 0
-              ? runtimeDetail
-              : runtime.configPath === null
-                ? "Runtime configuration is loaded."
-                : `Watching ${runtime.configPath}`,
-          ),
-        ),
-      ),
-      h(
-        "div",
-        { className: "runtimeActions" },
-        h(
-          Button,
-          {
-            type: "button",
-            mode: "bezeled",
-            size: "s",
-            loading: options.runtimeAction === "reload",
-            disabled: runtimeControlsDisabled,
-            onClick: () => void options.onRuntimeAction("reload"),
-          },
-          "Apply changes",
-        ),
-        h(
-          Button,
-          {
-            type: "button",
-            mode: "bezeled",
-            size: "s",
-            loading: options.runtimeAction === "restart",
-            disabled: runtimeControlsDisabled,
-            onClick: () => void options.onRuntimeAction("restart"),
-          },
-          "Restart Codex",
-        ),
-      ),
-    ),
+  const runtimeSection = (
+    <Section
+      header="Codex runtime"
+      footer={
+        options.dirty
+          ? "Save the draft before applying it to Codex."
+          : "Reload uses Codex's native config, MCP, and skill refresh APIs. MCP changes become active on the next turn."
+      }
+    >
+      <div className="runtimePanel">
+        <div className="runtimeSummary">
+          <span
+            className={`runtimeDot runtimeDot-${runtime.restartRequired ? "degraded" : runtime.state}`}
+            aria-hidden="true"
+          />
+          <div className="runtimeCopy">
+            <strong>{runtimeStateLabel(runtime)}</strong>
+            <Caption className="runtimeDetail">
+              {runtime.lastError ??
+                (runtime.restartRequired
+                  ? "Restart Codex to apply startup-only changes."
+                  : "Runtime configuration is loaded.")}
+            </Caption>
+          </div>
+        </div>
+        <div className="runtimeActions">
+          <Button
+            type="button"
+            mode="bezeled"
+            size="s"
+            loading={options.runtimeAction === "reload"}
+            disabled={runtimeControlsDisabled}
+            onClick={() => void options.onRuntimeAction("reload")}
+          >
+            Apply changes
+          </Button>
+          <Button
+            type="button"
+            mode="bezeled"
+            size="s"
+            loading={options.runtimeAction === "restart"}
+            disabled={runtimeControlsDisabled}
+            onClick={() => void options.onRuntimeAction("restart")}
+          >
+            Restart Codex
+          </Button>
+        </div>
+      </div>
+    </Section>
   );
 
-  const telexSection = h(
-    Section,
-    {
-      header: "Remote connection",
-      footer: "Enabled by default; Telex detects the current connector for each turn.",
-    },
-    toggleField({
-      draftKey: "telex.remoteClientContext",
-      configPath: "telex.remoteClientContext",
-      label: "Remote session context",
-      description:
-        "Tell Codex that you are connected remotely, so it avoids host-local UI and localhost handoffs.",
-      checked: options.remoteClientContext,
-      disabled: false,
-      issues: [],
-      fieldId: "telex-remote-client-context",
-      onChange: options.updateRemoteClientContext,
-    }),
+  const telexSection = (
+    <Section
+      header="Remote connection"
+      footer="Enabled by default; Telex detects the current connector for each turn."
+    >
+      {toggleField({
+        draftKey: "telex.remoteClientContext",
+        label: "Remote session context",
+        description:
+          "Tell Codex that you are connected remotely, so it avoids host-local UI and localhost handoffs.",
+        checked: options.remoteClientContext,
+        disabled: false,
+        issues: [],
+        fieldId: "telex-remote-client-context",
+        onChange: options.updateRemoteClientContext,
+      })}
+    </Section>
   );
 
   const modelField = selectField({
     draftKey: "model",
-    configPath: "model",
     label: "Model",
     description: selectedModel?.description ?? "The model Codex uses for new conversations.",
     value: selectedModel?.model ?? draft.model,
@@ -1330,17 +1033,14 @@ function renderForm(options: FormRenderOptions): ReactElement {
     (value) => updateScalar("model_reasoning_effort", value),
   );
 
-  const modelSection = h(
-    Section,
-    { header: "Model", footer: "Options follow the selected model's live capabilities." },
-    modelField,
-    effortField,
-    ...(serviceTiers.length === 0
-      ? []
-      : [
-          selectField({
+  const modelSection = (
+    <Section header="Model" footer="Options follow the selected model's live capabilities.">
+      {modelField}
+      {effortField}
+      {serviceTiers.length === 0
+        ? undefined
+        : selectField({
             draftKey: "service_tier",
-            configPath: "service_tier",
             label: "Service tier",
             description: serviceTierDescription(selectedModel, draft.service_tier),
             value: draft.service_tier || selectedModel?.defaultServiceTier || "",
@@ -1348,41 +1048,38 @@ function renderForm(options: FormRenderOptions): ReactElement {
             issues,
             options: withCurrent(serviceTierOptions, draft.service_tier),
             onChange: (value) => updateScalar("service_tier", value),
-          }),
-        ]),
-    selectField({
-      draftKey: "personality",
-      configPath: "personality",
-      label: "Personality",
-      description: "The conversational style Codex should use.",
-      value: draft.personality || "pragmatic",
-      disabled: false,
-      issues,
-      options: [...personalityOptions],
-      onChange: (value) => updateScalar("personality", value),
-    }),
-    selectField({
-      draftKey: "model_reasoning_summary",
-      configPath: "model_reasoning_summary",
-      label: "Reasoning summary",
-      description: "How Codex summarizes its reasoning progress.",
-      value: draft.model_reasoning_summary || "auto",
-      disabled: false,
-      issues,
-      options: [...summaryOptions],
-      onChange: (value) => updateScalar("model_reasoning_summary", value),
-    }),
-    selectField({
-      draftKey: "model_verbosity",
-      configPath: "model_verbosity",
-      label: "Verbosity",
-      description: "The preferred level of detail in answers.",
-      value: draft.model_verbosity || "medium",
-      disabled: false,
-      issues,
-      options: [...verbosityOptions],
-      onChange: (value) => updateScalar("model_verbosity", value),
-    }),
+          })}
+      {selectField({
+        draftKey: "personality",
+        label: "Personality",
+        description: "The conversational style Codex should use.",
+        value: draft.personality || "pragmatic",
+        disabled: false,
+        issues,
+        options: personalityOptions,
+        onChange: (value) => updateScalar("personality", value),
+      })}
+      {selectField({
+        draftKey: "model_reasoning_summary",
+        label: "Reasoning summary",
+        description: "How Codex summarizes its reasoning progress.",
+        value: draft.model_reasoning_summary || "auto",
+        disabled: false,
+        issues,
+        options: summaryOptions,
+        onChange: (value) => updateScalar("model_reasoning_summary", value),
+      })}
+      {selectField({
+        draftKey: "model_verbosity",
+        label: "Verbosity",
+        description: "The preferred level of detail in answers.",
+        value: draft.model_verbosity || "medium",
+        disabled: false,
+        issues,
+        options: verbosityOptions,
+        onChange: (value) => updateScalar("model_verbosity", value),
+      })}
+    </Section>
   );
 
   const permissionOptions = capabilities.permissionProfiles.map((profile) => ({
@@ -1390,84 +1087,76 @@ function renderForm(options: FormRenderOptions): ReactElement {
     label: sentenceCase(profile.id),
     disabled: !profile.allowed,
   }));
-  const accessSection = h(
-    Section,
-    { header: "Access & approvals", footer: "Managed requirements appear disabled." },
-    selectField({
-      draftKey: "default_permissions",
-      configPath: "default_permissions",
-      label: "Permission profile",
-      description: permissionDescription(
-        capabilities.permissionProfiles,
-        draft.default_permissions,
-      ),
-      value: draft.default_permissions,
-      disabled: permissionOptions.length === 0,
-      issues,
-      options: [
-        { value: "", label: "Direct sandbox settings" },
-        ...withCurrent(permissionOptions, draft.default_permissions),
-      ],
-      onChange: (value) => {
-        updateScalar("default_permissions", value);
-        if (value.length > 0) updateScalar("sandbox_mode", "");
-      },
-    }),
-    selectField({
-      draftKey: "approval_policy",
-      configPath: "approval_policy",
-      label: "Approval policy",
-      description: "When Codex pauses and asks before taking an action.",
-      value: draft.approval_policy || "on-request",
-      disabled: false,
-      issues,
-      options: constrainOptions(approvalOptions, allowedApprovalPolicies),
-      onChange: (value) => updateScalar("approval_policy", value),
-    }),
-    ...(draft.approval_policy === "granular"
-      ? granularApprovalFields(draft.approval_granular, issues, options.updateGranularApproval)
-      : []),
-    selectField({
-      draftKey: "approvals_reviewer",
-      configPath: "approvals_reviewer",
-      label: "Approval reviewer",
-      description: "Choose who reviews approval requests.",
-      value: draft.approvals_reviewer || "user",
-      disabled: false,
-      issues,
-      options: [...reviewerOptions],
-      onChange: (value) => updateScalar("approvals_reviewer", value),
-    }),
-    selectField({
-      draftKey: "sandbox_mode",
-      configPath: "sandbox_mode",
-      label: "Sandbox",
-      description: "Filesystem access granted to Codex commands.",
-      value: draft.sandbox_mode || "workspace-write",
-      disabled: false,
-      issues,
-      options: constrainOptions(sandboxOptions, allowedSandboxModes),
-      onChange: (value) => {
-        updateScalar("sandbox_mode", value);
-        if (value.length > 0) updateScalar("default_permissions", "");
-      },
-    }),
-    selectField({
-      draftKey: "web_search",
-      configPath: "web_search",
-      label: "Web search",
-      description: "How Codex retrieves information from the internet.",
-      value: draft.web_search || "live",
-      disabled: false,
-      issues,
-      options: constrainOptions(searchOptions, allowedSearchModes),
-      onChange: (value) => updateScalar("web_search", value),
-    }),
-    ...(isWindows(capabilities.platform)
-      ? [
-          selectField({
+  const accessSection = (
+    <Section header="Access & approvals" footer="Managed requirements appear disabled.">
+      {selectField({
+        draftKey: "default_permissions",
+        label: "Permission profile",
+        description: permissionDescription(
+          capabilities.permissionProfiles,
+          draft.default_permissions,
+        ),
+        value: draft.default_permissions,
+        disabled: permissionOptions.length === 0,
+        issues,
+        options: [
+          { value: "", label: "Direct sandbox settings" },
+          ...withCurrent(permissionOptions, draft.default_permissions),
+        ],
+        onChange: (value) => {
+          updateScalar("default_permissions", value);
+          if (value.length > 0) updateScalar("sandbox_mode", "");
+        },
+      })}
+      {selectField({
+        draftKey: "approval_policy",
+        label: "Approval policy",
+        description: "When Codex pauses and asks before taking an action.",
+        value: draft.approval_policy || "on-request",
+        disabled: false,
+        issues,
+        options: constrainOptions(approvalOptions, allowedApprovalPolicies),
+        onChange: (value) => updateScalar("approval_policy", value),
+      })}
+      {draft.approval_policy === "granular"
+        ? granularApprovalFields(draft.approval_granular, issues, options.updateGranularApproval)
+        : undefined}
+      {selectField({
+        draftKey: "approvals_reviewer",
+        label: "Approval reviewer",
+        description: "Choose who reviews approval requests.",
+        value: draft.approvals_reviewer || "user",
+        disabled: false,
+        issues,
+        options: reviewerOptions,
+        onChange: (value) => updateScalar("approvals_reviewer", value),
+      })}
+      {selectField({
+        draftKey: "sandbox_mode",
+        label: "Sandbox",
+        description: "Filesystem access granted to Codex commands.",
+        value: draft.sandbox_mode || "workspace-write",
+        disabled: false,
+        issues,
+        options: constrainOptions(sandboxOptions, allowedSandboxModes),
+        onChange: (value) => {
+          updateScalar("sandbox_mode", value);
+          if (value.length > 0) updateScalar("default_permissions", "");
+        },
+      })}
+      {selectField({
+        draftKey: "web_search",
+        label: "Web search",
+        description: "How Codex retrieves information from the internet.",
+        value: draft.web_search || "live",
+        disabled: false,
+        issues,
+        options: constrainOptions(searchOptions, allowedSearchModes),
+        onChange: (value) => updateScalar("web_search", value),
+      })}
+      {capabilities.platform === "win32"
+        ? selectField({
             draftKey: "windows_sandbox",
-            configPath: "windows.sandbox",
             label: "Windows sandbox",
             description: "How Windows sandbox setup is launched.",
             value: draft.windows_sandbox,
@@ -1475,114 +1164,89 @@ function renderForm(options: FormRenderOptions): ReactElement {
             issues,
             options: constrainOptions(windowsSandboxOptions, allowedWindowsSandboxes),
             onChange: (value) => updateScalar("windows_sandbox", value),
-          }),
-        ]
-      : []),
+          })
+        : undefined}
+    </Section>
   );
 
-  const environmentSection = h(
-    Section,
-    { header: "Environment", footer: "One environment variable pattern per line." },
-    listField({
-      draftKey: "shell_environment_include_only",
-      configPath: "shell_environment_policy.include_only",
-      label: "Shell environment allowlist",
-      description: "Only these environment variables are passed to commands.",
-      value: draft.shell_environment_include_only,
-      disabled: false,
-      issues,
-      onChange: (value) => updateScalar("shell_environment_include_only", value),
-    }),
+  const environmentSection = (
+    <Section header="Environment" footer="One environment variable pattern per line.">
+      {listField({
+        draftKey: "shell_environment_include_only",
+        label: "Shell environment allowlist",
+        description: "Only these environment variables are passed to commands.",
+        value: draft.shell_environment_include_only,
+        disabled: false,
+        issues,
+        onChange: (value) => updateScalar("shell_environment_include_only", value),
+      })}
+    </Section>
   );
 
-  const featureRequirements = recordValue(requirements?.featureRequirements);
-  const visibleFeatures = capabilities.features.filter(
-    (feature): feature is FeatureCapability & { readonly name: FeatureName } =>
-      isFeatureName(feature.name),
-  );
+  const featureRequirements = requirements?.featureRequirements;
   const featureSection =
-    visibleFeatures.length === 0
-      ? undefined
-      : h(
-          Section,
-          {
-            header: "Features",
-            footer: "Availability and current state come directly from Codex.",
-          },
-          ...visibleFeatures.map((capability) => {
-            const name = capability.name;
-            const requiredValue = booleanValue(featureRequirements?.[name]);
-            const locked = capability.locked || requiredValue !== undefined;
-            const effective = requiredValue ?? capability.enabled;
-            const description = [
-              capability.description,
-              locked && effective !== undefined
-                ? `Managed: ${effective ? "on" : "off"}.`
-                : undefined,
-              `Stage: ${sentenceCase(capability.stage)}.`,
-            ]
-              .filter((part): part is string => part !== undefined)
-              .join(" ");
-            const checked =
-              draft.features[name] === "" ? effective : draft.features[name] === "true";
-            return toggleField({
-              draftKey: `features.${name}`,
-              configPath: `features.${name}`,
-              label: capability.displayName ?? sentenceCase(name),
-              description,
-              checked,
-              disabled: locked,
-              issues,
-              onChange: (value) => options.updateFeature(name, value),
-              fieldId: `feature-${name}`,
-            });
-          }),
-        );
+    capabilities.features.length === 0 ? undefined : (
+      <Section header="Features" footer="Availability and current state come directly from Codex.">
+        {capabilities.features.map((capability) => {
+          const name = capability.name;
+          const requiredValue = featureRequirements?.[name];
+          const locked = capability.locked || requiredValue !== undefined;
+          const effective = requiredValue ?? capability.enabled;
+          const description = [
+            capability.description,
+            locked ? `Managed: ${effective ? "on" : "off"}.` : undefined,
+            `Stage: ${sentenceCase(capability.stage)}.`,
+          ]
+            .filter((part): part is string => part !== undefined)
+            .join(" ");
+          const checked = draft.features[name] === "" ? effective : draft.features[name] === "true";
+          return toggleField({
+            draftKey: `features.${name}`,
+            label: capability.displayName,
+            description,
+            checked,
+            disabled: locked,
+            issues,
+            onChange: (value) => options.updateFeature(name, value),
+            fieldId: `feature-${name}`,
+          });
+        })}
+      </Section>
+    );
 
   const dangerous =
-    draft.sandbox_mode === "danger-full-access" && draft.approval_policy === "never"
-      ? h(Banner, {
-          type: "section",
-          className: "bannerSpacing",
-          header: "Unrestricted autonomous access",
-          subheader: "Full access with approvals disabled lets Codex run without confirmation.",
-        })
-      : undefined;
+    draft.sandbox_mode === "danger-full-access" && draft.approval_policy === "never" ? (
+      <Banner
+        className="bannerSpacing"
+        header="Unrestricted autonomous access"
+        subheader="Full access with approvals disabled lets Codex run without confirmation."
+      />
+    ) : undefined;
   const catalogWarning =
-    models.length === 0
-      ? h(
-          Banner,
-          {
-            type: "section",
-            className: "bannerSpacing",
-            header: "Model catalog unavailable",
-            subheader: "Model settings are read-only until Codex returns its model capabilities.",
-          },
-          h(
-            Button,
-            {
-              type: "button",
-              mode: "bezeled",
-              size: "s",
-              onClick: () => window.location.reload(),
-            },
-            "Retry",
-          ),
-        )
-      : undefined;
+    models.length === 0 ? (
+      <Banner
+        className="bannerSpacing"
+        header="Model catalog unavailable"
+        subheader="Model settings are read-only until Codex returns its model capabilities."
+      >
+        <Button type="button" mode="bezeled" size="s" onClick={() => window.location.reload()}>
+          Retry
+        </Button>
+      </Banner>
+    ) : undefined;
   const overrideMetadata = snapshot.writeOutcome?.overriddenMetadata;
   const overrideBanner =
-    snapshot.writeOutcome?.status === "okOverridden"
-      ? h(Banner, {
-          type: "section",
-          className: "bannerSpacing",
-          header: "Saved, but not currently effective",
-          subheader:
-            overrideMetadata === null || overrideMetadata === undefined
-              ? "A higher-priority configuration layer overrides the saved value."
-              : `${overrideMetadata.message} Effective value: ${displayValue(overrideMetadata.effectiveValue)}.`,
-        })
-      : undefined;
+    snapshot.writeOutcome?.status === "okOverridden" ? (
+      <Banner
+        className="bannerSpacing"
+        header="Saved, but not currently effective"
+        subheader={
+          overrideMetadata === null || overrideMetadata === undefined
+            ? "A higher-priority configuration layer overrides the saved value."
+            : `${overrideMetadata.message} Effective value: ${displayValue(overrideMetadata.effectiveValue)}.`
+        }
+      />
+    ) : undefined;
 
   const errorCount = issues.filter((issue) => issue.severity === "error").length;
   const saveDisabled =
@@ -1598,84 +1262,66 @@ function renderForm(options: FormRenderOptions): ReactElement {
       : "Save changes";
   const showSaveDock = options.dirty || options.saving || options.validating || errorCount > 0;
 
-  return h(
-    "form",
-    { onSubmit: (event: FormEvent<HTMLFormElement>) => void options.onSave(event) },
-    h(
-      "main",
-      { className: `page ${showSaveDock ? "pageWithSaveDock" : ""}` },
-      h(
-        "header",
-        { className: "pageHeader" },
-        h(
-          "div",
-          null,
-          h(Headline, { Component: "h1" }, "Telex settings"),
-          h(Caption, { className: "pageSubtitle" }, "Bridge behavior and Codex configuration"),
-        ),
-        h(
-          Caption,
-          { className: "revision" },
-          snapshot.version === null ? "new file" : `rev ${snapshot.version.slice(0, 8)}`,
-        ),
-      ),
-      issueSummary,
-      overrideBanner,
-      catalogWarning,
-      dangerous,
-      h(
-        "div",
-        { className: "sectionStack" },
-        usageSection,
-        runtimeSection,
-        telexSection,
-        modelSection,
-        accessSection,
-        environmentSection,
-        featureSection,
-      ),
-    ),
-    showSaveDock
-      ? h(
-          "div",
-          { className: "saveDock" },
-          h(
-            "div",
-            { className: "saveDockInner" },
-            h(
-              Caption,
-              {
-                className: `saveStatus ${errorCount > 0 ? "saveStatusError" : options.dirty ? "saveStatusReady" : ""}`,
-                "aria-live": "polite",
-              },
-              options.validating ? "Checking settings…" : options.notice,
-            ),
-            h(
-              Button,
-              {
-                type: "submit",
-                size: "l",
-                stretched: true,
-                loading: options.saving,
-                disabled: saveDisabled,
-              },
-              saveText,
-            ),
-          ),
-        )
-      : undefined,
+  return (
+    <form onSubmit={(event) => void options.onSave(event)}>
+      <main className={`page ${showSaveDock ? "pageWithSaveDock" : ""}`}>
+        <header className="pageHeader">
+          <div>
+            <Headline Component="h1">Telex settings</Headline>
+            <Caption className="pageSubtitle">Bridge behavior and Codex configuration</Caption>
+          </div>
+          <Caption className="revision">
+            {snapshot.version === null ? "new file" : `rev ${snapshot.version.slice(0, 8)}`}
+          </Caption>
+        </header>
+        {issueSummary}
+        {overrideBanner}
+        {catalogWarning}
+        {dangerous}
+        <div className="sectionStack">
+          {usageSection}
+          {runtimeSection}
+          {telexSection}
+          {modelSection}
+          {accessSection}
+          {environmentSection}
+          {featureSection}
+        </div>
+      </main>
+      {showSaveDock ? (
+        <div className="saveDock">
+          <div className="saveDockInner">
+            <Caption
+              className={`saveStatus ${errorCount > 0 ? "saveStatusError" : options.dirty ? "saveStatusReady" : ""}`}
+              aria-live="polite"
+            >
+              {options.validating ? "Checking settings…" : options.notice}
+            </Caption>
+            <Button
+              type="submit"
+              size="l"
+              stretched
+              loading={options.saving}
+              disabled={saveDisabled}
+            >
+              {saveText}
+            </Button>
+          </div>
+        </div>
+      ) : undefined}
+    </form>
   );
 }
 
 function renderUsageSection(
-  usage: UsageLimits | undefined,
+  usage: CodexUsageLimits | undefined,
   error: string | undefined,
   refreshing: boolean,
   onRefresh: () => Promise<void>,
   bankedResetsExpanded: boolean,
   resetNotice: string | undefined,
   onToggleBankedResets: () => void,
-  onChooseBankedReset: (credit: BankedReset) => void,
+  onChooseBankedReset: (credit: CodexBankedReset) => void,
 ): ReactElement {
   const windows = [
     usage?.weekly === null || usage?.weekly === undefined
@@ -1687,177 +1333,160 @@ function renderUsageSection(
   ].filter(isDefined);
   let body: ReactElement;
   if (usage === undefined && error === undefined) {
-    body = h(
-      "div",
-      { className: "usageLoading", "aria-live": "polite" },
-      h(Spinner, { size: "m" }),
-      h(Caption, null, "Checking Codex usage…"),
+    body = (
+      <div className="usageLoading" aria-live="polite">
+        <Spinner />
+        <Caption>Checking Codex usage…</Caption>
+      </div>
     );
   } else if (usage === undefined) {
-    body = h(
-      "div",
-      { className: "usageUnavailable", role: "status" },
-      h("strong", null, "Usage unavailable"),
-      h(Caption, null, error),
+    body = (
+      <div className="usageUnavailable" role="status">
+        <strong>Usage unavailable</strong>
+        <Caption>{error}</Caption>
+      </div>
     );
   } else if (windows.length === 0) {
-    body = h(
-      "div",
-      { className: "usageUnavailable", role: "status" },
-      h("strong", null, "No active limits"),
-      h(Caption, null, "Codex is not reporting a weekly or five-hour usage window."),
+    body = (
+      <div className="usageUnavailable" role="status">
+        <strong>No active limits</strong>
+        <Caption>Codex is not reporting a weekly or five-hour usage window.</Caption>
+      </div>
     );
   } else {
-    body = h(
-      "div",
-      { className: "usageWindows", "aria-live": "polite" },
-      ...windows.map(([label, window]) => renderUsageWindow(label, window)),
-      usage.bankedResets !== null && usage.bankedResets.availableCount > 0
-        ? renderBankedResets(
-            usage.bankedResets,
-            bankedResetsExpanded,
-            resetNotice,
-            onToggleBankedResets,
-            onChooseBankedReset,
-          )
-        : undefined,
-      error === undefined
-        ? undefined
-        : h(Caption, { className: "usageStale" }, `Could not refresh: ${error}`),
+    body = (
+      <div className="usageWindows" aria-live="polite">
+        {windows.map(([label, window]) => renderUsageWindow(label, window))}
+        {usage.bankedResets !== null && usage.bankedResets.availableCount > 0
+          ? renderBankedResets(
+              usage.bankedResets,
+              bankedResetsExpanded,
+              resetNotice,
+              onToggleBankedResets,
+              onChooseBankedReset,
+            )
+          : undefined}
+        {error === undefined ? undefined : (
+          <Caption className="usageStale">{`Could not refresh: ${error}`}</Caption>
+        )}
+      </div>
     );
   }
-  return h(
-    Section,
-    {
-      header: h(
-        "div",
-        { className: "usageHeader" },
-        h("span", null, "Usage limits"),
-        h(
-          Button,
-          {
-            type: "button",
-            mode: "plain",
-            size: "s",
-            className: "usageRefresh",
-            loading: refreshing,
-            disabled: refreshing,
-            onClick: () => void onRefresh(),
-            "aria-label": "Refresh usage limits",
-          },
-          "Refresh",
-        ),
-      ),
-      footer:
-        "Refreshes automatically. The five-hour limit appears only while Codex reports that window.",
-    },
-    body,
+  return (
+    <Section
+      header={
+        <div className="usageHeader">
+          <span>Usage limits</span>
+          <Button
+            type="button"
+            mode="plain"
+            size="s"
+            className="usageRefresh"
+            loading={refreshing}
+            disabled={refreshing}
+            onClick={() => void onRefresh()}
+            aria-label="Refresh usage limits"
+          >
+            Refresh
+          </Button>
+        </div>
+      }
+      footer="Refreshes automatically. The five-hour limit appears only while Codex reports that window."
+    >
+      {body}
+    </Section>
   );
 }
 
 function renderBankedResets(
-  resets: BankedResets,
+  resets: CodexBankedResets,
   expanded: boolean,
   notice: string | undefined,
   onToggle: () => void,
-  onChoose: (credit: BankedReset) => void,
+  onChoose: (credit: CodexBankedReset) => void,
 ): ReactElement {
   const count = resets.availableCount;
   const credits = resets.credits ?? [];
-  return h(
-    "div",
-    { className: "bankedResets" },
-    h(
-      "button",
-      {
-        type: "button",
-        className: "bankedResetsSummary",
-        "aria-expanded": expanded,
-        "aria-controls": "banked-reset-details",
-        onClick: onToggle,
-      },
-      h(
-        "span",
-        { className: "bankedResetsSummaryCopy" },
-        h("strong", null, `You have ${count} banked reset${count === 1 ? "" : "s"}`),
-        h(Caption, null, "Use one to restore every currently eligible Codex usage window."),
-      ),
-      h(
-        "span",
-        { className: `bankedResetsChevron ${expanded ? "bankedResetsChevronOpen" : ""}` },
-        "⌄",
-      ),
-    ),
-    expanded
-      ? h(
-          "div",
-          { id: "banked-reset-details", className: "bankedResetDetails" },
-          notice === undefined
-            ? undefined
-            : h(Caption, { className: "bankedResetNotice", role: "status" }, notice),
-          credits.length === 0
-            ? h(
-                "div",
-                { className: "bankedResetEmpty" },
-                h("strong", null, "Reset details unavailable"),
-                h(
-                  Caption,
-                  null,
-                  "Codex reported the banked count without individual reset details.",
-                ),
-              )
-            : credits.map((credit) => renderBankedReset(credit, onChoose)),
-          credits.length > 0 && credits.length < count
-            ? h(
-                Caption,
-                { className: "bankedResetPartial" },
-                `Codex returned details for ${credits.length} of ${count} banked resets.`,
-              )
-            : undefined,
-        )
-      : undefined,
+  return (
+    <div className="bankedResets">
+      <button
+        type="button"
+        className="bankedResetsSummary"
+        aria-expanded={expanded}
+        aria-controls="banked-reset-details"
+        onClick={onToggle}
+      >
+        <span className="bankedResetsSummaryCopy">
+          <strong>{`You have ${count} banked reset${count === 1 ? "" : "s"}`}</strong>
+          <Caption>Use one to restore every currently eligible Codex usage window.</Caption>
+        </span>
+        <span className={`bankedResetsChevron ${expanded ? "bankedResetsChevronOpen" : ""}`}>
+          ⌄
+        </span>
+      </button>
+      {expanded ? (
+        <div id="banked-reset-details" className="bankedResetDetails">
+          {notice === undefined ? undefined : (
+            <Caption className="bankedResetNotice" role="status">
+              {notice}
+            </Caption>
+          )}
+          {credits.length === 0 ? (
+            <div className="bankedResetEmpty">
+              <strong>Reset details unavailable</strong>
+              <Caption>Codex reported the banked count without individual reset details.</Caption>
+            </div>
+          ) : (
+            credits.map((credit) => renderBankedReset(credit, onChoose))
+          )}
+          {credits.length > 0 && credits.length < count ? (
+            <Caption className="bankedResetPartial">
+              {`Codex returned details for ${credits.length} of ${count} banked resets.`}
+            </Caption>
+          ) : undefined}
+        </div>
+      ) : undefined}
+    </div>
   );
 }
 
 function renderBankedReset(
-  credit: BankedReset,
-  onChoose: (credit: BankedReset) => void,
+  credit: CodexBankedReset,
+  onChoose: (credit: CodexBankedReset) => void,
 ): ReactElement {
   const available = credit.status === "available";
-  return h(
-    "article",
-    { className: "bankedReset", key: credit.id },
-    h(
-      "div",
-      { className: "bankedResetHeader" },
-      h("strong", null, credit.title ?? resetTypeLabel(credit.resetType)),
-      h(
-        "span",
-        { className: `bankedResetStatus bankedResetStatus-${credit.status}` },
-        resetStatusLabel(credit.status),
-      ),
-    ),
-    h(
-      "dl",
-      { className: "bankedResetFacts" },
-      h("div", null, h("dt", null, "Type"), h("dd", null, resetTypeLabel(credit.resetType))),
-      h("div", null, h("dt", null, "Expiration"), h("dd", null, formatExpiry(credit.expiresAt))),
-    ),
-    credit.description === null
-      ? undefined
-      : h(Caption, { className: "bankedResetDescription" }, credit.description),
-    h(
-      Button,
-      {
-        type: "button",
-        mode: "bezeled",
-        size: "s",
-        stretched: true,
-        disabled: !available,
-        onClick: () => onChoose(credit),
-      },
-      available ? "Apply this reset" : resetStatusLabel(credit.status),
-    ),
+  return (
+    <article className="bankedReset" key={credit.id}>
+      <div className="bankedResetHeader">
+        <strong>{credit.title ?? resetTypeLabel(credit.resetType)}</strong>
+        <span className={`bankedResetStatus bankedResetStatus-${credit.status}`}>
+          {resetStatusLabel(credit.status)}
+        </span>
+      </div>
+      <dl className="bankedResetFacts">
+        <div>
+          <dt>Type</dt>
+          <dd>{resetTypeLabel(credit.resetType)}</dd>
+        </div>
+        <div>
+          <dt>Expiration</dt>
+          <dd>{formatExpiry(credit.expiresAt)}</dd>
+        </div>
+      </dl>
+      {credit.description === null ? undefined : (
+        <Caption className="bankedResetDescription">{credit.description}</Caption>
+      )}
+      <Button
+        type="button"
+        mode="bezeled"
+        size="s"
+        stretched
+        disabled={!available}
+        onClick={() => onChoose(credit)}
+      >
+        {available ? "Apply this reset" : resetStatusLabel(credit.status)}
+      </Button>
+    </article>
   );
 }
 
@@ -1887,67 +1516,60 @@ function ResetConfirmationDialog(props: ResetConfirmationDialogProps): ReactElem
   const dismissBackdrop = (event: MouseEvent<HTMLDivElement>): void => {
     if (event.target === event.currentTarget && !props.applying) props.onCancel();
   };
-  return h(
-    "div",
-    { className: "resetDialogBackdrop", onMouseDown: dismissBackdrop },
-    h(
-      "section",
-      {
-        className: "resetDialog",
-        role: "dialog",
-        "aria-modal": "true",
-        "aria-labelledby": "reset-dialog-title",
-        "aria-describedby": "reset-dialog-description",
-      },
-      h("h2", { id: "reset-dialog-title" }, "Apply banked reset?"),
-      h(
-        "p",
-        { id: "reset-dialog-description" },
-        "This immediately spends one banked reset and restores every eligible Codex usage window. It cannot be undone.",
-      ),
-      h(
-        "dl",
-        { className: "resetDialogFacts" },
-        h("div", null, h("dt", null, "Type"), h("dd", null, resetTypeLabel(credit.resetType))),
-        h("div", null, h("dt", null, "Expiration"), h("dd", null, formatExpiry(credit.expiresAt))),
-      ),
-      props.error === undefined
-        ? undefined
-        : h(Caption, { className: "resetDialogError", role: "alert" }, props.error),
-      h(
-        "div",
-        { className: "resetDialogActions" },
-        h(
-          Button,
-          {
-            type: "button",
-            mode: "bezeled",
-            disabled: props.applying,
-            onClick: props.onCancel,
-          },
-          "Cancel",
-        ),
-        h(
-          Button,
-          {
-            type: "button",
-            className: "resetConfirmApply",
-            loading: props.applying,
-            autoFocus: true,
-            onClick: () => void props.onApply(),
-          },
-          "Apply reset",
-        ),
-      ),
-    ),
+  return (
+    // biome-ignore lint/a11y/noStaticElementInteractions: the backdrop dismisses on click; Escape is handled while the dialog is open.
+    <div className="resetDialogBackdrop" onMouseDown={dismissBackdrop}>
+      <section
+        className="resetDialog"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="reset-dialog-title"
+        aria-describedby="reset-dialog-description"
+      >
+        <h2 id="reset-dialog-title">Apply banked reset?</h2>
+        <p id="reset-dialog-description">
+          This immediately spends one banked reset and restores every eligible Codex usage window.
+          It cannot be undone.
+        </p>
+        <dl className="resetDialogFacts">
+          <div>
+            <dt>Type</dt>
+            <dd>{resetTypeLabel(credit.resetType)}</dd>
+          </div>
+          <div>
+            <dt>Expiration</dt>
+            <dd>{formatExpiry(credit.expiresAt)}</dd>
+          </div>
+        </dl>
+        {props.error === undefined ? undefined : (
+          <Caption className="resetDialogError" role="alert">
+            {props.error}
+          </Caption>
+        )}
+        <div className="resetDialogActions">
+          <Button type="button" mode="bezeled" disabled={props.applying} onClick={props.onCancel}>
+            Cancel
+          </Button>
+          <Button
+            type="button"
+            className="resetConfirmApply"
+            loading={props.applying}
+            autoFocus
+            onClick={() => void props.onApply()}
+          >
+            Apply reset
+          </Button>
+        </div>
+      </section>
+    </div>
   );
 }
 
-function resetTypeLabel(type: BankedReset["resetType"]): string {
+function resetTypeLabel(type: CodexBankedReset["resetType"]): string {
   return type === "codexRateLimits" ? "Codex usage limits" : "Unknown reset type";
 }
 
-function resetStatusLabel(status: BankedReset["status"]): string {
+function resetStatusLabel(status: CodexBankedReset["status"]): string {
   switch (status) {
     case "available":
       return "Available";
@@ -1960,49 +1582,51 @@ function resetStatusLabel(status: BankedReset["status"]): string {
   }
 }
 
-function formatExpiry(expiresAt: number | null): string {
-  if (expiresAt === null) return "Does not expire";
-  const expiration = new Date(expiresAt * 1_000);
-  if (Number.isNaN(expiration.getTime())) return "Unavailable";
+function formatUnixDate(seconds: number, withYear: boolean): string | undefined {
+  const date = new Date(seconds * 1_000);
+  if (Number.isNaN(date.getTime())) return undefined;
   return new Intl.DateTimeFormat(undefined, {
     weekday: "short",
     month: "short",
     day: "numeric",
-    year: "numeric",
+    ...(withYear ? { year: "numeric" as const } : {}),
     hour: "numeric",
     minute: "2-digit",
-  }).format(expiration);
+  }).format(date);
 }
 
-function renderUsageWindow(label: string, window: UsageLimitWindow): ReactElement {
+function formatExpiry(expiresAt: number | null): string {
+  if (expiresAt === null) return "Does not expire";
+  return formatUnixDate(expiresAt, true) ?? "Unavailable";
+}
+
+function formatResetTime(resetsAt: number | null): string {
+  const formatted = resetsAt === null ? undefined : formatUnixDate(resetsAt, false);
+  return formatted === undefined ? "Reset time unavailable" : `Resets ${formatted}`;
+}
+
+function renderUsageWindow(label: string, window: CodexUsageLimitWindow): ReactElement {
   const percent = Math.max(0, Math.min(100, window.remainingPercent));
   const percentText = formatRemainingPercent(percent);
   const level = percent <= 20 ? "low" : percent <= 50 ? "medium" : "healthy";
-  return h(
-    "div",
-    { className: "usageWindow", key: label },
-    h(
-      "div",
-      { className: "usageWindowHeader" },
-      h("strong", null, label),
-      h("span", { className: `usageRemaining usageRemaining-${level}` }, percentText),
-    ),
-    h(
-      "div",
-      {
-        className: "usageTrack",
-        role: "progressbar",
-        "aria-label": `${label} usage remaining`,
-        "aria-valuemin": 0,
-        "aria-valuemax": 100,
-        "aria-valuenow": Math.round(percent),
-      },
-      h("span", {
-        className: `usageFill usageFill-${level}`,
-        style: { width: `${percent}%` },
-      }),
-    ),
-    h(Caption, { className: "usageReset" }, formatResetTime(window.resetsAt)),
+  return (
+    <div className="usageWindow" key={label}>
+      <div className="usageWindowHeader">
+        <strong>{label}</strong>
+        <span className={`usageRemaining usageRemaining-${level}`}>{percentText}</span>
+      </div>
+      <div
+        className="usageTrack"
+        role="progressbar"
+        aria-label={`${label} usage remaining`}
+        aria-valuemin={0}
+        aria-valuemax={100}
+        aria-valuenow={Math.round(percent)}
+      >
+        <span className={`usageFill usageFill-${level}`} style={{ width: `${percent}%` }} />
+      </div>
+      <Caption className="usageReset">{formatResetTime(window.resetsAt)}</Caption>
+    </div>
   );
 }
 
@@ -2011,51 +1635,32 @@ function formatRemainingPercent(percent: number): string {
   return `${Math.round(percent)}% left`;
 }
 
-function formatResetTime(resetsAt: number | null): string {
-  if (resetsAt === null) return "Reset time unavailable";
-  const reset = new Date(resetsAt * 1_000);
-  if (Number.isNaN(reset.getTime())) return "Reset time unavailable";
-  const formatted = new Intl.DateTimeFormat(undefined, {
-    weekday: "short",
-    month: "short",
-    day: "numeric",
-    hour: "numeric",
-    minute: "2-digit",
-  }).format(reset);
-  return `Resets ${formatted}`;
-}
-
 function listField(props: FieldProps): ReactElement {
-  const issue = primaryIssue(props.issues, props.configPath, props.draftKey);
-  return h(
-    "div",
-    { className: "field", key: props.configPath },
-    h(
-      Caption,
-      { Component: "label", className: "controlLabel", htmlFor: `config-${props.draftKey}` },
-      props.label,
-    ),
-    h("textarea", {
-      id: `config-${props.draftKey}`,
-      className: `nativeControl nativeTextarea ${issue?.severity === "error" ? "nativeControlError" : ""}`,
-      value: props.value,
-      rows: 3,
-      placeholder: "Leave empty to pass the full environment",
-      disabled: props.disabled,
-      onChange: (event: ChangeEvent<HTMLTextAreaElement>) =>
-        props.onChange(event.currentTarget.value),
-    }),
-    h(
-      Caption,
-      { className: issue === undefined ? "fieldHint" : "fieldHint fieldIssue" },
-      issue?.message ?? props.description,
-    ),
+  const issue = primaryIssue(props.issues, props.draftKey);
+  return (
+    <div className="field" key={props.draftKey}>
+      <Caption Component="label" className="controlLabel" htmlFor={`config-${props.draftKey}`}>
+        {props.label}
+      </Caption>
+      <textarea
+        id={`config-${props.draftKey}`}
+        className={`nativeControl nativeTextarea ${issue?.severity === "error" ? "nativeControlError" : ""}`}
+        value={props.value}
+        rows={3}
+        placeholder="Leave empty to pass the full environment"
+        disabled={props.disabled}
+        onChange={(event) => props.onChange(event.currentTarget.value)}
+      />
+      <Caption className={issue === undefined ? "fieldHint" : "fieldHint fieldIssue"}>
+        {issue?.message ?? props.description}
+      </Caption>
+    </div>
   );
 }
 
 function granularApprovalFields(
   value: GranularApproval,
-  issues: readonly ValidationIssue[],
+  issues: readonly ConfigValidationIssue[],
   onChange: (key: keyof GranularApproval, value: boolean) => void,
 ): ReactElement[] {
   const definitions = [
@@ -2068,7 +1673,6 @@ function granularApprovalFields(
   return definitions.map(([key, label, description]) =>
     toggleField({
       draftKey: `approval_policy.granular.${key}`,
-      configPath: `approval_policy.granular.${key}`,
       label,
       description,
       checked: value[key],
@@ -2083,7 +1687,7 @@ function granularApprovalFields(
 function reasoningSliderField(
   model: ModelCapability | undefined,
   value: string,
-  issues: readonly ValidationIssue[],
+  issues: readonly ConfigValidationIssue[],
   onChange: (value: string) => void,
 ): ReactElement {
   const efforts = model?.supportedReasoningEfforts ?? [];
@@ -2096,93 +1700,77 @@ function reasoningSliderField(
     0,
     efforts.findIndex((effort) => effort.reasoningEffort === effectiveValue),
   );
-  const issue = primaryIssue(issues, "model_reasoning_effort", "model_reasoning_effort");
+  const issue = primaryIssue(issues, "model_reasoning_effort");
   const description = reasoningDescription(model, effectiveValue);
-  return h(
-    "div",
-    { className: "field reasoningField", key: "model_reasoning_effort" },
-    h(
-      "div",
-      { className: "reasoningHeader" },
-      h(Caption, { className: "controlLabel" }, "Reasoning effort"),
-      h(
-        Caption,
-        { className: "reasoningValue", "aria-live": "polite" },
-        sentenceCase(effectiveValue),
-      ),
-    ),
-    h(Slider, {
-      className: "reasoningSlider",
-      min: 0,
-      max: Math.max(0, efforts.length - 1),
-      step: 1,
-      value: selectedIndex,
-      disabled: efforts.length < 2,
-      getAriaLabel: () => "Reasoning effort",
-      getAriaValueText: (index: number) =>
-        sentenceCase(efforts[Math.round(index)]?.reasoningEffort ?? effectiveValue),
-      onValueChange: (index: number) => {
-        const effort = efforts[Math.round(index)];
-        if (effort !== undefined) onChange(effort.reasoningEffort);
-      },
-    }),
-    h(
-      "div",
-      { className: "reasoningTicks", "aria-hidden": true },
-      ...efforts.map((effort, index) =>
-        h(
-          "span",
-          {
-            key: effort.reasoningEffort,
-            className: `reasoningTick ${index === selectedIndex ? "reasoningTickActive" : ""}`,
-            style: {
-              left: `${efforts.length < 2 ? 50 : (index / (efforts.length - 1)) * 100}%`,
-            },
-          },
-          sentenceCase(effort.reasoningEffort),
-        ),
-      ),
-    ),
-    h(
-      Caption,
-      { className: issue === undefined ? "fieldHint" : "fieldHint fieldIssue" },
-      issue?.message ?? description,
-    ),
+  return (
+    <div className="field reasoningField" key="model_reasoning_effort">
+      <div className="reasoningHeader">
+        <Caption className="controlLabel">Reasoning effort</Caption>
+        <Caption className="reasoningValue" aria-live="polite">
+          {sentenceCase(effectiveValue)}
+        </Caption>
+      </div>
+      <Slider
+        className="reasoningSlider"
+        min={0}
+        max={Math.max(0, efforts.length - 1)}
+        step={1}
+        value={selectedIndex}
+        disabled={efforts.length < 2}
+        getAriaLabel={() => "Reasoning effort"}
+        getAriaValueText={(index) =>
+          sentenceCase(efforts[Math.round(index)]?.reasoningEffort ?? effectiveValue)
+        }
+        onValueChange={(index) => {
+          const effort = efforts[Math.round(index)];
+          if (effort !== undefined) onChange(effort.reasoningEffort);
+        }}
+      />
+      <div className="reasoningTicks" aria-hidden="true">
+        {efforts.map((effort, index) => (
+          <span
+            key={effort.reasoningEffort}
+            className={`reasoningTick ${index === selectedIndex ? "reasoningTickActive" : ""}`}
+            style={{ left: `${efforts.length < 2 ? 50 : (index / (efforts.length - 1)) * 100}%` }}
+          >
+            {sentenceCase(effort.reasoningEffort)}
+          </span>
+        ))}
+      </div>
+      <Caption className={issue === undefined ? "fieldHint" : "fieldHint fieldIssue"}>
+        {issue?.message ?? description}
+      </Caption>
+    </div>
   );
 }
 
 function toggleField(props: {
   readonly draftKey: string;
-  readonly configPath: string;
   readonly label: string;
   readonly description: string;
   readonly checked: boolean;
   readonly disabled: boolean;
-  readonly issues: readonly ValidationIssue[];
+  readonly issues: readonly ConfigValidationIssue[];
   readonly fieldId: string;
   readonly onChange: (value: boolean) => void;
 }): ReactElement {
-  const issue = primaryIssue(props.issues, props.configPath, props.draftKey);
-  return h(
-    "div",
-    { className: "toggleField", key: props.configPath },
-    h(
-      "label",
-      { className: "toggleCopy", htmlFor: props.fieldId },
-      h(Caption, { className: "toggleLabel" }, props.label),
-      h(
-        Caption,
-        { className: issue === undefined ? "toggleHint" : "toggleHint fieldIssue" },
-        issue?.message ?? props.description,
-      ),
-    ),
-    h(Switch, {
-      id: props.fieldId,
-      checked: props.checked,
-      disabled: props.disabled,
-      onCheckedChange: props.onChange,
-      "aria-label": props.label,
-    }),
+  const issue = primaryIssue(props.issues, props.draftKey);
+  return (
+    <div className="toggleField" key={props.draftKey}>
+      <label className="toggleCopy" htmlFor={props.fieldId}>
+        <Caption className="toggleLabel">{props.label}</Caption>
+        <Caption className={issue === undefined ? "toggleHint" : "toggleHint fieldIssue"}>
+          {issue?.message ?? props.description}
+        </Caption>
+      </label>
+      <Switch
+        id={props.fieldId}
+        checked={props.checked}
+        disabled={props.disabled}
+        onCheckedChange={props.onChange}
+        aria-label={props.label}
+      />
+    </div>
   );
 }
 
@@ -2192,86 +1780,83 @@ function selectField(
     readonly fieldId?: string;
   },
 ): ReactElement {
-  const issue = primaryIssue(props.issues, props.configPath, props.draftKey);
+  const issue = primaryIssue(props.issues, props.draftKey);
   const fieldId = props.fieldId ?? `config-${props.draftKey}`;
-  return h(
-    "div",
-    { className: "field", key: props.configPath },
-    h(Caption, { Component: "label", className: "controlLabel", htmlFor: fieldId }, props.label),
-    h(
-      "select",
-      {
-        id: fieldId,
-        className: `nativeControl nativeSelect ${issue?.severity === "error" ? "nativeControlError" : ""}`,
-        value: props.value,
-        disabled: props.disabled,
-        onChange: (event: ChangeEvent<HTMLSelectElement>) =>
-          props.onChange(event.currentTarget.value),
-      },
-      ...props.options.map((option) =>
-        h(
-          "option",
-          {
-            key: option.value || "explicit-default",
-            value: option.value,
-            disabled: option.disabled,
-          },
-          option.label,
-        ),
-      ),
-    ),
-    h(
-      Caption,
-      { className: issue === undefined ? "fieldHint" : "fieldHint fieldIssue" },
-      issue?.message ?? props.description,
-    ),
+  return (
+    <div className="field" key={props.draftKey}>
+      <Caption Component="label" className="controlLabel" htmlFor={fieldId}>
+        {props.label}
+      </Caption>
+      <select
+        id={fieldId}
+        className={`nativeControl nativeSelect ${issue?.severity === "error" ? "nativeControlError" : ""}`}
+        value={props.value}
+        disabled={props.disabled}
+        onChange={(event) => props.onChange(event.currentTarget.value)}
+      >
+        {props.options.map((option) => (
+          <option
+            key={option.value || "explicit-default"}
+            value={option.value}
+            disabled={option.disabled}
+          >
+            {option.label}
+          </option>
+        ))}
+      </select>
+      <Caption className={issue === undefined ? "fieldHint" : "fieldHint fieldIssue"}>
+        {issue?.message ?? props.description}
+      </Caption>
+    </div>
   );
 }
 
 function renderLoading(error: string | undefined, retry: () => void): ReactElement {
   if (error !== undefined) {
-    return h(
-      "div",
-      { className: "loadingRoot" },
-      h(Placeholder, {
-        header: "Couldn’t open settings",
-        description: error,
-        action: h(Button, { mode: "filled", onClick: retry }, "Try again"),
-      }),
+    return (
+      <div className="loadingRoot">
+        <Placeholder
+          header="Couldn’t open settings"
+          description={error}
+          action={<Button onClick={retry}>Try again</Button>}
+        />
+      </div>
     );
   }
-  return h(
-    "div",
-    { className: "loadingRoot" },
-    h(
-      Placeholder,
-      {
-        header: "Loading Codex settings",
-        description: "Reading the effective config and capabilities…",
-      },
-      h(Spinner, { size: "l" }),
-    ),
+  return (
+    <div className="loadingRoot">
+      <Placeholder
+        header="Loading Codex settings"
+        description="Reading the effective config and capabilities…"
+      >
+        <Spinner size="l" />
+      </Placeholder>
+    </div>
   );
 }
 
-function renderIssueSummary(issues: readonly ValidationIssue[]): ReactElement | undefined {
+function renderIssueSummary(issues: readonly ConfigValidationIssue[]): ReactElement | undefined {
   if (issues.length === 0) return undefined;
   const errors = issues.filter((issue) => issue.severity === "error");
   const warnings = issues.filter((issue) => issue.severity === "warning");
   const visible = [...errors, ...warnings].slice(0, 3);
-  return h(Banner, {
-    type: "section",
-    className: "bannerSpacing",
-    header:
-      errors.length > 0
-        ? `${errors.length} setting${errors.length === 1 ? " needs" : "s need"} attention`
-        : `${warnings.length} warning${warnings.length === 1 ? "" : "s"}`,
-    subheader: visible.map((issue) => issue.message).join(" · "),
-  });
+  return (
+    <Banner
+      className="bannerSpacing"
+      header={
+        errors.length > 0
+          ? `${errors.length} setting${errors.length === 1 ? " needs" : "s need"} attention`
+          : `${warnings.length} warning${warnings.length === 1 ? "" : "s"}`
+      }
+      subheader={visible.map((issue) => issue.message).join(" · ")}
+    />
+  );
 }
 
-function draftFromConfig(values: ClientEditableCodexConfig): ConfigDraft {
-  const granularApproval = granularApprovalValue(values.approval_policy);
+function draftFromConfig(values: EditableCodexConfig): ConfigDraft {
+  const policy = values.approval_policy;
+  const granularApproval =
+    typeof policy === "object" && policy !== null ? policy.granular : undefined;
   return {
     model_provider: values.model_provider ?? "",
     model: values.model ?? "",
@@ -2280,12 +1865,7 @@ function draftFromConfig(values: ClientEditableCodexConfig): ConfigDraft {
     model_verbosity: values.model_verbosity ?? "",
     service_tier: values.service_tier ?? "",
     personality: values.personality ?? "",
-    approval_policy:
-      granularApproval === undefined && typeof values.approval_policy === "string"
-        ? values.approval_policy
-        : granularApproval === undefined
-          ? ""
-          : "granular",
+    approval_policy: typeof policy === "string" ? policy : policy === null ? "" : "granular",
     approval_granular: granularApproval ?? defaultGranularApproval,
     approvals_reviewer: values.approvals_reviewer ?? "",
     sandbox_mode: values.sandbox_mode ?? "",
@@ -2294,66 +1874,56 @@ function draftFromConfig(values: ClientEditableCodexConfig): ConfigDraft {
     windows_sandbox: values.windows_sandbox ?? "",
     shell_environment_include_only: linesFromConfig(values.shell_environment_include_only),
     features: Object.fromEntries(
-      featureNames.map((name) => [name, triStateFromConfig(values.features[name])]),
+      Object.entries(values.features).map(([name, value]) => [name, triStateFromConfig(value)]),
     ) as Record<FeatureName, TriState>,
   };
 }
 
-function configFromDraft(draft: ConfigDraft): ClientEditableCodexConfig {
+function configFromDraft(draft: ConfigDraft): EditableCodexConfig {
   return {
     model_provider: nullable(draft.model_provider),
     model: nullable(draft.model),
     model_reasoning_effort: nullable(draft.model_reasoning_effort),
-    model_reasoning_summary: enumOrNull(draft.model_reasoning_summary, [
-      "auto",
-      "concise",
-      "detailed",
-      "none",
-    ]),
-    model_verbosity: enumOrNull(draft.model_verbosity, ["low", "medium", "high"]),
+    model_reasoning_summary: (draft.model_reasoning_summary ||
+      null) as EditableCodexConfig["model_reasoning_summary"],
+    model_verbosity: (draft.model_verbosity || null) as EditableCodexConfig["model_verbosity"],
     service_tier: nullable(draft.service_tier),
-    personality: enumOrNull(draft.personality, ["none", "friendly", "pragmatic"]),
+    personality: (draft.personality || null) as EditableCodexConfig["personality"],
     approval_policy:
       draft.approval_policy === "granular"
         ? { granular: { ...draft.approval_granular } }
-        : enumOrNull(draft.approval_policy, ["untrusted", "on-request", "never"]),
-    approvals_reviewer: enumOrNull(draft.approvals_reviewer, ["user", "auto_review"]),
-    sandbox_mode: enumOrNull(draft.sandbox_mode, [
-      "read-only",
-      "workspace-write",
-      "danger-full-access",
-    ]),
+        : ((draft.approval_policy || null) as EditableCodexConfig["approval_policy"]),
+    approvals_reviewer: (draft.approvals_reviewer ||
+      null) as EditableCodexConfig["approvals_reviewer"],
+    sandbox_mode: (draft.sandbox_mode || null) as EditableCodexConfig["sandbox_mode"],
     default_permissions: nullable(draft.default_permissions),
-    web_search: enumOrNull(draft.web_search, ["disabled", "cached", "indexed", "live"]),
-    windows_sandbox: enumOrNull(draft.windows_sandbox, ["elevated", "unelevated"]),
+    web_search: (draft.web_search || null) as EditableCodexConfig["web_search"],
+    windows_sandbox: (draft.windows_sandbox || null) as EditableCodexConfig["windows_sandbox"],
     shell_environment_include_only: linesToConfig(draft.shell_environment_include_only),
     features: Object.fromEntries(
-      featureNames.map((name) => [name, triStateToConfig(draft.features[name])]),
-    ) as Record<FeatureName, boolean | null>,
+      Object.entries(draft.features).map(([name, value]) => [name, triStateToConfig(value)]),
+    ) as EditableCodexConfig["features"],
   };
 }
 
 function changedConfig(
-  current: ClientEditableCodexConfig,
-  candidate: ClientEditableCodexConfig,
-): Partial<ClientEditableCodexConfig> {
-  const changed: Partial<ClientEditableCodexConfig> = {};
-  const target = changed as Record<string, unknown>;
-  const currentValues = current as Readonly<Record<string, unknown>>;
-  const candidateValues = candidate as Readonly<Record<string, unknown>>;
-  for (const key of editableKeys) {
-    if (JSON.stringify(currentValues[key]) !== JSON.stringify(candidateValues[key])) {
-      target[key] = candidateValues[key];
+  current: EditableCodexConfig,
+  candidate: EditableCodexConfig,
+): Partial<EditableCodexConfig> {
+  const changed: Record<string, unknown> = {};
+  for (const key of Object.keys(candidate) as readonly (keyof EditableCodexConfig)[]) {
+    if (JSON.stringify(current[key]) !== JSON.stringify(candidate[key])) {
+      changed[key] = candidate[key];
     }
   }
-  return changed;
+  return changed as Partial<EditableCodexConfig>;
 }
 
 async function requestSnapshot(
   method: "GET" | "PUT",
   body?: Readonly<{
     expectedVersion: string | null;
-    values: Partial<ClientEditableCodexConfig>;
+    values: Partial<EditableCodexConfig>;
     telex?: TelexSettings;
   }>,
 ): Promise<LoadedSnapshot> {
@@ -2361,47 +1931,41 @@ async function requestSnapshot(
     method,
     ...(body === undefined ? {} : { body: JSON.stringify(body) }),
   });
-  return parseSnapshot(value);
+  return value as LoadedSnapshot;
 }
 
 async function requestValidation(
   body: Readonly<{
     expectedVersion: string | null;
-    values: Partial<ClientEditableCodexConfig>;
+    values: Partial<EditableCodexConfig>;
   }>,
   signal?: AbortSignal,
-): Promise<ValidationResult> {
+): Promise<ConfigValidationResult> {
   const value = await requestJson("/api/config/validate", {
     method: "POST",
     body: JSON.stringify(body),
     ...(signal === undefined ? {} : { signal }),
   });
-  return parseValidation(value);
+  return value as ConfigValidationResult;
 }
 
-async function requestRuntime(action: "reload" | "restart"): Promise<RuntimeStatus> {
+async function requestRuntime(action: "reload" | "restart"): Promise<CodexRuntimeStatus> {
   const value = await requestJson(`/api/runtime/${action}`, { method: "POST" });
-  const runtime = parseRuntimeStatus(recordValue(value)?.runtime);
-  if (runtime === undefined) throw new Error("The bridge returned an invalid runtime response.");
-  return runtime;
+  return (value as { readonly runtime: CodexRuntimeStatus }).runtime;
 }
 
 async function requestSkills(): Promise<readonly AvailableSkill[]> {
   const value = await requestJson("/api/skills", { method: "GET" });
-  const skills = arrayValue(recordValue(value)?.skills)?.map(parseAvailableSkill);
-  if (skills === undefined || skills.some((skill) => skill === undefined)) {
-    throw new Error("The bridge returned an invalid skill list.");
-  }
-  return skills as AvailableSkill[];
+  return (value as { readonly skills: readonly AvailableSkill[] }).skills;
 }
 
-async function requestUsage(): Promise<UsageLimits> {
-  return parseUsageLimits(await requestJson("/api/usage", { method: "GET" }));
+async function requestUsage(): Promise<CodexUsageLimits> {
+  return (await requestJson("/api/usage", { method: "GET" })) as CodexUsageLimits;
 }
 
 async function requestApplyBankedReset(
   confirmation: ResetConfirmation,
-): Promise<ApplyResetOutcome> {
+): Promise<ApplyBankedResetOutcome> {
   const value = await requestJson("/api/usage/reset", {
     method: "POST",
     body: JSON.stringify({
@@ -2409,24 +1973,13 @@ async function requestApplyBankedReset(
       idempotencyKey: confirmation.idempotencyKey,
     }),
   });
-  const outcome = recordValue(value)?.outcome;
-  if (
-    outcome !== "reset" &&
-    outcome !== "nothingToReset" &&
-    outcome !== "noCredit" &&
-    outcome !== "alreadyRedeemed"
-  ) {
-    throw new Error("The bridge returned an invalid banked reset result.");
-  }
-  return outcome;
+  return (value as { readonly outcome: ApplyBankedResetOutcome }).outcome;
 }
 
 async function requestSkillResource(skill: string, path: string): Promise<SkillResource> {
   const query = new URLSearchParams({ skill, path });
   const value = await requestJson(`/api/skills/resource?${query.toString()}`, { method: "GET" });
-  const resource = parseSkillResource(value);
-  if (resource === undefined) throw new Error("The bridge returned an invalid skill resource.");
-  return resource;
+  return value as SkillResource;
 }
 
 async function requestJson(path: string, init: RequestInit): Promise<unknown> {
@@ -2444,160 +1997,22 @@ async function requestJson(path: string, init: RequestInit): Promise<unknown> {
   });
   const value: unknown = await response.json();
   if (!response.ok) {
+    const failure = value as {
+      readonly error?: string;
+      readonly issues?: readonly ConfigValidationIssue[];
+    };
     throw new ConfigApiError(
-      apiError(value) ?? `Request failed (${response.status}).`,
-      validationIssues(value),
+      failure.error ?? `Request failed (${response.status}).`,
+      failure.issues,
     );
   }
   return value;
 }
 
-function parseSnapshot(value: unknown): LoadedSnapshot {
-  const outerRecord = recordValue(value);
-  const record = recordValue(outerRecord?.snapshot) ?? outerRecord;
-  const telex = recordValue(record?.telex);
-  const runtime = parseRuntimeStatus(outerRecord?.runtime ?? record?.runtime);
-  if (
-    record === undefined ||
-    !(typeof record.version === "string" || record.version === null) ||
-    !isEditableConfig(record.values) ||
-    typeof telex?.remoteClientContext !== "boolean" ||
-    runtime === undefined
-  ) {
-    throw new Error("The bridge returned an invalid config response.");
-  }
-  return {
-    version: record.version,
-    values: record.values,
-    capabilities: parseCapabilities(record.capabilities) ?? emptyCapabilities,
-    validation: parseValidationIfPresent(record.validation) ?? {
-      valid: true,
-      issues: [],
-    },
-    telex: { remoteClientContext: telex.remoteClientContext },
-    runtime,
-    writeOutcome: parseWriteOutcome(outerRecord?.writeOutcome ?? record.writeOutcome),
-  };
-}
-
-function parseRuntimeStatus(value: unknown): RuntimeStatus | undefined {
-  const record = recordValue(value);
-  if (record === undefined || typeof record.state !== "string") return undefined;
-  return {
-    state: record.state,
-    lastAppliedAt: typeof record.lastAppliedAt === "string" ? record.lastAppliedAt : null,
-    configPath: typeof record.configPath === "string" ? record.configPath : null,
-    restartRequired: record.restartRequired === true,
-    lastError: typeof record.lastError === "string" ? record.lastError : null,
-    config: parseRuntimeComponent(record.config),
-    mcp: parseRuntimeComponent(record.mcp),
-    skills: parseRuntimeComponent(record.skills),
-  };
-}
-
-function parseRuntimeComponent(value: unknown): RuntimeComponentStatus | undefined {
-  const record = recordValue(value);
-  if (record === undefined || typeof record.state !== "string") return undefined;
-  return {
-    state: record.state,
-    message: typeof record.message === "string" ? record.message : null,
-  };
-}
-
-function parseAvailableSkill(value: unknown): AvailableSkill | undefined {
-  const record = recordValue(value);
-  return record !== undefined &&
-    typeof record.name === "string" &&
-    typeof record.description === "string"
-    ? { name: record.name, description: record.description }
-    : undefined;
-}
-
-function parseUsageLimits(value: unknown): UsageLimits {
-  const record = recordValue(value);
-  if (record === undefined) throw new Error("The bridge returned invalid usage limits.");
-  const weekly = parseUsageLimitWindow(record.weekly);
-  const fiveHour = parseUsageLimitWindow(record.fiveHour);
-  const bankedResets = parseBankedResets(record.bankedResets);
-  if (weekly === undefined || fiveHour === undefined || bankedResets === undefined) {
-    throw new Error("The bridge returned invalid usage limits.");
-  }
-  return { weekly, fiveHour, bankedResets };
-}
-
-function parseUsageLimitWindow(value: unknown): UsageLimitWindow | null | undefined {
-  if (value === null) return null;
-  const record = recordValue(value);
-  if (record === undefined) return undefined;
-  const remainingPercent = record.remainingPercent;
-  const resetsAt = record.resetsAt;
-  if (
-    typeof remainingPercent !== "number" ||
-    !Number.isFinite(remainingPercent) ||
-    (resetsAt !== null && (typeof resetsAt !== "number" || !Number.isFinite(resetsAt)))
-  ) {
-    return undefined;
-  }
-  return { remainingPercent, resetsAt };
-}
-
-function parseBankedResets(value: unknown): BankedResets | null | undefined {
-  if (value === null) return null;
-  const record = recordValue(value);
-  if (record === undefined) return undefined;
-  const availableCount = record.availableCount;
-  if (
-    typeof availableCount !== "number" ||
-    !Number.isSafeInteger(availableCount) ||
-    availableCount < 0
-  ) {
-    return undefined;
-  }
-  if (record.credits === null) return { availableCount, credits: null };
-  const credits = arrayValue(record.credits)?.map(parseBankedReset);
-  if (credits === undefined || !credits.every(isDefined)) return undefined;
-  return { availableCount, credits };
-}
-
-function parseBankedReset(value: unknown): BankedReset | undefined {
-  const record = recordValue(value);
-  if (record === undefined) return undefined;
-  const resetType = record.resetType;
-  const status = record.status;
-  const grantedAt = record.grantedAt;
-  const expiresAt = record.expiresAt;
-  const title = record.title;
-  const description = record.description;
-  if (
-    typeof record.id !== "string" ||
-    (resetType !== "codexRateLimits" && resetType !== "unknown") ||
-    (status !== "available" &&
-      status !== "redeeming" &&
-      status !== "redeemed" &&
-      status !== "unknown") ||
-    typeof grantedAt !== "number" ||
-    !Number.isFinite(grantedAt) ||
-    (expiresAt !== null && (typeof expiresAt !== "number" || !Number.isFinite(expiresAt))) ||
-    (title !== null && typeof title !== "string") ||
-    (description !== null && typeof description !== "string")
-  ) {
-    return undefined;
-  }
-  return {
-    id: record.id,
-    resetType,
-    status,
-    grantedAt,
-    expiresAt,
-    title,
-    description,
-  };
-}
-
 function removeAppliedReset(
-  usage: UsageLimits | undefined,
+  usage: CodexUsageLimits | undefined,
   creditId: string,
-): UsageLimits | undefined {
+): CodexUsageLimits | undefined {
   if (usage?.bankedResets === null || usage === undefined) return usage;
   return {
     ...usage,
@@ -2608,7 +2023,7 @@ function removeAppliedReset(
   };
 }
 
-function clearUnavailableResets(usage: UsageLimits | undefined): UsageLimits | undefined {
+function clearUnavailableResets(usage: CodexUsageLimits | undefined): CodexUsageLimits | undefined {
   return usage === undefined
     ? usage
     : { ...usage, bankedResets: { availableCount: 0, credits: [] } };
@@ -2618,251 +2033,6 @@ function resetAttemptId(): string {
   return (
     globalThis.crypto?.randomUUID?.() ??
     `reset-${Date.now()}-${Math.random().toString(16).slice(2)}`
-  );
-}
-
-function parseSkillResource(value: unknown): SkillResource | undefined {
-  const record = recordValue(value);
-  if (record === undefined || typeof record.path !== "string") return undefined;
-  if (record.type === "directory") {
-    const entries = arrayValue(record.entries)?.map(parseSkillDirectoryEntry);
-    if (entries === undefined || !entries.every(isDefined)) return undefined;
-    return { type: "directory", path: record.path, entries };
-  }
-  if (
-    record.type !== "file" ||
-    typeof record.size !== "number" ||
-    typeof record.mediaType !== "string" ||
-    (record.encoding !== "utf8" && record.encoding !== "base64") ||
-    typeof record.content !== "string"
-  ) {
-    return undefined;
-  }
-  return {
-    type: "file",
-    path: record.path,
-    size: record.size,
-    mediaType: record.mediaType,
-    encoding: record.encoding,
-    content: record.content,
-  };
-}
-
-function parseSkillDirectoryEntry(value: unknown): SkillDirectoryEntry | undefined {
-  const record = recordValue(value);
-  if (
-    record === undefined ||
-    typeof record.name !== "string" ||
-    typeof record.path !== "string" ||
-    (record.type !== "directory" && record.type !== "file") ||
-    !(typeof record.size === "number" || record.size === null)
-  ) {
-    return undefined;
-  }
-  return {
-    name: record.name,
-    path: record.path,
-    type: record.type,
-    size: record.size,
-  };
-}
-
-function parseWriteOutcome(value: unknown): WriteOutcome | undefined {
-  const record = recordValue(value);
-  if (record === undefined || (record.status !== "ok" && record.status !== "okOverridden")) {
-    return undefined;
-  }
-  const metadata = recordValue(record.overriddenMetadata);
-  const overriddenMetadata =
-    metadata !== undefined && typeof metadata.message === "string"
-      ? { message: metadata.message, effectiveValue: metadata.effectiveValue }
-      : null;
-  return { status: record.status, overriddenMetadata };
-}
-
-function parseValidation(value: unknown): ValidationResult {
-  const record = recordValue(value);
-  if (record === undefined || typeof record.valid !== "boolean" || !Array.isArray(record.issues)) {
-    throw new Error("The bridge returned an invalid validation response.");
-  }
-  const issues = record.issues.map(parseIssue);
-  if (issues.some((issue) => issue === undefined)) {
-    throw new Error("The bridge returned an invalid validation issue.");
-  }
-  return { valid: record.valid, issues: issues as ValidationIssue[] };
-}
-
-function parseValidationIfPresent(value: unknown): ValidationResult | undefined {
-  if (value === undefined) return undefined;
-  try {
-    return parseValidation(value);
-  } catch {
-    return undefined;
-  }
-}
-
-function validationIssues(value: unknown): readonly ValidationIssue[] | undefined {
-  const issues = arrayValue(recordValue(value)?.issues);
-  if (issues === undefined) return undefined;
-  const parsed = issues.map(parseIssue);
-  return parsed.every(isDefined) ? parsed : undefined;
-}
-
-function parseIssue(value: unknown): ValidationIssue | undefined {
-  const record = recordValue(value);
-  if (record === undefined || typeof record.message !== "string") return undefined;
-  const path = Array.isArray(record.path)
-    ? record.path.filter((part): part is string => typeof part === "string").join(".")
-    : typeof record.path === "string"
-      ? record.path
-      : "";
-  const severity =
-    record.severity === "warning" || record.severity === "info" ? record.severity : "error";
-  return { path, severity, message: record.message };
-}
-
-function parseCapabilities(value: unknown): ConfigCapabilities | undefined {
-  const record = recordValue(value);
-  if (record === undefined) return undefined;
-  const models = arrayValue(record.models)?.map(parseModel).filter(isDefined) ?? [];
-  const modelProviders =
-    arrayValue(record.modelProviders)?.map(parseModelProvider).filter(isDefined) ?? [];
-  const permissionProfiles =
-    arrayValue(record.permissionProfiles)?.map(parsePermissionProfile).filter(isDefined) ?? [];
-  const features = arrayValue(record.features)?.map(parseFeature).filter(isDefined) ?? [];
-  return {
-    platform: typeof record.platform === "string" ? record.platform : "unknown",
-    modelProviders,
-    models,
-    permissionProfiles,
-    features,
-    requirements: recordValue(record.requirements) ?? null,
-  };
-}
-
-function parseModelProvider(value: unknown): ModelProviderCapability | undefined {
-  const record = recordValue(value);
-  return record !== undefined &&
-    typeof record.id === "string" &&
-    typeof record.displayName === "string" &&
-    typeof record.description === "string" &&
-    typeof record.allowed === "boolean"
-    ? {
-        id: record.id,
-        displayName: record.displayName,
-        description: record.description,
-        allowed: record.allowed,
-      }
-    : undefined;
-}
-
-function parseModel(value: unknown): ModelCapability | undefined {
-  const record = recordValue(value);
-  if (
-    record === undefined ||
-    typeof record.model !== "string" ||
-    typeof record.displayName !== "string" ||
-    typeof record.description !== "string" ||
-    typeof record.defaultReasoningEffort !== "string" ||
-    typeof record.isDefault !== "boolean"
-  ) {
-    return undefined;
-  }
-  return {
-    model: record.model,
-    displayName: record.displayName,
-    description: record.description,
-    supportedReasoningEfforts:
-      arrayValue(record.supportedReasoningEfforts)?.map(parseReasoningEffort).filter(isDefined) ??
-      [],
-    defaultReasoningEffort: record.defaultReasoningEffort,
-    serviceTiers: arrayValue(record.serviceTiers)?.map(parseServiceTier).filter(isDefined) ?? [],
-    defaultServiceTier:
-      typeof record.defaultServiceTier === "string" ? record.defaultServiceTier : null,
-    isDefault: record.isDefault,
-  };
-}
-
-function parseReasoningEffort(value: unknown): ReasoningEffortCapability | undefined {
-  const record = recordValue(value);
-  return record !== undefined &&
-    typeof record.reasoningEffort === "string" &&
-    typeof record.description === "string"
-    ? { reasoningEffort: record.reasoningEffort, description: record.description }
-    : undefined;
-}
-
-function parseServiceTier(value: unknown): ServiceTierCapability | undefined {
-  const record = recordValue(value);
-  return record !== undefined &&
-    typeof record.id === "string" &&
-    typeof record.name === "string" &&
-    typeof record.description === "string"
-    ? { id: record.id, name: record.name, description: record.description }
-    : undefined;
-}
-
-function parsePermissionProfile(value: unknown): PermissionProfileCapability | undefined {
-  const record = recordValue(value);
-  return record !== undefined &&
-    typeof record.id === "string" &&
-    (typeof record.description === "string" || record.description === null) &&
-    typeof record.allowed === "boolean"
-    ? { id: record.id, description: record.description, allowed: record.allowed }
-    : undefined;
-}
-
-function parseFeature(value: unknown): FeatureCapability | undefined {
-  const record = recordValue(value);
-  if (
-    record === undefined ||
-    typeof record.name !== "string" ||
-    typeof record.stage !== "string" ||
-    !(typeof record.displayName === "string" || record.displayName === null) ||
-    !(typeof record.description === "string" || record.description === null) ||
-    typeof record.enabled !== "boolean" ||
-    typeof record.defaultEnabled !== "boolean"
-  ) {
-    return undefined;
-  }
-  return {
-    name: record.name,
-    stage: record.stage,
-    displayName: record.displayName,
-    description: record.description,
-    enabled: record.enabled,
-    defaultEnabled: record.defaultEnabled,
-    locked: record.locked === true,
-  };
-}
-
-function isEditableConfig(value: unknown): value is ClientEditableCodexConfig {
-  const record = recordValue(value);
-  if (record === undefined) return false;
-  const listKeys = new Set<string>(["shell_environment_include_only"]);
-  const nullableStringKeys = editableKeys.filter(
-    (key) => key !== "approval_policy" && key !== "features" && !listKeys.has(key),
-  );
-  if (
-    nullableStringKeys.some((key) => !(typeof record[key] === "string" || record[key] === null))
-  ) {
-    return false;
-  }
-  if (!isApprovalPolicy(record.approval_policy)) return false;
-  for (const key of ["shell_environment_include_only"]) {
-    const field = record[key];
-    if (
-      !(field === null || (Array.isArray(field) && field.every((item) => typeof item === "string")))
-    ) {
-      return false;
-    }
-  }
-  const features = recordValue(record.features);
-  return (
-    features !== undefined &&
-    featureNames.every((name) =>
-      features[name] === null ? true : typeof features[name] === "boolean",
-    )
   );
 }
 
@@ -2890,7 +2060,7 @@ function serviceTierDescription(model: ModelCapability | undefined, tier: string
 }
 
 function permissionDescription(
-  profiles: readonly PermissionProfileCapability[],
+  profiles: ConfigCapabilities["permissionProfiles"],
   selected: string,
 ): string {
   return (
@@ -2916,17 +2086,10 @@ function constrainOptions(
 }
 
 function primaryIssue(
-  issues: readonly ValidationIssue[],
-  configPath: string,
+  issues: readonly ConfigValidationIssue[],
   draftKey: string,
-): ValidationIssue | undefined {
-  return issues.find(
-    (issue) =>
-      issue.path === configPath ||
-      issue.path === draftKey ||
-      issue.path.endsWith(`.${configPath}`) ||
-      issue.path.endsWith(`.${draftKey}`),
-  );
+): ConfigValidationIssue | undefined {
+  return issues.find((issue) => issue.path === draftKey || issue.path.endsWith(`.${draftKey}`));
 }
 
 function linesFromConfig(value: readonly string[] | null): string {
@@ -2949,67 +2112,9 @@ function triStateToConfig(value: TriState): boolean | null {
   return value === "" ? null : value === "true";
 }
 
-function isFeatureName(value: string): value is FeatureName {
-  return (featureNames as readonly string[]).includes(value);
-}
-
-function granularApprovalValue(value: unknown): GranularApproval | undefined {
-  const policy = recordValue(value);
-  if (policy === undefined || Object.keys(policy).length !== 1) return undefined;
-  const granular = recordValue(policy.granular);
-  if (
-    granular === undefined ||
-    Object.keys(granular).length !== granularApprovalKeys.length ||
-    Object.keys(granular).some((key) => !(granularApprovalKeys as readonly string[]).includes(key))
-  ) {
-    return undefined;
-  }
-
-  const sandboxApproval = booleanValue(granular.sandbox_approval);
-  const rules = booleanValue(granular.rules);
-  const skillApproval = booleanValue(granular.skill_approval);
-  const requestPermissions = booleanValue(granular.request_permissions);
-  const mcpElicitations = booleanValue(granular.mcp_elicitations);
-  if (
-    sandboxApproval === undefined ||
-    rules === undefined ||
-    skillApproval === undefined ||
-    requestPermissions === undefined ||
-    mcpElicitations === undefined
-  ) {
-    return undefined;
-  }
-  return {
-    sandbox_approval: sandboxApproval,
-    rules,
-    skill_approval: skillApproval,
-    request_permissions: requestPermissions,
-    mcp_elicitations: mcpElicitations,
-  };
-}
-
-function isApprovalPolicy(value: unknown): value is AskForApproval | null {
-  return (
-    value === null ||
-    value === "untrusted" ||
-    value === "on-request" ||
-    value === "never" ||
-    granularApprovalValue(value) !== undefined
-  );
-}
-
 function nullable(value: string): string | null {
   const trimmed = value.trim();
   return trimmed.length === 0 ? null : trimmed;
-}
-
-function enumOrNull<const Values extends readonly string[]>(
-  value: string,
-  options: Values,
-): Values[number] | null {
-  if (value === "") return null;
-  if (options.includes(value)) return value as Values[number];
-  throw new Error(`Invalid setting value: ${value}`);
 }
 
 function sentenceCase(value: string): string {
@@ -3017,27 +2122,15 @@ function sentenceCase(value: string): string {
   return words.length === 0 ? words : `${words[0]?.toUpperCase()}${words.slice(1)}`;
 }
 
-function isWindows(platform: string): boolean {
-  return platform === "win32" || platform.toLowerCase().startsWith("windows");
+function valueSet(values: readonly string[] | null | undefined): ReadonlySet<string> | undefined {
+  return values === null || values === undefined ? undefined : new Set(values);
 }
 
-function stringSet(value: unknown): ReadonlySet<string> | undefined {
-  return Array.isArray(value)
-    ? new Set(value.filter((item): item is string => typeof item === "string"))
-    : undefined;
-}
-
-function approvalModeSet(value: unknown): ReadonlySet<string> | undefined {
-  if (!Array.isArray(value)) return undefined;
-  const modes = new Set<string>();
-  for (const policy of value) {
-    if (policy === "untrusted" || policy === "on-request" || policy === "never") {
-      modes.add(policy);
-    } else if (granularApprovalValue(policy) !== undefined) {
-      modes.add("granular");
-    }
-  }
-  return modes;
+function approvalModeSet(
+  policies: ConfigRequirements["allowedApprovalPolicies"] | undefined,
+): ReadonlySet<string> | undefined {
+  if (policies === null || policies === undefined) return undefined;
+  return new Set(policies.map((policy) => (typeof policy === "string" ? policy : "granular")));
 }
 
 function displayValue(value: unknown): string {
@@ -3055,23 +2148,21 @@ function displayValue(value: unknown): string {
   return singleLine.length <= 120 ? singleLine : `${singleLine.slice(0, 119)}…`;
 }
 
-function runtimeStateLabel(runtime: RuntimeStatus): string {
+function runtimeStateLabel(runtime: CodexRuntimeStatus): string {
   if (runtime.restartRequired) return "Restart recommended";
   switch (runtime.state) {
     case "ready":
       return "Ready for the next turn";
-    case "applying":
+    case "reloading":
       return "Applying changes";
     case "restarting":
       return "Restarting Codex";
     case "degraded":
       return "Some resources need attention";
-    default:
-      return sentenceCase(runtime.state);
   }
 }
 
-function runtimeSaveNotice(runtime: RuntimeStatus): string {
+function runtimeSaveNotice(runtime: CodexRuntimeStatus): string {
   if (runtime.restartRequired) {
     return "Saved. Restart Codex to apply the startup-only changes.";
   }
@@ -3080,7 +2171,7 @@ function runtimeSaveNotice(runtime: RuntimeStatus): string {
     : "Saved. Changes apply on the next turn.";
 }
 
-function runtimeActionNotice(runtime: RuntimeStatus, action: "reload" | "restart"): string {
+function runtimeActionNotice(runtime: CodexRuntimeStatus, action: "reload" | "restart"): string {
   if (runtime.restartRequired) {
     return action === "reload"
       ? "Reloaded available resources. Restart Codex to apply startup-only changes."
@@ -3096,27 +2187,8 @@ function runtimeActionNotice(runtime: RuntimeStatus, action: "reload" | "restart
     : "Codex restarted and is ready.";
 }
 
-function booleanValue(value: unknown): boolean | undefined {
-  return typeof value === "boolean" ? value : undefined;
-}
-
-function arrayValue(value: unknown): readonly unknown[] | undefined {
-  return Array.isArray(value) ? value : undefined;
-}
-
-function recordValue(value: unknown): Readonly<Record<string, unknown>> | undefined {
-  return typeof value === "object" && value !== null && !Array.isArray(value)
-    ? (value as Readonly<Record<string, unknown>>)
-    : undefined;
-}
-
 function isDefined<Value>(value: Value | undefined): value is Value {
   return value !== undefined;
-}
-
-function apiError(value: unknown): string | undefined {
-  const error = recordValue(value)?.error;
-  return typeof error === "string" ? error : undefined;
 }
 
 function messageOf(error: unknown): string {
@@ -3124,9 +2196,9 @@ function messageOf(error: unknown): string {
 }
 
 class ConfigApiError extends Error {
-  public readonly issues: readonly ValidationIssue[] | undefined;
+  public readonly issues: readonly ConfigValidationIssue[] | undefined;
 
-  public constructor(message: string, issues: readonly ValidationIssue[] | undefined) {
+  public constructor(message: string, issues: readonly ConfigValidationIssue[] | undefined) {
     super(message);
     this.name = "ConfigApiError";
     this.issues = issues;
@@ -3135,4 +2207,4 @@ class ConfigApiError extends Error {
 
 const root = document.getElementById("root");
 if (root === null) throw new Error("Mini App root element is missing");
-createRoot(root).render(h(SettingsApp));
+createRoot(root).render(<SettingsApp />);

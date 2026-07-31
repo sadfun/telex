@@ -7,17 +7,8 @@ export type TelegramDestination =
   | { readonly kind: "directMessagesTopic"; readonly directMessagesTopicId: number }
   | { readonly kind: "genericThread"; readonly replyToMessageId: number };
 
-export type TelegramVisibility =
-  | { readonly kind: "normal" }
-  | {
-      readonly kind: "ephemeral";
-      readonly receiverUserId: number;
-      readonly incomingEphemeralMessageId: number;
-    };
-
 export interface TelegramReplyRoute {
   readonly destination: TelegramDestination;
-  readonly visibility: TelegramVisibility;
 }
 
 export interface TelegramIncomingRoute {
@@ -30,26 +21,12 @@ export type TelegramCommandMatch =
   | { readonly kind: "otherBot" }
   | { readonly kind: "none" };
 
-export function routeTelegramMessage(
-  message: Message,
-  senderUserId: number,
-): TelegramIncomingRoute | undefined {
-  const visibility: TelegramVisibility =
-    message.ephemeral_message_id === undefined
-      ? { kind: "normal" }
-      : {
-          kind: "ephemeral",
-          receiverUserId: senderUserId,
-          incomingEphemeralMessageId: message.ephemeral_message_id,
-        };
+export function routeTelegramMessage(message: Message): TelegramIncomingRoute | undefined {
   const directMessagesTopicId = message.direct_messages_topic?.topic_id;
   if (directMessagesTopicId !== undefined) {
     return {
       conversationSuffix: `direct:${directMessagesTopicId}`,
-      reply: {
-        destination: { kind: "directMessagesTopic", directMessagesTopicId },
-        visibility,
-      },
+      reply: { destination: { kind: "directMessagesTopic", directMessagesTopicId } },
     };
   }
   if (message.chat.is_direct_messages === true) return undefined;
@@ -59,25 +36,19 @@ export function routeTelegramMessage(
     return {
       // Preserve the existing durable key for ordinary forum and private-chat topics.
       conversationSuffix: String(messageThreadId),
-      reply: {
-        destination: { kind: "topic", messageThreadId },
-        visibility,
-      },
+      reply: { destination: { kind: "topic", messageThreadId } },
     };
   }
   if (messageThreadId !== undefined) {
     return {
       // A generic thread ID identifies its root message. It is not a forum topic parameter.
       conversationSuffix: String(messageThreadId),
-      reply: {
-        destination: { kind: "genericThread", replyToMessageId: messageThreadId },
-        visibility,
-      },
+      reply: { destination: { kind: "genericThread", replyToMessageId: messageThreadId } },
     };
   }
   return {
     conversationSuffix: "0",
-    reply: { destination: { kind: "chat" }, visibility },
+    reply: { destination: { kind: "chat" } },
   };
 }
 

@@ -23,7 +23,7 @@ type StableClientRequestInput = ClientRequest extends infer Request
     : never
   : never;
 
-export interface ApplicationContextEntry {
+interface ApplicationContextEntry {
   readonly value: string;
   readonly kind: "application";
 }
@@ -92,12 +92,15 @@ export interface CodexAppServerExit {
 }
 
 export type ExitListener = (exit: CodexAppServerExit) => void;
-export type CodexLaunchResolver = (
+type CodexLaunchResolver = (
   binaryPath: string,
   args: readonly string[],
   cwd: string,
   env: NodeJS.ProcessEnv,
 ) => Promise<CodexLaunch>;
+
+/** The app-server's transient overloaded/busy JSON-RPC code; such requests retry up to 3 times. */
+const TRANSIENT_OVERLOAD_RPC_CODE = -32_001;
 
 export class CodexAppServer {
   readonly #pending = new Map<RequestId, PendingRequest>();
@@ -228,7 +231,11 @@ export class CodexAppServer {
       try {
         return (await this.requestOnce(request)) as Result;
       } catch (error) {
-        if (!(error instanceof CodexRpcError) || error.rpcCode !== -32_001 || attempt >= 3) {
+        if (
+          !(error instanceof CodexRpcError) ||
+          error.rpcCode !== TRANSIENT_OVERLOAD_RPC_CODE ||
+          attempt >= 3
+        ) {
           throw error;
         }
         await delay(100 * 2 ** attempt + Math.floor(Math.random() * 100));
