@@ -2,6 +2,7 @@ import { access, readFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { AutomationStore, ScheduledRunsEngine } from "./automations/index.js";
+import { SlackChannel } from "./channels/slack/channel.js";
 import { TelegramChannel } from "./channels/telegram/channel.js";
 import { CodexConfigService } from "./codex/config-service.js";
 import { CodexAppServer } from "./codex/rpc.js";
@@ -148,21 +149,25 @@ export async function runTelex(): Promise<TelexRunResult> {
     resources.push(runtime);
     await runtime.start();
 
-    const miniApp = new MiniAppServer({
-      host: config.host,
-      port: config.port,
-      botToken: config.telegramToken,
-      allowedUserIds: config.allowedUserIds,
-      configService,
-      runtime,
-      settings,
-      logger: logger.child({ component: "miniapp" }),
-    });
-    resources.push(miniApp);
-    await miniApp.start();
+    // The Mini App authenticates through Telegram initData, so it only runs
+    // when the Telegram connector is configured.
+    if (config.telegram !== undefined) {
+      const miniApp = new MiniAppServer({
+        host: config.host,
+        port: config.port,
+        botToken: config.telegram.botToken,
+        allowedUserIds: config.telegram.allowedUserIds,
+        configService,
+        runtime,
+        settings,
+        logger: logger.child({ component: "miniapp" }),
+      });
+      resources.push(miniApp);
+      await miniApp.start();
+    }
 
     let publicUrl = config.publicUrl;
-    if (publicUrl === undefined && config.tunnelMode === "auto") {
+    if (publicUrl === undefined && config.telegram !== undefined && config.tunnelMode === "auto") {
       try {
         const binary = await ensureCloudflared(
           toolchainsDirectory,
@@ -195,19 +200,34 @@ export async function runTelex(): Promise<TelexRunResult> {
         : { installDirectory: config.installDirectory }),
       logger: logger.child({ component: "updater" }),
     });
-    const telegram = new TelegramChannel(
-      config.telegramToken,
-      config.telegramApiBase,
-      config.allowedUserIds,
-      config.telegramPollTimeout,
-      join(config.workspace, ".telex", "attachments"),
-      logger.child({ component: "telegram" }),
-      publicUrl === undefined ? undefined : `${publicUrl}/miniapp`,
+    const telegram =
+      config.telegram === undefined
+        ? undefined
+        : new TelegramChannel(
+            config.telegram.botToken,
+            config.telegramApiBase,
+            config.telegram.allowedUserIds,
+            config.telegramPollTimeout,
+            join(config.workspace, ".telex", "attachments"),
+            logger.child({ component: "telegram" }),
+            publicUrl === undefined ? undefined : `${publicUrl}/miniapp`,
+          );
+    const slack =
+      config.slack === undefined
+        ? undefined
+        : new SlackChannel(
+            config.slack,
+            join(config.workspace, ".telex", "attachments"),
+            logger.child({ component: "slack" }),
+            configService,
+          );
+    const channels = [telegram, slack].filter(
+      (channel): channel is NonNullable<typeof channel> => channel !== undefined,
     );
     const scheduledRuns = new ScheduledRunsEngine({
       store: automations,
       codex,
-      channels: [telegram],
+      channels,
       workspace: config.workspace,
       logger: logger.child({ component: "scheduled-runs" }),
     });
@@ -234,8 +254,14 @@ export async function runTelex(): Promise<TelexRunResult> {
       runtime,
       scheduledRuns,
     );
-    resources.push(telegram);
-    await telegram.start(bridge.handleMessage);
+    if (telegram !== undefined) {
+      resources.push(telegram);
+      await telegram.start(bridge.handleMessage);
+    }
+    if (slack !== undefined) {
+      resources.push(slack);
+      await slack.start(bridge.handleMessage);
+    }
     resources.push(scheduledRuns);
     await scheduledRuns.start();
 
@@ -243,7 +269,9 @@ export async function runTelex(): Promise<TelexRunResult> {
       version: bridgeVersion,
       codexVersion: pinnedVersion,
       workspace: config.workspace,
-      miniApp: `${config.host}:${config.port}`,
+      miniApp: config.telegram === undefined ? "disabled" : `${config.host}:${config.port}`,
+      telegram: telegram === undefined ? "disabled" : "enabled",
+      slack: slack === undefined ? "disabled" : "enabled",
     });
 
     if (config.updateMode !== "off") {

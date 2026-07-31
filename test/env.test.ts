@@ -9,7 +9,7 @@ const required = {
 describe("loadAppConfig", () => {
   it("parses allowlisted users and safe defaults", () => {
     const config = loadAppConfig(required);
-    expect([...config.allowedUserIds]).toEqual([42, 9001]);
+    expect([...(config.telegram?.allowedUserIds ?? [])]).toEqual([42, 9001]);
     expect(config.telegramApiBase).toBe("https://api.telegram.org");
     expect(config.checkCodexUpdates).toBe(true);
     expect(config.updateMode).toBe("notify");
@@ -51,6 +51,112 @@ describe("loadAppConfig", () => {
       loadAppConfig({
         ...required,
         TELEGRAM_ALLOWED_USER_IDS: "42,not-a-user",
+      }),
+    ).toThrow();
+  });
+
+  it("leaves the Slack connector disabled by default", () => {
+    expect(loadAppConfig(required).slack).toBeUndefined();
+  });
+
+  it("supports Slack-only operation without Telegram credentials", () => {
+    const config = loadAppConfig({
+      SLACK_BOT_TOKEN: "xoxb-123",
+      SLACK_APP_TOKEN: "xapp-1",
+      SLACK_ALLOWED_USER_IDS: "U0123ABC",
+    });
+    expect(config.telegram).toBeUndefined();
+    expect(config.slack).toBeDefined();
+  });
+
+  it("supports * to allow every workspace member on Slack", () => {
+    const config = loadAppConfig({
+      SLACK_BOT_TOKEN: "xoxb-123",
+      SLACK_APP_TOKEN: "xapp-1",
+      SLACK_ALLOWED_USER_IDS: "*",
+    });
+    expect(config.slack?.allowAllWorkspaceMembers).toBe(true);
+    expect([...(config.slack?.allowedUserIds ?? ["sentinel"])]).toEqual([]);
+  });
+
+  it("parses the optional Slack admin list", () => {
+    const config = loadAppConfig({
+      SLACK_BOT_TOKEN: "xoxb-123",
+      SLACK_APP_TOKEN: "xapp-1",
+      SLACK_ALLOWED_USER_IDS: "*",
+      SLACK_ADMIN_USER_IDS: "U0ADMIN0AAA",
+    });
+    expect([...(config.slack?.adminUserIds ?? [])]).toEqual(["U0ADMIN0AAA"]);
+    expect(
+      loadAppConfig({
+        SLACK_BOT_TOKEN: "xoxb-123",
+        SLACK_APP_TOKEN: "xapp-1",
+        SLACK_ALLOWED_USER_IDS: "*",
+      }).slack?.adminUserIds,
+    ).toBeUndefined();
+  });
+
+  it("rejects an admin list without the Slack connector", () => {
+    expect(() => loadAppConfig({ ...required, SLACK_ADMIN_USER_IDS: "U0ADMIN0AAA" })).toThrow(
+      /requires the Slack connector/,
+    );
+  });
+
+  it("rejects mixing * with explicit Slack user IDs", () => {
+    expect(() =>
+      loadAppConfig({
+        SLACK_BOT_TOKEN: "xoxb-123",
+        SLACK_APP_TOKEN: "xapp-1",
+        SLACK_ALLOWED_USER_IDS: "*,U0123ABC",
+      }),
+    ).toThrow();
+  });
+
+  it("rejects a configuration with no connectors at all", () => {
+    expect(() => loadAppConfig({})).toThrow(/at least one connector/);
+  });
+
+  it("rejects partial Telegram settings", () => {
+    expect(() => loadAppConfig({ TELEGRAM_BOT_TOKEN: "12345678901234567890:token" })).toThrow(
+      /set together/,
+    );
+  });
+
+  it("parses complete Slack settings", () => {
+    const config = loadAppConfig({
+      ...required,
+      SLACK_BOT_TOKEN: "xoxb-123",
+      SLACK_APP_TOKEN: "xapp-1-A1-123-abc",
+      SLACK_ALLOWED_USER_IDS: "U0123ABC, w0999xyz",
+    });
+    expect(config.slack).toMatchObject({
+      botToken: "xoxb-123",
+      appToken: "xapp-1-A1-123-abc",
+    });
+    expect([...(config.slack?.allowedUserIds ?? [])]).toEqual(["U0123ABC", "W0999XYZ"]);
+  });
+
+  it("rejects partial Slack settings", () => {
+    expect(() => loadAppConfig({ ...required, SLACK_BOT_TOKEN: "xoxb-123" })).toThrow(
+      /set together/,
+    );
+  });
+
+  it("rejects Slack tokens with the wrong prefix and malformed user IDs", () => {
+    expect(() =>
+      loadAppConfig({
+        ...required,
+        SLACK_BOT_TOKEN: "xoxp-user-token",
+        SLACK_APP_TOKEN: "xapp-1",
+        SLACK_ALLOWED_USER_IDS: "U0123ABC",
+      }),
+    ).toThrow();
+    expect(() =>
+      loadAppConfig({
+        ...required,
+        SLACK_BOT_TOKEN: "xoxb-123",
+        SLACK_APP_TOKEN: "xapp-1",
+        SLACK_ALLOWED_USER_IDS: "not-a-user",
       }),
     ).toThrow();
   });

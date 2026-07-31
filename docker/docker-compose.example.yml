@@ -1,0 +1,19 @@
+# Example Compose deployment. Copy next to your .env (SLACK_* and/or
+# TELEGRAM_* variables) and run: docker compose up -d --build
+#
+# State lives in the `telex-data` volume. To keep it on the host under a
+# dedicated user instead, replace the volume with a bind mount owned by
+# uid 1001 (the in-container `telex` user):
+#   volumes:
+#     - /srv/telex/data:/data
+services:
+  telex:
+    build: ..
+    env_file: .env
+    init: true
+    restart: unless-stopped
+    volumes:
+      - telex-data:/data
+
+volumes:
+  telex-data:
