@@ -138,11 +138,15 @@ function splitByInlineCode(
 function convertPlainProse(text: string): string {
   let result = escapeSlackEntities(text);
   // Markdown images and links become Slack links. The label drops `|`, which
-  // Slack reserves as its own separator.
+  // Slack reserves as its own separator. Local filesystem targets cannot be
+  // opened by the reader, so they render as inline code instead of a link.
   result = result.replaceAll(
     /!?\[([^\]\n]*)\]\((\S+?)\)/gu,
     (_match, label: string, url: string) => {
       const safeLabel = label.replaceAll("|", "/").trim();
+      if (!/^(?:https?|mailto):/iu.test(url)) {
+        return safeLabel.length === 0 ? `\`${url}\`` : `${safeLabel} (\`${url}\`)`;
+      }
       return safeLabel.length === 0 ? `<${url}>` : `<${url}|${safeLabel}>`;
     },
   );

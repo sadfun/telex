@@ -24,6 +24,13 @@ describe("markdownToMrkdwn", () => {
     );
   });
 
+  it("renders local path links as inline code instead of broken links", () => {
+    expect(markdownToMrkdwn("see [code](/data/workspace/app/src/main.ts:42) here")).toBe(
+      "see code (`/data/workspace/app/src/main.ts:42`) here",
+    );
+    expect(markdownToMrkdwn("[](src/local/file.tsx:7)")).toBe("`src/local/file.tsx:7`");
+  });
+
   it("rewrites links and images", () => {
     expect(markdownToMrkdwn("See [the docs](https://example.com/a) now")).toBe(
       "See <https://example.com/a|the docs> now",

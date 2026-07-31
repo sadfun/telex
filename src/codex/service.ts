@@ -1114,6 +1114,11 @@ Host-local UI is not visible or accessible to the user:
 - Do not assume the user can see the host screen, clipboard, notifications, or spawned windows.
 - Explicitly link files intended for the user in the final response so Telex can deliver them.
 
+When referencing code or files in replies:
+- Never format a local filesystem path as a markdown link target; the user cannot open it. This includes workspace paths and home-relative paths.
+- Refer to code with a repository-relative path and line number as inline code, for example \`src/app/main.ts:42\`.
+- When you know the repository's public remote (for example on GitHub) and the relevant branch or commit, prefer a full https URL to the file and line so the reference is clickable in chat.
+
 All normal Codex filesystem, shell, network, approval, and project behavior remains unchanged. Telex changes only how the user communicates with Codex.`,
     },
   };

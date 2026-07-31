@@ -95,4 +95,10 @@ describe("createRemoteClientContext", () => {
     });
     expect(discord["telex.remote-client"]?.value).not.toContain("Telegram");
   });
+
+  it("tells Codex not to link local filesystem paths in replies", () => {
+    const value = createRemoteClientContext("slack")["telex.remote-client"]?.value ?? "";
+    expect(value).toContain("Never format a local filesystem path as a markdown link target");
+    expect(value).toContain("repository-relative path and line number");
+  });
 });
