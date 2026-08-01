@@ -26,6 +26,9 @@ export interface CodexE2eToken {
   readonly planType?: string | null;
 }
 
+export const E2E_MODEL = "gpt-5.6-luna";
+export const E2E_REASONING_EFFORT = "medium";
+
 export interface CodexE2eTokenRequest {
   readonly reason: "initial" | "unauthorized";
   readonly previousAccountId?: string | null;
@@ -138,7 +141,7 @@ export async function launchE2eTelex(options: LaunchE2eTelexOptions): Promise<E2
     ]);
     await atomicWriteFile(
       join(codexHome, "config.toml"),
-      'approval_policy = "never"\nsandbox_mode = "workspace-write"\nweb_search = "live"\ncli_auth_credentials_store = "file"\nproject_root_markers = []\n',
+      `model = "${E2E_MODEL}"\nmodel_reasoning_effort = "${E2E_REASONING_EFFORT}"\napproval_policy = "never"\nsandbox_mode = "workspace-write"\nweb_search = "live"\ncli_auth_credentials_store = "file"\nproject_root_markers = []\n`,
     );
     const binaryPath =
       options.codexBinaryPath ??
@@ -224,6 +227,16 @@ export async function launchE2eTelex(options: LaunchE2eTelexOptions): Promise<E2
     if (login.type !== "chatgptAuthTokens") throw new Error("Codex rejected external E2E auth");
 
     const configService = new CodexConfigService(rpc, workspace);
+    const config = await configService.read();
+    const model = config.capabilities.models.find((candidate) => candidate.model === E2E_MODEL);
+    if (model === undefined) throw new Error(`E2E model is unavailable: ${E2E_MODEL}`);
+    if (
+      !model.supportedReasoningEfforts.some(
+        (option) => option.reasoningEffort === E2E_REASONING_EFFORT,
+      )
+    ) {
+      throw new Error(`E2E reasoning effort is unavailable: ${E2E_REASONING_EFFORT}`);
+    }
     const runtime = new CodexRuntimeService({
       rpc,
       codex,

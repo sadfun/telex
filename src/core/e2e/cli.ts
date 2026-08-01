@@ -2,7 +2,7 @@ import { readFile, stat } from "node:fs/promises";
 import { stdin, stdout } from "node:process";
 import { createInterface } from "node:readline/promises";
 import { launchTelegramE2e, runTelegramE2eSuite } from "../../channels/telegram/e2e.js";
-import { type CodexE2eToken, launchE2eTelex } from "./instance.js";
+import { type CodexE2eToken, E2E_MODEL, E2E_REASONING_EFFORT, launchE2eTelex } from "./instance.js";
 import { AdjustableE2eClock, runCoreE2eSuite } from "./suite.js";
 
 const usage = `Usage:
@@ -43,6 +43,7 @@ async function main(): Promise<void> {
   const codexBinaryPath = parsed.values.get("codex-binary") ?? process.env.TELEX_E2E_CODEX_BINARY;
   const logLevel = process.env.TELEX_E2E_LOG_LEVEL === "debug" ? "debug" : "info";
   const clock = new AdjustableE2eClock();
+  stdout.write(`E2E model: ${E2E_MODEL} (${E2E_REASONING_EFFORT})\n`);
 
   if (parsed.mode === "core") {
     const instance = await launchE2eTelex({

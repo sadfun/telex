@@ -2,6 +2,13 @@
 
 All notable changes to Telex are documented in this file.
 
+## Unreleased
+
+### Changed
+
+- Pin real E2E conversational and scheduled turns to GPT-5.6 Luna with medium reasoning, validate
+  that the authenticated Codex account exposes that model, and print the selection with results.
+
 ## [0.0.30] - 2026-08-01
 
 ### Fixed

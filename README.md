@@ -240,7 +240,8 @@ The test suite is deliberately credentialed and online: it launches a disposable
 directory and pinned Codex app-server, signs that instance in with a token supplied by Codex,
 and talks through the same `MessagingChannel` contract as production. Nothing substitutes for
 Codex, transcription, image generation, the scheduler, or Telegram. Temporary state is removed
-when the run finishes.
+when the run finishes. Conversational and scheduled turns use `gpt-5.6-luna` with medium
+reasoning so run times remain directly comparable.
 
 The programmatic entry point is `launchE2eTelex({ requestToken })` in
 `src/core/e2e/instance.ts`. The callback is invoked initially and again if Codex sends
