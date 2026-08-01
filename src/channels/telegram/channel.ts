@@ -73,6 +73,11 @@ export const telegramBotCommands: readonly BotCommand[] = botCommands.map((entry
   description: entry.menuDescription,
 }));
 
+export interface TelegramChannelOptions {
+  /** Narrow E2E-only exception; ordinary bot senders remain denied by default. */
+  readonly allowedBotUserIds?: ReadonlySet<number>;
+}
+
 export function telegramMenuButton(miniAppUrl: string | undefined): MenuButton {
   if (miniAppUrl === undefined) {
     return { type: "commands" };
@@ -147,6 +152,7 @@ export class TelegramChannel implements MessagingChannel {
   readonly #attachmentDirectory: string;
   readonly #logger: Logger;
   readonly #miniAppUrl: string | undefined;
+  readonly #allowedBotUserIds: ReadonlySet<number>;
   readonly #pendingChoices = new Map<string, PendingChoice>();
   #handler: MessageHandler | undefined;
   #runner: RunnerHandle | undefined;
@@ -160,6 +166,7 @@ export class TelegramChannel implements MessagingChannel {
     attachmentDirectory: string,
     logger: Logger,
     miniAppUrl?: string,
+    options: TelegramChannelOptions = {},
   ) {
     this.#token = token;
     this.#apiRoot = apiRoot;
@@ -168,6 +175,7 @@ export class TelegramChannel implements MessagingChannel {
     this.#attachmentDirectory = attachmentDirectory;
     this.#logger = logger;
     this.#miniAppUrl = miniAppUrl;
+    this.#allowedBotUserIds = options.allowedBotUserIds ?? new Set();
     this.#bot = new Bot(token, { client: { apiRoot } });
     this.#bot.on("message", async (context) => {
       await this.handleMessage(context.message, false, context.api);
@@ -267,7 +275,12 @@ export class TelegramChannel implements MessagingChannel {
   ): Promise<void> {
     const sender = message.from;
     const handler = this.#handler;
-    if (sender === undefined || sender.is_bot || handler === undefined) return;
+    if (
+      sender === undefined ||
+      handler === undefined ||
+      (sender.is_bot && !this.#allowedBotUserIds.has(sender.id))
+    )
+      return;
     if (!this.#allowedUserIds.has(sender.id)) {
       this.#logger.warn("Ignored Telegram message from unauthorized user", { userId: sender.id });
       return;

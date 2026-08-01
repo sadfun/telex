@@ -2,6 +2,17 @@
 
 All notable changes to Telex are documented in this file.
 
+## [0.0.29] - 2026-08-01
+
+### Changed
+
+- Replaced the mock-heavy unit suite with credentialed end-to-end engines for the core channel protocol and Telegram. They launch a disposable real Telex/Codex runtime, exercise text, voice transcription, image and document attachments, progress rendering, parallel conversations, and production scheduler delivery with only the clock controlled.
+- Added an explicit external-token refresh provider for isolated Codex app-server instances and a programmatic, default-deny Telegram bot-sender exception used only by the bot-to-bot E2E runner.
+
+### Fixed
+
+- Extract the pinned voice transport without restoring archive ownership on Linux, so transcription installs under rootless containers and other restricted runtimes.
+
 ## [0.0.28] - 2026-08-01
 
 ### Fixed

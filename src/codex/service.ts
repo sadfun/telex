@@ -11,6 +11,8 @@ import type { ServerNotification } from "../generated/codex/ServerNotification.j
 import type { ServerRequest } from "../generated/codex/ServerRequest.js";
 import type { JsonValue } from "../generated/codex/serde_json/JsonValue.js";
 import type { AccountLoginCompletedNotification } from "../generated/codex/v2/AccountLoginCompletedNotification.js";
+import type { ChatgptAuthTokensRefreshParams } from "../generated/codex/v2/ChatgptAuthTokensRefreshParams.js";
+import type { ChatgptAuthTokensRefreshResponse } from "../generated/codex/v2/ChatgptAuthTokensRefreshResponse.js";
 import type { CommandExecutionRequestApprovalResponse } from "../generated/codex/v2/CommandExecutionRequestApprovalResponse.js";
 import type { DynamicToolCallParams } from "../generated/codex/v2/DynamicToolCallParams.js";
 import type { DynamicToolCallResponse } from "../generated/codex/v2/DynamicToolCallResponse.js";
@@ -140,9 +142,13 @@ type ExplicitSkillInputProvider = (
   text: string,
 ) => readonly ExplicitSkillInput[] | Promise<readonly ExplicitSkillInput[]>;
 
-interface CodexServiceProviders {
+export interface CodexServiceProviders {
   readonly effectiveSettings?: EffectiveCodexSettingsProvider;
   readonly explicitSkillInputs?: ExplicitSkillInputProvider;
+  readonly externalAuthTokens?: (
+    request: ChatgptAuthTokensRefreshParams,
+  ) => Promise<ChatgptAuthTokensRefreshResponse>;
+  readonly now?: () => number;
 }
 
 export class CodexService {
@@ -163,6 +169,8 @@ export class CodexService {
   readonly #remoteClientContextEnabled: () => boolean;
   readonly #effectiveSettings: EffectiveCodexSettingsProvider;
   readonly #explicitSkillInputs: ExplicitSkillInputProvider;
+  readonly #externalAuthTokens: CodexServiceProviders["externalAuthTokens"];
+  readonly #now: () => number;
   #pauseGate: Deferred<void> | undefined;
   #idleGate: Deferred<void> | undefined;
   #interruptingScheduledTurns = false;
@@ -194,6 +202,8 @@ export class CodexService {
     this.#remoteClientContextEnabled = remoteClientContextEnabled;
     this.#effectiveSettings = providers.effectiveSettings ?? (() => ({}));
     this.#explicitSkillInputs = providers.explicitSkillInputs ?? (() => []);
+    this.#externalAuthTokens = providers.externalAuthTokens;
+    this.#now = providers.now ?? Date.now;
     rpc.onNotification((notification) => this.handleNotification(notification));
     rpc.onExit((exit) => this.handleTransportExit(exit.error));
     rpc.setServerRequestHandler(async (request) => await this.handleServerRequest(request));
@@ -224,7 +234,7 @@ export class CodexService {
   }
 
   public tryAcquireBackground(conversationKey: string): BackgroundLeaseDecision {
-    const now = Date.now();
+    const now = this.#now();
     const retryAt = new Date(now + CodexService.#backgroundQuietPeriodMs);
     if ((this.#foregroundWaiting.get(conversationKey) ?? 0) > 0) {
       return { acquired: false, reason: "A user message is waiting.", retryAt };
@@ -327,7 +337,7 @@ export class CodexService {
           // Once a turn started, its session owns the stream, including failure.
           if (!started) await stream.fail(errorMessage(error));
         } finally {
-          this.#lastForegroundAt.set(conversationKey, Date.now());
+          this.#lastForegroundAt.set(conversationKey, this.#now());
           this.leaveJob();
         }
       });
@@ -831,6 +841,15 @@ export class CodexService {
       case "item/tool/call":
         await this.handleDynamicToolCall(request.params, request.id);
         break;
+      case "account/chatgptAuthTokens/refresh": {
+        const provider = this.#externalAuthTokens;
+        if (provider === undefined) {
+          await this.#rpc.replyError(request.id, -32_601, "External ChatGPT auth is unavailable");
+          break;
+        }
+        await this.#rpc.reply(request.id, await provider(request.params));
+        break;
+      }
       default:
         await this.#rpc.replyError(request.id, -32_601, `Unsupported request: ${request.method}`);
     }

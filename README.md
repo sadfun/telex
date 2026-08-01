@@ -229,11 +229,70 @@ Development commands:
 
 ```sh
 npm run check
-npm test
 npm run dev
 ```
 
 The handwritten application is strict TypeScript 7. Messaging transports depend only on `src/core/channel.ts`; Telegram is the first implementation.
+
+### End-to-end tests
+
+The test suite is deliberately credentialed and online: it launches a disposable Telex data
+directory and pinned Codex app-server, signs that instance in with a token supplied by Codex,
+and talks through the same `MessagingChannel` contract as production. Nothing substitutes for
+Codex, transcription, image generation, the scheduler, or Telegram. Temporary state is removed
+when the run finishes.
+
+The programmatic entry point is `launchE2eTelex({ requestToken })` in
+`src/core/e2e/instance.ts`. The callback is invoked initially and again if Codex sends
+`account/chatgptAuthTokens/refresh`, so a host can delegate short-lived credentials without
+copying its Codex home. The returned `E2eTelexInstance` exposes the real Codex service,
+scheduler, channels, workspace, and cleanup method. `ProtocolE2eChannel.send()` is the direct
+core protocol transport.
+
+For the CLI, place the delegated credential in a mode-0600 JSON file:
+
+```json
+{"accessToken":"...","accountId":"...","planType":"plus"}
+```
+
+Provide a real voice recording and the phrase it contains. This makes the voice assertion cover
+download/input handling, ChatGPT transcription, prompt construction, and the final model answer.
+
+```sh
+scripts/e2e-container.sh core \
+  --codex-token-file /run/user/1000/telex-codex-token.json \
+  --voice-file /run/user/1000/telex-e2e.ogg \
+  --voice-text "telex end to end voice marker"
+```
+
+The core run verifies text round-trip, voice transcription, generated-image attachment bytes,
+two concurrent conversations, and a real scheduled run after advancing only the scheduler clock.
+Missing credentials are requested interactively with hidden input; tokens are never accepted on
+the command line or written to logs.
+
+Telegram uses the same instance factory, two dedicated Bot API credentials, and a transparent
+local recorder that forwards every request to the real Telegram API. The recorder observes rich
+reasoning drafts, typing activity, and attachment methods without faking Telegram responses.
+Bot-origin updates stay rejected in production; only the explicitly named peer ID is admitted by
+this E2E instance.
+
+```sh
+scripts/e2e-container.sh telegram \
+  --codex-token-file /run/user/1000/telex-codex-token.json \
+  --telex-bot-token-file /run/user/1000/telex-bot-token \
+  --peer-bot-token-file /run/user/1000/telex-peer-token \
+  --voice-file /run/user/1000/telex-e2e.ogg \
+  --voice-text "telex end to end voice marker"
+```
+
+For real forum coverage, add `--chat-id ID --thread-ids ID,ID`; the suite then sends simultaneous
+turns through two Telegram topics and verifies that replies retain their topic. The Telegram run
+also creates and fires a schedule through the real channel. Test bots must have bot-to-bot delivery
+enabled and no competing `getUpdates` consumer.
+
+CI and the release job typecheck, build, and load the E2E entry point, but do not claim a
+credentialless substitute run. Maintainers run both online suites before a release that changes
+the bridge, Codex integration, scheduler, transcription, or Telegram delivery.
 
 ### Codex protocol updates
 
@@ -261,7 +320,7 @@ The check uses the candidate binary's `app-server generate-ts` output and compar
 ### Publishing a release
 
 1. Update `package.json` and `package-lock.json` to the same semantic version.
-2. Run `npm run check`, `npm test`, and `npm run build`.
+2. Run `npm run check`, `npm run build`, and the applicable credentialed E2E suites above.
 3. Push a matching tag such as `v0.2.0`.
 
 The Release workflow verifies the tag, runs the full checks, bundles compiled code with production dependencies, writes the SHA-256 asset, and publishes both assets to GitHub Releases. The updater accepts only assets named `telex-VERSION.tar.gz` and `telex-VERSION.tar.gz.sha256`.

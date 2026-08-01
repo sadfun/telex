@@ -23,8 +23,9 @@ jobs:
           test "$GITHUB_REF_NAME" = "v$package_version"
       - run: npm ci
       - run: npm run check
-      - run: npm test
       - run: npm run build
+      - name: Load E2E entry point
+        run: npm test -- --help
       - name: Build release bundle
         run: |
           version=$(node -p 'require("./package.json").version')
