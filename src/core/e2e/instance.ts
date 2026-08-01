@@ -13,12 +13,13 @@ import type { LoginAccountResponse } from "../../generated/codex/v2/LoginAccount
 import { atomicWriteFile, ensureDirectory } from "../../shared/fs.js";
 import { Logger, type LogLevel } from "../../shared/logger.js";
 import { readTelexVersion } from "../../shared/version.js";
-import { ChatGptVoiceTranscriber } from "../../transcription/service.js";
+import { ChatGptVoiceTranscriber, type VoiceTranscriber } from "../../transcription/service.js";
 import { CurlImpersonateTransport } from "../../transcription/transport.js";
 import { CodexBridge } from "../bridge.js";
 import type { MessagingChannel } from "../channel.js";
 import { ConversationStore } from "../conversation-store.js";
 import { ProtocolE2eChannel } from "./protocol-channel.js";
+import { attachCodexE2eTrace, E2eTrace } from "./trace.js";
 
 export interface CodexE2eToken {
   readonly accessToken: string;
@@ -44,6 +45,7 @@ export interface E2eChannelContext {
 
 export interface LaunchE2eTelexOptions {
   readonly requestToken: CodexE2eTokenProvider;
+  readonly trace?: E2eTrace;
   readonly projectRoot?: string;
   readonly codexBinaryPath?: string;
   readonly logLevel?: LogLevel;
@@ -82,6 +84,7 @@ export class E2eTelexInstance {
   public readonly protocol: ProtocolE2eChannel | undefined;
   public readonly codex: CodexService;
   public readonly scheduler: ScheduledRunsEngine;
+  public readonly trace: E2eTrace;
   readonly #runtime: CodexRuntimeService;
   readonly #rpc: CodexAppServer;
   #stopped = false;
@@ -92,6 +95,7 @@ export class E2eTelexInstance {
     channels: readonly MessagingChannel[];
     codex: CodexService;
     scheduler: ScheduledRunsEngine;
+    trace: E2eTrace;
     runtime: CodexRuntimeService;
     rpc: CodexAppServer;
   }) {
@@ -103,6 +107,7 @@ export class E2eTelexInstance {
     );
     this.codex = options.codex;
     this.scheduler = options.scheduler;
+    this.trace = options.trace;
     this.#runtime = options.runtime;
     this.#rpc = options.rpc;
   }
@@ -124,6 +129,7 @@ export class E2eTelexInstance {
 }
 
 export async function launchE2eTelex(options: LaunchE2eTelexOptions): Promise<E2eTelexInstance> {
+  const trace = options.trace ?? new E2eTrace();
   const root = await mkdtemp(join(tmpdir(), "telex-e2e-"));
   const projectRoot = options.projectRoot ?? fileURLToPath(new URL("../../../", import.meta.url));
   const workspace = join(root, "workspace");
@@ -134,21 +140,27 @@ export async function launchE2eTelex(options: LaunchE2eTelexOptions): Promise<E2
   let instance: E2eTelexInstance | undefined;
   let rpc: CodexAppServer | undefined;
   try {
-    await Promise.all([
-      ensureDirectory(workspace),
-      ensureDirectory(codexHome),
-      ensureDirectory(outbound),
-    ]);
-    await atomicWriteFile(
-      join(codexHome, "config.toml"),
-      `model = "${E2E_MODEL}"\nmodel_reasoning_effort = "${E2E_REASONING_EFFORT}"\napproval_policy = "never"\nsandbox_mode = "workspace-write"\nweb_search = "live"\ncli_auth_credentials_store = "file"\nproject_root_markers = []\n`,
-    );
+    await trace.startupSpan("Prepare isolated directories and config", async () => {
+      await Promise.all([
+        ensureDirectory(workspace),
+        ensureDirectory(codexHome),
+        ensureDirectory(outbound),
+      ]);
+      await atomicWriteFile(
+        join(codexHome, "config.toml"),
+        `model = "${E2E_MODEL}"\nmodel_reasoning_effort = "${E2E_REASONING_EFFORT}"\napproval_policy = "never"\nsandbox_mode = "workspace-write"\nweb_search = "live"\ncli_auth_credentials_store = "file"\nproject_root_markers = []\n`,
+      );
+    });
     const binaryPath =
       options.codexBinaryPath ??
-      (await new CodexToolchainManager(
-        toolchains,
-        logger.child({ component: "toolchain" }),
-      ).ensureVersion(await readPinnedCodexVersion(projectRoot)));
+      (await trace.startupSpan(
+        "Install pinned Codex toolchain",
+        async () =>
+          await new CodexToolchainManager(
+            toolchains,
+            logger.child({ component: "toolchain" }),
+          ).ensureVersion(await readPinnedCodexVersion(projectRoot)),
+      ));
     rpc = new CodexAppServer(
       binaryPath,
       workspace,
@@ -156,7 +168,9 @@ export async function launchE2eTelex(options: LaunchE2eTelexOptions): Promise<E2
       await readTelexVersion(projectRoot),
       logger.child({ component: "codex-rpc" }),
     );
-    await rpc.start();
+    const activeRpc = rpc;
+    await trace.startupSpan("Start Codex app-server", async () => await activeRpc.start());
+    attachCodexE2eTrace(activeRpc, trace);
 
     const conversations = new ConversationStore(
       join(root, "conversations.json"),
@@ -166,14 +180,16 @@ export async function launchE2eTelex(options: LaunchE2eTelexOptions): Promise<E2
       join(root, "automations.json"),
       logger.child({ component: "automation-store" }),
     );
-    await Promise.all([conversations.load(), automations.load()]);
+    await trace.startupSpan("Load Telex stores", async () => {
+      await Promise.all([conversations.load(), automations.load()]);
+    });
     const broker = new TokenBroker(options.requestToken);
     const initialToken = await broker.current();
     const transport = new CurlImpersonateTransport(
       toolchains,
       logger.child({ component: "transcription-transport" }),
     );
-    const transcriber = new ChatGptVoiceTranscriber(
+    const liveTranscriber = new ChatGptVoiceTranscriber(
       codexHome,
       transport,
       async () => {
@@ -184,9 +200,13 @@ export async function launchE2eTelex(options: LaunchE2eTelexOptions): Promise<E2
         return { accessToken: token.accessToken, accountId: token.accountId };
       },
     );
+    const transcriber: VoiceTranscriber = {
+      transcribe: async (path) =>
+        await trace.span("Voice transcription", async () => await liveTranscriber.transcribe(path)),
+    };
     let liveRuntime: CodexRuntimeService | undefined;
     const codex = new CodexService(
-      rpc,
+      activeRpc,
       conversations,
       workspace,
       join(codexHome, "generated_images"),
@@ -215,19 +235,26 @@ export async function launchE2eTelex(options: LaunchE2eTelexOptions): Promise<E2
           : { now: () => options.now?.().getTime() ?? Date.now() }),
       },
     );
-    const login = await rpc.request<LoginAccountResponse>({
-      method: "account/login/start",
-      params: {
-        type: "chatgptAuthTokens",
-        accessToken: initialToken.accessToken,
-        chatgptAccountId: initialToken.accountId,
-        chatgptPlanType: initialToken.planType ?? null,
-      },
-    });
+    const login = await trace.startupSpan(
+      "Authenticate Codex account",
+      async () =>
+        await activeRpc.request<LoginAccountResponse>({
+          method: "account/login/start",
+          params: {
+            type: "chatgptAuthTokens",
+            accessToken: initialToken.accessToken,
+            chatgptAccountId: initialToken.accountId,
+            chatgptPlanType: initialToken.planType ?? null,
+          },
+        }),
+    );
     if (login.type !== "chatgptAuthTokens") throw new Error("Codex rejected external E2E auth");
 
-    const configService = new CodexConfigService(rpc, workspace);
-    const config = await configService.read();
+    const configService = new CodexConfigService(activeRpc, workspace);
+    const config = await trace.startupSpan(
+      "Read config and model capabilities",
+      async () => await configService.read(),
+    );
     const model = config.capabilities.models.find((candidate) => candidate.model === E2E_MODEL);
     if (model === undefined) throw new Error(`E2E model is unavailable: ${E2E_MODEL}`);
     if (
@@ -238,16 +265,16 @@ export async function launchE2eTelex(options: LaunchE2eTelexOptions): Promise<E2
       throw new Error(`E2E reasoning effort is unavailable: ${E2E_REASONING_EFFORT}`);
     }
     const runtime = new CodexRuntimeService({
-      rpc,
+      rpc: activeRpc,
       codex,
       configService,
       workspace,
       logger: logger.child({ component: "runtime" }),
     });
     liveRuntime = runtime;
-    await runtime.start();
+    await trace.startupSpan("Start Codex runtime", async () => await runtime.start());
     const context = { root, workspace, logger };
-    const created = options.createChannels?.(context) ?? new ProtocolE2eChannel();
+    const created = options.createChannels?.(context) ?? new ProtocolE2eChannel(trace);
     const channels = Array.isArray(created) ? created : [created];
     const scheduler = new ScheduledRunsEngine({
       store: automations,
@@ -269,16 +296,19 @@ export async function launchE2eTelex(options: LaunchE2eTelexOptions): Promise<E2
       runtime,
       scheduler,
     );
-    for (const channel of channels) await channel.start(bridge.handleMessage);
-    await scheduler.start();
+    await trace.startupSpan("Start messaging channels", async () => {
+      for (const channel of channels) await channel.start(bridge.handleMessage);
+    });
+    await trace.startupSpan("Start scheduler", async () => await scheduler.start());
     instance = new E2eTelexInstance({
       root,
       workspace,
       channels,
       codex,
       scheduler,
+      trace,
       runtime,
-      rpc,
+      rpc: activeRpc,
     });
     return instance;
   } catch (error) {

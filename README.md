@@ -241,7 +241,8 @@ directory and pinned Codex app-server, signs that instance in with a token suppl
 and talks through the same `MessagingChannel` contract as production. Nothing substitutes for
 Codex, transcription, image generation, the scheduler, or Telegram. Temporary state is removed
 when the run finishes. Conversational and scheduled turns use `gpt-5.6-luna` with medium
-reasoning so run times remain directly comparable.
+reasoning so run times remain directly comparable. Results include outer container setup and
+per-scenario spans for transcription, Codex turns and tools, Telegram API calls, and delivery.
 
 The programmatic entry point is `launchE2eTelex({ requestToken })` in
 `src/core/e2e/instance.ts`. The callback is invoked initially and again if Codex sends

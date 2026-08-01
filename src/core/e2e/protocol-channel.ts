@@ -13,6 +13,7 @@ import type {
   ProgressSnapshot,
   ProviderReference,
 } from "../channel.js";
+import type { E2eTrace } from "./trace.js";
 
 export interface E2eExchange {
   readonly texts: readonly string[];
@@ -41,11 +42,16 @@ export interface E2ePublishedMessage {
 }
 
 class ProtocolResponder implements MessageResponder {
+  readonly #trace: E2eTrace | undefined;
   readonly #texts: string[] = [];
   readonly #progress: ProgressSnapshot[] = [];
   #streamedText = "";
   #finalText = "";
   #attachments: readonly E2eCapturedAttachment[] = [];
+
+  public constructor(trace?: E2eTrace) {
+    this.#trace = trace;
+  }
 
   public createStream(): OutboundStream {
     return {
@@ -58,12 +64,16 @@ class ProtocolResponder implements MessageResponder {
       },
       complete: async (text, attachments = []) => {
         this.#finalText = text;
-        this.#attachments = await Promise.all(
-          attachments.map(async (attachment) => ({
-            ...attachment,
-            content: await readFile(attachment.path),
-          })),
-        );
+        const capture = async (): Promise<void> => {
+          this.#attachments = await Promise.all(
+            attachments.map(async (attachment) => ({
+              ...attachment,
+              content: await readFile(attachment.path),
+            })),
+          );
+        };
+        if (attachments.length === 0 || this.#trace === undefined) await capture();
+        else await this.#trace.span("Capture outbound attachment bytes", capture);
       },
       fail: async (message) => {
         this.#finalText = `Codex error: ${message}`;
@@ -102,6 +112,11 @@ export class ProtocolE2eChannel implements MessagingChannel {
   readonly #waiters: Deferred<E2ePublishedMessage>[] = [];
   #handler: MessageHandler | undefined;
   #nextMessageId = 1;
+  readonly #trace: E2eTrace | undefined;
+
+  public constructor(trace?: E2eTrace) {
+    this.#trace = trace;
+  }
 
   public async start(handler: MessageHandler): Promise<void> {
     this.#handler = handler;
@@ -121,26 +136,30 @@ export class ProtocolE2eChannel implements MessagingChannel {
     const conversation = input.conversation ?? "main";
     const sender = input.sender ?? "operator";
     const id = String(this.#nextMessageId++);
-    const responder = new ProtocolResponder();
-    await handler({
-      id,
-      address: {
-        channel: this.name,
-        key: `${this.name}:${conversation}`,
-        isPrivate: true,
-        isGuest: false,
-        deliveryTarget: {
-          provider: this.name,
-          resource: "destination",
-          id: conversation,
+    const responder = new ProtocolResponder(this.#trace);
+    const handle = async (): Promise<void> => {
+      await handler({
+        id,
+        address: {
+          channel: this.name,
+          key: `${this.name}:${conversation}`,
+          isPrivate: true,
+          isGuest: false,
+          deliveryTarget: {
+            provider: this.name,
+            resource: "destination",
+            id: conversation,
+          },
         },
-      },
-      reference: { provider: this.name, resource: "message", id },
-      sender: { id: sender, displayName: sender },
-      text: input.text,
-      attachments: input.attachments ?? [],
-      responder,
-    });
+        reference: { provider: this.name, resource: "message", id },
+        sender: { id: sender, displayName: sender },
+        text: input.text,
+        attachments: input.attachments ?? [],
+        responder,
+      });
+    };
+    if (this.#trace === undefined) await handle();
+    else await this.#trace.span("Protocol channel round trip", handle, conversation);
     return responder.snapshot();
   }
 

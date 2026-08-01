@@ -3,7 +3,8 @@ import { stdin, stdout } from "node:process";
 import { createInterface } from "node:readline/promises";
 import { launchTelegramE2e, runTelegramE2eSuite } from "../../channels/telegram/e2e.js";
 import { type CodexE2eToken, E2E_MODEL, E2E_REASONING_EFFORT, launchE2eTelex } from "./instance.js";
-import { AdjustableE2eClock, runCoreE2eSuite } from "./suite.js";
+import { AdjustableE2eClock, type E2eScenarioResult, runCoreE2eSuite } from "./suite.js";
+import type { E2eTraceEntry } from "./trace.js";
 
 const usage = `Usage:
   npm test -- --voice-file PATH --voice-text TEXT [--codex-token-file PATH]
@@ -53,6 +54,7 @@ async function main(): Promise<void> {
       ...(codexBinaryPath === undefined ? {} : { codexBinaryPath }),
     });
     try {
+      printTrace("startup", instance.trace.startup());
       printResults(await runCoreE2eSuite({ instance, clock, voiceFile, expectedVoiceText }));
     } finally {
       await instance.stop();
@@ -83,6 +85,7 @@ async function main(): Promise<void> {
     ...(threadIds === undefined ? {} : { threadIds }),
   });
   try {
+    printTrace("startup", instance.telex.trace.startup());
     printResults(await runTelegramE2eSuite({ instance, clock, voiceFile, expectedVoiceText }));
   } finally {
     await instance.stop();
@@ -213,9 +216,27 @@ async function assertReadable(path: string): Promise<void> {
   if (!metadata.isFile() || metadata.size === 0) throw new Error(`Voice fixture is empty: ${path}`);
 }
 
-function printResults(results: readonly { name: string; durationMs: number }[]): void {
-  for (const result of results) stdout.write(`PASS ${result.name} (${result.durationMs} ms)\n`);
+function printResults(results: readonly E2eScenarioResult[]): void {
+  for (const result of results) {
+    stdout.write(`PASS ${result.name} (${result.durationMs} ms)\n`);
+    printTrace(result.name, result.trace);
+  }
   stdout.write(`E2E PASS: ${results.length} real-system scenarios\n`);
+}
+
+function printTrace(name: string, entries: readonly E2eTraceEntry[]): void {
+  stdout.write(`TRACE ${name}\n`);
+  for (const entry of entries) {
+    const detail = entry.detail === undefined ? "" : ` (${entry.detail})`;
+    stdout.write(
+      `  +${formatMilliseconds(entry.startMs).padStart(8)}  ${formatMilliseconds(entry.durationMs).padStart(8)}  ${entry.label}${detail}\n`,
+    );
+  }
+}
+
+function formatMilliseconds(milliseconds: number): string {
+  if (milliseconds < 1_000) return `${Math.round(milliseconds)}ms`;
+  return `${(milliseconds / 1_000).toFixed(2)}s`;
 }
 
 void main().catch((error: unknown) => {

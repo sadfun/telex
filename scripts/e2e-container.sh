@@ -1,6 +1,19 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+now_ms() {
+  date +%s%3N
+}
+
+outer_started=$(now_ms)
+phase_started=$outer_started
+finish_outer_phase() {
+  local label=$1 current
+  current=$(now_ms)
+  printf 'E2E OUTER %-28s %d ms\n' "$label" "$((current - phase_started))"
+  phase_started=$current
+}
+
 usage() {
   cat <<'EOF'
 Usage:
@@ -73,6 +86,7 @@ export DOCKER_HOST="unix://$docker_socket"
   printf '%s\n' 'Refusing a host with rootful Docker enabled' >&2
   exit 1
 }
+finish_outer_phase "input and Docker checks"
 
 run_key="$(id -u)-$$"
 source_volume="telex-e2e-source-$run_key"
@@ -84,11 +98,14 @@ stage=$(mktemp -d /tmp/telex-e2e-stage.XXXXXXXX)
 
 cleanup() {
   local status=$?
+  local cleanup_started
+  cleanup_started=$(now_ms)
   trap - EXIT INT TERM
   set +e
   docker rm --force "$seed_container" "$dependency_container" "$run_container" >/dev/null 2>&1
   docker volume rm --force "$source_volume" "$secret_volume" >/dev/null 2>&1
   case $stage in /tmp/telex-e2e-stage.*) rm -rf -- "$stage" ;; esac
+  printf 'E2E OUTER %-28s %d ms\n' "cleanup" "$(( $(now_ms) - cleanup_started ))"
   exit "$status"
 }
 trap cleanup EXIT
@@ -107,10 +124,12 @@ done < <(git -C "$repository" ls-files --cached --others --exclude-standard -z)
 tar -C "$repository" --create --file="$stage/source.tar" --null --verbatim-files-from --files-from="$manifest"
 mkdir "$stage/source"
 tar --extract --file="$stage/source.tar" --directory="$stage/source"
+finish_outer_phase "stage source"
 
 # Codex uses the OS trust store; the slim image intentionally omits it.
 image=node:24-bookworm
 docker pull "$image" >/dev/null
+finish_outer_phase "pull base image"
 docker volume create --label com.sadfun.telex.purpose=e2e --label com.sadfun.telex.ephemeral=true \
   "$source_volume" >/dev/null
 docker volume create --label com.sadfun.telex.purpose=e2e --label com.sadfun.telex.ephemeral=true \
@@ -131,6 +150,7 @@ fi
 chmod 0644 "$stage/secrets"/*
 docker cp "$stage/secrets/." "$seed_container:/input"
 docker rm "$seed_container" >/dev/null
+finish_outer_phase "seed ephemeral volumes"
 
 common=(
   --init --cap-drop=ALL --security-opt=no-new-privileges --cpus=2 --memory=2g
@@ -142,6 +162,7 @@ docker run --name "$dependency_container" --network=bridge "${common[@]}" \
   --mount "type=volume,src=$source_volume,dst=/work" "$image" \
   sh -ceu 'npm ci --no-audit --no-fund'
 docker rm "$dependency_container" >/dev/null
+finish_outer_phase "npm ci"
 
 test_script=test:e2e
 [[ $mode == telegram ]] && test_script=test:telegram
@@ -169,4 +190,7 @@ if [[ $mode == telegram ]]; then
 fi
 docker create "${run_args[@]}" "$image" sh -ceu \
   'mkdir -m 0700 /tmp/e2e-secrets; cp /input/* /tmp/e2e-secrets/; chmod 0600 /tmp/e2e-secrets/*; exec npm run "$TELEX_E2E_SCRIPT"' >/dev/null
+finish_outer_phase "create application container"
 docker start --attach "$run_container"
+finish_outer_phase "live E2E process"
+printf 'E2E OUTER %-28s %d ms\n' "total before cleanup" "$(( $(now_ms) - outer_started ))"
