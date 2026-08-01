@@ -2,6 +2,12 @@
 
 All notable changes to Telex are documented in this file.
 
+## [0.0.28] - 2026-08-01
+
+### Fixed
+
+- Restored a one-shot migration for pre-0.0.27 automation state, so existing deployments no longer fail startup after updating; 0.0.27 crash-looped on the old `kind`/`execution` format.
+
 ## [0.0.27] - 2026-08-01
 
 ### Changed

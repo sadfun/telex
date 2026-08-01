@@ -165,6 +165,53 @@ describe("AutomationStore", () => {
     expect(store.getRun("run-104")).toBeDefined();
   });
 
+  it("migrates the pre-0.0.27 persisted format", async () => {
+    const { path } = await createStore();
+    const legacyAutomation = (id: string, overrides: Record<string, unknown>) => ({
+      ...automation({ id }),
+      threadId: undefined,
+      kind: "cron",
+      execution: { mode: "new-thread", cwd: "/workspace" },
+      ...overrides,
+    });
+    await writeFile(
+      path,
+      JSON.stringify({
+        version: 1,
+        automations: {
+          "automation-1": legacyAutomation("automation-1", {
+            kind: "heartbeat",
+            execution: { mode: "existing-thread", threadId: "thread-9" },
+          }),
+          "automation-2": legacyAutomation("automation-2", { status: "deleted", nextRunAt: null }),
+        },
+        runs: {
+          "run-1": { ...runningRun("run-1"), summary: "Done" },
+          "run-2": { ...runningRun("run-2"), automationId: "automation-2" },
+        },
+        notifications: {
+          "notification-1": {
+            ...notification("notification-1", "run-1", "message-1"),
+            status: "pending",
+            target: { provider: "example", resource: "destination", id: "room-1" },
+          },
+        },
+      }),
+      "utf8",
+    );
+    const store = new AutomationStore(path, new Logger("error"));
+    await store.load();
+
+    expect(store.getAutomation("automation-1")).toMatchObject({ threadId: "thread-9" });
+    expect(store.getAutomation("automation-2")).toBeUndefined();
+    expect(store.getRun("run-1")).not.toHaveProperty("summary");
+    expect(store.getRun("run-2")).toBeUndefined();
+    expect(store.listNotifications()[0]).toMatchObject({
+      status: "failed",
+      error: "Telex restarted before notification delivery was confirmed.",
+    });
+  });
+
   it("fails closed instead of forgetting schedules when persisted state is invalid", async () => {
     const directory = await mkdtemp(join(tmpdir(), "telex-automations-invalid-"));
     directories.push(directory);
