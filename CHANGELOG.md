@@ -2,6 +2,13 @@
 
 All notable changes to Telex are documented in this file.
 
+## [0.0.30] - 2026-08-01
+
+### Fixed
+
+- Completed the first live Telegram bot-to-bot E2E pass: address bots by username, recognize rich-message replies through production normalization, forward multipart uploads without hop-by-hop headers, and invoke the requested Telegram entry point from the isolated runner.
+- Run the credentialed application container as a cap-dropped non-root user while permitting Codex's nested user-namespace sandbox, and wait for foreground Codex work to release before ticking the real scheduler.
+
 ## [0.0.29] - 2026-08-01
 
 ### Changed

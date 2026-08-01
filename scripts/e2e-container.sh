@@ -143,8 +143,12 @@ docker run --name "$dependency_container" --network=bridge "${common[@]}" \
   sh -ceu 'npm ci --no-audit --no-fund'
 docker rm "$dependency_container" >/dev/null
 
+test_script=test:e2e
+[[ $mode == telegram ]] && test_script=test:telegram
 run_args=(
-  --name "$run_container" --network=bridge --read-only
+  --name "$run_container" --network=bridge --read-only --user node
+  # The non-root, cap-dropped process needs these syscalls only to start Codex's nested bwrap.
+  --security-opt=seccomp=unconfined
   "${common[@]}"
   --mount "type=volume,src=$source_volume,dst=/work,readonly"
   --mount "type=volume,src=$secret_volume,dst=/input,readonly"
@@ -152,6 +156,7 @@ run_args=(
   --env TELEX_E2E_VOICE_FILE=/tmp/e2e-secrets/voice
   --env "TELEX_E2E_VOICE_TEXT=$voice_text"
   --env "TELEX_E2E_LOG_LEVEL=${TELEX_E2E_LOG_LEVEL:-info}"
+  --env "TELEX_E2E_SCRIPT=$test_script"
 )
 if [[ $mode == telegram ]]; then
   run_args+=(
@@ -163,5 +168,5 @@ if [[ $mode == telegram ]]; then
   [[ -z $thread_ids ]] || run_args+=(--env "TELEX_E2E_THREAD_IDS=$thread_ids")
 fi
 docker create "${run_args[@]}" "$image" sh -ceu \
-  'mkdir -m 0700 /tmp/e2e-secrets; cp /input/* /tmp/e2e-secrets/; chmod 0600 /tmp/e2e-secrets/*; npm test' >/dev/null
+  'mkdir -m 0700 /tmp/e2e-secrets; cp /input/* /tmp/e2e-secrets/; chmod 0600 /tmp/e2e-secrets/*; exec npm run "$TELEX_E2E_SCRIPT"' >/dev/null
 docker start --attach "$run_container"

@@ -299,6 +299,7 @@ export class CodexService {
             }
           }
           const prepared = preparedText === undefined ? text : await preparedText;
+          this.#logger.debug("Preparing Codex turn", { conversationKey, connector });
           const [settings, skillInputs] = await Promise.all([
             this.#effectiveSettings(),
             this.#explicitSkillInputs(prepared),
@@ -312,6 +313,7 @@ export class CodexService {
           const session = this.requireSession(threadId);
           this.#conversationSessions.set(conversationKey, session);
           session.adoptPresenter(conversationKey, connector, responder, invocation);
+          this.#logger.debug("Starting Codex turn", { conversationKey, threadId });
           const finalized = await this.startTurn(session, {
             origin: "user",
             stream,
@@ -324,6 +326,12 @@ export class CodexService {
             onStarted: () => {
               started = true;
             },
+          });
+          this.#logger.debug("Codex turn finalized", {
+            conversationKey,
+            turnId: finalized.turn.id,
+            status: finalized.turn.status,
+            finalTextLength: finalized.finalText.length,
           });
           if (finalized.turn.status === "failed") {
             this.#logger.warn("Codex turn failed", {

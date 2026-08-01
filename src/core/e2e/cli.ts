@@ -76,6 +76,7 @@ async function main(): Promise<void> {
     peerBotToken,
     requestToken,
     clock,
+    logLevel,
     ...(codexBinaryPath === undefined ? {} : { codexBinaryPath }),
     ...(chatId === undefined ? {} : { chatId }),
     ...(threadIds === undefined ? {} : { threadIds }),

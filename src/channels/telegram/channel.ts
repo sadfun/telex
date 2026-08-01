@@ -275,16 +275,21 @@ export class TelegramChannel implements MessagingChannel {
   ): Promise<void> {
     const sender = message.from;
     const handler = this.#handler;
-    if (
-      sender === undefined ||
-      handler === undefined ||
-      (sender.is_bot && !this.#allowedBotUserIds.has(sender.id))
-    )
+    if (sender === undefined || handler === undefined) return;
+    if (sender.is_bot && !this.#allowedBotUserIds.has(sender.id)) {
+      this.#logger.debug("Ignored Telegram message from bot sender", { userId: sender.id });
       return;
+    }
     if (!this.#allowedUserIds.has(sender.id)) {
       this.#logger.warn("Ignored Telegram message from unauthorized user", { userId: sender.id });
       return;
     }
+    this.#logger.debug("Accepted Telegram message", {
+      userId: sender.id,
+      isBot: sender.is_bot,
+      chatId: message.chat.id,
+      messageId: message.message_id,
+    });
     if (isTelegramTopicLifecycleMessage(message)) return;
 
     const guestQueryId = message.guest_query_id;

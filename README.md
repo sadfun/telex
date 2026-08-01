@@ -270,6 +270,10 @@ two concurrent conversations, and a real scheduled run after advancing only the 
 Missing credentials are requested interactively with hidden input; tokens are never accepted on
 the command line or written to logs.
 
+The runner uses a read-only, non-root, cap-dropped rootless-Docker container with no host mounts
+or Docker socket. Its outer seccomp filter is relaxed so the pinned Codex process can create its
+own nested bubblewrap namespace; Codex still applies the real workspace-write sandbox to turns.
+
 Telegram uses the same instance factory, two dedicated Bot API credentials, and a transparent
 local recorder that forwards every request to the real Telegram API. The recorder observes rich
 reasoning drafts, typing activity, and attachment methods without faking Telegram responses.

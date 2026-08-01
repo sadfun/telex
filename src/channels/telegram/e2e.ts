@@ -10,16 +10,25 @@ import {
 } from "../../core/e2e/instance.js";
 import type { AdjustableE2eClock, E2eScenarioResult } from "../../core/e2e/suite.js";
 import { delay } from "../../shared/async.js";
+import type { LogLevel } from "../../shared/logger.js";
 import { TelegramChannel } from "./channel.js";
+import { normalizeTelegramMessage } from "./message.js";
 
 interface TelegramApiCall {
   readonly method: string;
   readonly body: string;
 }
 
+interface TelegramApiUpdate {
+  readonly kind: "message" | "guest_message";
+  readonly fromId?: number;
+}
+
 /** Transparent recorder: every request still executes against the real Telegram Bot API. */
 export class TelegramApiProbe {
   readonly #calls: TelegramApiCall[] = [];
+  readonly #completed = new Map<string, number>();
+  readonly #updates: TelegramApiUpdate[] = [];
   readonly #server = createServer((request, response) => {
     void this.forward(request, response);
   });
@@ -44,6 +53,18 @@ export class TelegramApiProbe {
     );
   }
 
+  public count(method: string): number {
+    return this.#calls.filter((call) => call.method === method).length;
+  }
+
+  public completedCount(method: string): number {
+    return this.#completed.get(method) ?? 0;
+  }
+
+  public sawUpdateFrom(userId: number): boolean {
+    return this.#updates.some((update) => update.fromId === userId);
+  }
+
   public async stop(): Promise<void> {
     if (!this.#server.listening) return;
     this.#server.close();
@@ -63,8 +84,19 @@ export class TelegramApiProbe {
         : "";
       this.#calls.push({ method, body: inspectable });
       const headers = new Headers();
+      const hopByHopHeaders = new Set([
+        "connection",
+        "content-length",
+        "host",
+        "keep-alive",
+        "proxy-connection",
+        "te",
+        "trailer",
+        "transfer-encoding",
+        "upgrade",
+      ]);
       for (const [name, value] of Object.entries(request.headers)) {
-        if (value === undefined || name === "host" || name === "content-length") continue;
+        if (value === undefined || hopByHopHeaders.has(name)) continue;
         headers.set(name, Array.isArray(value) ? value.join(", ") : value);
       }
       const upstream = await fetch(`https://api.telegram.org${path}`, {
@@ -78,7 +110,10 @@ export class TelegramApiProbe {
           response.setHeader(name, value);
         }
       });
-      response.end(Buffer.from(await upstream.arrayBuffer()));
+      const upstreamBody = Buffer.from(await upstream.arrayBuffer());
+      this.#completed.set(method, this.completedCount(method) + 1);
+      if (method === "getUpdates") this.recordUpdates(upstreamBody);
+      response.end(upstreamBody);
     } catch (error) {
       response.statusCode = 502;
       response.end(
@@ -87,6 +122,29 @@ export class TelegramApiProbe {
           "bot<redacted>",
         ),
       );
+    }
+  }
+
+  private recordUpdates(body: Buffer): void {
+    try {
+      const result = JSON.parse(body.toString("utf8")) as {
+        ok?: boolean;
+        result?: Array<{
+          message?: Message;
+          guest_message?: Message;
+        }>;
+      };
+      if (result.ok !== true || !Array.isArray(result.result)) return;
+      for (const update of result.result) {
+        const message = update.message ?? update.guest_message;
+        if (message === undefined) continue;
+        this.#updates.push({
+          kind: update.message === undefined ? "guest_message" : "message",
+          ...(message.from?.id === undefined ? {} : { fromId: message.from.id }),
+        });
+      }
+    } catch {
+      // The response remains transparent even if a future Bot API shape is not inspectable.
     }
   }
 }
@@ -98,7 +156,8 @@ export interface LaunchTelegramE2eOptions {
   readonly clock: AdjustableE2eClock;
   readonly projectRoot?: string;
   readonly codexBinaryPath?: string;
-  /** Destination used by the peer; direct bot-to-bot mode defaults to the Telex bot ID. */
+  readonly logLevel?: LogLevel;
+  /** Destination used by the peer; direct bot-to-bot mode defaults to the Telex bot username. */
   readonly chatId?: number;
   /** Two real forum/topic IDs enable the parallel-thread scenario. */
   readonly threadIds?: readonly [number, number];
@@ -145,7 +204,7 @@ export async function launchTelegramE2e(
     const driver = new TelegramE2eDriver(
       peerBot,
       telexBot.botInfo.id,
-      options.chatId ?? telexBot.botInfo.id,
+      options.chatId ?? `@${telexBot.botInfo.username}`,
       options.chatId ?? peerBot.botInfo.id,
     );
     await driver.drain();
@@ -155,6 +214,7 @@ export async function launchTelegramE2e(
       ...(options.codexBinaryPath === undefined
         ? {}
         : { codexBinaryPath: options.codexBinaryPath }),
+      ...(options.logLevel === undefined ? {} : { logLevel: options.logLevel }),
       now: options.clock.now,
       createChannels: ({
         workspace,
@@ -187,7 +247,7 @@ export async function launchTelegramE2e(
 export class TelegramE2eDriver {
   readonly #peer: Bot;
   readonly #telexBotId: number;
-  readonly #sendChatId: number;
+  readonly #sendChatId: number | string;
   readonly #conversationChatId: number;
   #offset = 0;
   readonly #messages: Message[] = [];
@@ -195,7 +255,7 @@ export class TelegramE2eDriver {
   public constructor(
     peer: Bot,
     telexBotId: number,
-    sendChatId: number,
+    sendChatId: number | string,
     conversationChatId: number,
   ) {
     this.#peer = peer;
@@ -275,8 +335,15 @@ export async function runTelegramE2eSuite(
   const { driver, probe, telex } = options.instance;
   const results: E2eScenarioResult[] = [];
   await scenario(results, "Telegram text, reasoning, and activity", async () => {
-    await driver.sendText("Think through this, then reply with TELEX_TELEGRAM_TEXT_OK.");
-    await driver.waitFor((message) => messageText(message).includes("TELEX_TELEGRAM_TEXT_OK"));
+    await driver.sendText("Reply exactly TELEX_TELEGRAM_TEXT_OK.");
+    try {
+      await driver.waitFor((message) => messageText(message).includes("TELEX_TELEGRAM_TEXT_OK"));
+    } catch (error) {
+      throw new Error(
+        `No Telegram response; Telex polls=${probe.count("getUpdates")}, inbound=${probe.sawUpdateFrom(driver.peerId)}, richDrafts=${probe.completedCount("sendRichMessageDraft")}/${probe.count("sendRichMessageDraft")}, plainDrafts=${probe.completedCount("sendMessageDraft")}/${probe.count("sendMessageDraft")}, typing=${probe.completedCount("sendChatAction")}/${probe.count("sendChatAction")}, richMessages=${probe.completedCount("sendRichMessage")}/${probe.count("sendRichMessage")}, messages=${probe.completedCount("sendMessage")}/${probe.count("sendMessage")}`,
+        { cause: error },
+      );
+    }
     if (
       !probe.saw(["sendRichMessageDraft"], /thinking/u) &&
       !probe.saw(["sendMessageDraft", "sendChatAction"])
@@ -296,16 +363,30 @@ export async function runTelegramE2eSuite(
       "Generate a simple square blue triangle image with the image generation tool. Say TELEX_TELEGRAM_IMAGE_OK.",
     );
     await driver.waitFor((message) => messageText(message).includes("TELEX_TELEGRAM_IMAGE_OK"));
-    await driver.waitFor((message) => (message.photo?.length ?? 0) > 0);
-    if (!probe.saw(["sendPhoto"]))
+    const attachment = await driver.waitFor(
+      (message) => (message.photo?.length ?? 0) > 0 || message.document !== undefined,
+    );
+    if ((attachment.photo?.length ?? 0) === 0) {
+      throw new Error("Telex generated image reached Telegram only as a document fallback");
+    }
+    if (!probe.saw(["sendPhoto"])) {
       throw new Error("Telex did not upload the image as a Telegram photo");
+    }
   });
   await scenario(results, "Telegram generated document upload", async () => {
     await driver.sendText(
       "Create a file named telex-e2e.txt containing TELEX_DOCUMENT_CONTENT, attach it, and say TELEX_TELEGRAM_DOCUMENT_OK.",
     );
-    const document = await driver.waitFor((message) => message.document !== undefined);
     await driver.waitFor((message) => messageText(message).includes("TELEX_TELEGRAM_DOCUMENT_OK"));
+    let document: Message;
+    try {
+      document = await driver.waitFor((message) => message.document !== undefined, 60_000);
+    } catch (error) {
+      throw new Error(
+        `No Telegram document; sendDocument=${probe.completedCount("sendDocument")}/${probe.count("sendDocument")}`,
+        { cause: error },
+      );
+    }
     if (document.document?.file_name !== "telex-e2e.txt" || !probe.saw(["sendDocument"])) {
       throw new Error("Telex did not attach the generated document with the expected name");
     }
@@ -350,6 +431,7 @@ export async function runTelegramE2eSuite(
     if (telex.scheduler.listForConversation(owner, conversation).length !== 1) {
       throw new Error("Telegram channel did not bind the real schedule to its conversation");
     }
+    await telex.codex.waitForIdle();
     options.clock.advance(2 * 60_000);
     await telex.scheduler.tick();
     await telex.scheduler.waitForIdle();
@@ -363,7 +445,7 @@ function threadParameters(threadId: number | undefined): { message_thread_id?: n
 }
 
 function messageText(message: Message): string {
-  return message.text ?? message.caption ?? "";
+  return message.text ?? message.caption ?? normalizeTelegramMessage(message).text;
 }
 
 async function scenario(
@@ -372,7 +454,13 @@ async function scenario(
   run: () => Promise<void>,
 ): Promise<void> {
   const startedAt = Date.now();
-  await run();
+  try {
+    await run();
+  } catch (error) {
+    throw new Error(`${name}: ${error instanceof Error ? error.message : String(error)}`, {
+      cause: error,
+    });
+  }
   results.push({ name, durationMs: Date.now() - startedAt });
   await delay(250);
 }
