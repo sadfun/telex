@@ -46,6 +46,14 @@ export async function runCoreE2eSuite(
 ): Promise<readonly E2eScenarioResult[]> {
   const channel = requireProtocolChannel(options.instance.protocol);
   const parallelism = validateE2eParallelism(options.parallelism);
+  const noTaskCompaction = await runE2eScenario(
+    options.instance.trace,
+    "context compaction without a task",
+    async () => {
+      const reply = await sendCompactCommand(channel, "compact-empty");
+      expectSentText(reply, "There is no Codex task to compact.");
+    },
+  );
   const primary = await runE2eScenarios(options.instance.trace, parallelism, [
     {
       name: "text round trip",
@@ -157,12 +165,24 @@ export async function runCoreE2eSuite(
   );
   const compaction = await runE2eScenario(
     options.instance.trace,
-    "manual context compaction",
+    "context compaction busy guard and recovery",
     async () => {
-      const reply = await channel.send({
-        text: "/compact",
-        command: { name: "compact", args: "" },
+      const commandStarted = options.instance.trace.waitForCodexItemStarted(
+        (item) => item.type === "commandExecution" && item.command.includes("sleep 15"),
+      );
+      const activeTurn = channel.send({
+        conversation: "compact-busy",
+        text: "Use the command execution tool to run exactly `sleep 15`. Wait for it to finish, then reply with exactly TELEX_COMPACTION_GUARD_OK and nothing else.",
       });
+      await commandStarted.catch(async (error: unknown) => {
+        await activeTurn;
+        throw error;
+      });
+      const busy = await sendCompactCommand(channel, "compact-busy");
+      expectSentText(busy, "The conversation is busy. Stop or wait for the current turn first.");
+      expectMarker(await activeTurn, "TELEX_COMPACTION_GUARD_OK");
+
+      const reply = await sendCompactCommand(channel, "compact-busy");
       expectMarker(reply, "Context compacted.");
       if (!reply.progress.some((progress) => progress.summary === "Compacting context…")) {
         throw new Error("Telex did not expose native context-compaction progress");
@@ -172,7 +192,7 @@ export async function runCoreE2eSuite(
   if (!compaction.trace.some((entry) => entry.label === "Context compaction")) {
     throw new Error("The native context-compaction item was absent from the protocol trace");
   }
-  return [...primary.slice(0, 3), compaction, isolation, ...primary.slice(3)];
+  return [noTaskCompaction, ...primary.slice(0, 3), compaction, isolation, ...primary.slice(3)];
 }
 
 export async function runE2eScenarios(
@@ -231,6 +251,23 @@ function expectMarker(reply: E2eExchange, marker: string): void {
   if (!reply.finalText.includes(marker)) {
     throw new Error(`Expected ${marker}, received: ${reply.finalText || reply.texts.join("\n")}`);
   }
+}
+
+function expectSentText(reply: E2eExchange, marker: string): void {
+  if (!reply.texts.some((text) => text.includes(marker))) {
+    throw new Error(`Expected ${marker}, received: ${reply.texts.join("\n") || reply.finalText}`);
+  }
+}
+
+async function sendCompactCommand(
+  channel: ProtocolE2eChannel,
+  conversation: string,
+): Promise<E2eExchange> {
+  return await channel.send({
+    conversation,
+    text: "/compact",
+    command: { name: "compact", args: "" },
+  });
 }
 
 export async function runE2eScenario(

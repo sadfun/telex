@@ -388,6 +388,20 @@ export async function runTelegramE2eSuite(
     threads === undefined ? 1 : Math.min(requestedParallelism, threads.length);
   const threadForLane = (lane: number): number | undefined => threads?.[lane];
   const textThread = threadForLane(0);
+  const noTaskCompaction = await runE2eScenario(
+    telex.trace,
+    "Telegram context compaction without a task",
+    async () => {
+      await driver.sendText("/compact", textThread);
+      await driver.waitFor(
+        (message) =>
+          inThread(message, textThread) &&
+          messageText(message).includes("There is no Codex task to compact."),
+        300_000,
+        "Wait for Telegram no-task compaction reply",
+      );
+    },
+  );
   const text = await runE2eScenario(
     telex.trace,
     "Telegram text, reasoning, and activity",
@@ -414,6 +428,38 @@ export async function runTelegramE2eSuite(
       ) {
         throw new Error("Telegram received neither rendered reasoning nor a typing activity call");
       }
+    },
+  );
+  const busyCompaction = await runE2eScenario(
+    telex.trace,
+    "Telegram context compaction busy guard",
+    async () => {
+      telex.trace.bindConversation(driver.conversationKey(textThread));
+      const commandStarted = telex.trace.waitForCodexItemStarted(
+        (item) => item.type === "commandExecution" && item.command.includes("sleep 15"),
+      );
+      await driver.sendText(
+        "Use the command execution tool to run exactly `sleep 15`. Wait for it to finish, then reply with exactly TELEX_TELEGRAM_COMPACTION_GUARD_OK and nothing else.",
+        textThread,
+      );
+      await commandStarted;
+      await driver.sendText("/compact", textThread);
+      await driver.waitFor(
+        (message) =>
+          inThread(message, textThread) &&
+          messageText(message).includes(
+            "The conversation is busy. Stop or wait for the current turn first.",
+          ),
+        300_000,
+        "Wait for Telegram busy compaction reply",
+      );
+      await driver.waitFor(
+        (message) =>
+          inThread(message, textThread) &&
+          messageText(message).includes("TELEX_TELEGRAM_COMPACTION_GUARD_OK"),
+        300_000,
+        "Wait for guarded Telegram turn to finish",
+      );
     },
   );
   const compaction = await runE2eScenario(
@@ -598,7 +644,9 @@ export async function runTelegramE2eSuite(
     });
   }
   return [
+    noTaskCompaction,
     text,
+    busyCompaction,
     compaction,
     ...primary.slice(0, 3),
     ...(isolation === undefined ? [] : [isolation]),

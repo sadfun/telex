@@ -2,6 +2,7 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import { performance } from "node:perf_hooks";
 import type { CodexAppServer } from "../../codex/rpc.js";
 import type { ThreadItem } from "../../generated/codex/v2/ThreadItem.js";
+import { type Deferred, deferred, withTimeout } from "../../shared/async.js";
 
 export interface E2eTraceEntry {
   readonly label: string;
@@ -16,6 +17,11 @@ interface TraceScope {
   readonly entries: E2eTraceEntry[];
 }
 
+interface ItemStartWaiter {
+  readonly predicate: (item: ThreadItem) => boolean;
+  readonly result: Deferred<ThreadItem>;
+}
+
 /** Passive wall-clock spans around real E2E operations and Codex protocol events. */
 export class E2eTrace {
   readonly #startup: TraceScope = { name: "startup", startedAt: performance.now(), entries: [] };
@@ -28,6 +34,7 @@ export class E2eTrace {
   readonly #conversationScopes = new Map<string, TraceScope>();
   readonly #threadScopes = new Map<string, TraceScope>();
   readonly #turnScopes = new Map<string, TraceScope>();
+  readonly #itemStartWaiters = new Map<TraceScope, ItemStartWaiter[]>();
 
   public async runScenario<T>(
     name: string,
@@ -97,6 +104,53 @@ export class E2eTrace {
   public startCodexItem(turnId: string, label: string): () => void {
     return startSpan(this.#turnScopes.get(turnId) ?? this.#background, label, shortId(turnId));
   }
+
+  /** Wait for a real item/started event owned by the active E2E scenario. */
+  public async waitForCodexItemStarted(
+    predicate: (item: ThreadItem) => boolean,
+    timeoutMs = 300_000,
+  ): Promise<ThreadItem> {
+    const scope = this.#scenario.getStore();
+    if (scope === undefined) throw new Error("Codex item waits require an active E2E scenario");
+    const waiter: ItemStartWaiter = { predicate, result: deferred<ThreadItem>() };
+    const waiters = this.#itemStartWaiters.get(scope) ?? [];
+    waiters.push(waiter);
+    this.#itemStartWaiters.set(scope, waiters);
+    try {
+      return await withTimeout(
+        waiter.result.promise,
+        timeoutMs,
+        "Timed out waiting for a matching Codex item/started event",
+      );
+    } finally {
+      const active = this.#itemStartWaiters.get(scope);
+      if (active !== undefined) {
+        const index = active.indexOf(waiter);
+        if (index >= 0) active.splice(index, 1);
+        if (active.length === 0) this.#itemStartWaiters.delete(scope);
+      }
+    }
+  }
+
+  public codexItemStarted(turnId: string, item: ThreadItem): void {
+    const scope = this.#turnScopes.get(turnId) ?? this.#background;
+    const waiters = this.#itemStartWaiters.get(scope);
+    if (waiters === undefined) return;
+    for (const waiter of [...waiters]) {
+      let matches: boolean;
+      try {
+        matches = waiter.predicate(item);
+      } catch (error) {
+        waiters.splice(waiters.indexOf(waiter), 1);
+        waiter.result.reject(error);
+        continue;
+      }
+      if (!matches) continue;
+      waiters.splice(waiters.indexOf(waiter), 1);
+      waiter.result.resolve(item);
+    }
+    if (waiters.length === 0) this.#itemStartWaiters.delete(scope);
+  }
 }
 
 export function attachCodexE2eTrace(rpc: CodexAppServer, trace: E2eTrace): () => void {
@@ -117,6 +171,7 @@ export function attachCodexE2eTrace(rpc: CodexAppServer, trace: E2eTrace): () =>
       }
       case "item/started": {
         const item = notification.params.item;
+        trace.codexItemStarted(notification.params.turnId, item);
         const label = tracedItemLabel(item);
         if (label !== undefined) {
           spans.set(`item:${item.id}`, trace.startCodexItem(notification.params.turnId, label));

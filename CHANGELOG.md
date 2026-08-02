@@ -4,6 +4,11 @@ All notable changes to Telex are documented in this file.
 
 ## Unreleased
 
+### Changed
+
+- Exercise `/compact` with no existing task and during a real in-flight command in both the core
+  protocol and Telegram E2E suites, proving the busy guard does not interrupt active work.
+
 ## [0.0.31] - 2026-08-02
 
 ### Added

@@ -270,8 +270,8 @@ scripts/e2e-container.sh core \
 ```
 
 The core run verifies text round-trip, voice transcription, generated-image attachment bytes,
-native context compaction, separate conversations, and a real scheduled run after advancing only
-the scheduler clock.
+native context compaction and its no-task/busy guards, separate conversations, and a real
+scheduled run after advancing only the scheduler clock.
 Independent scenarios run concurrently on the single app-server, bounded by `--parallelism` (or
 `TELEX_E2E_PARALLELISM`, default `4`). The conversation-isolation check runs afterwards and uses
 two simultaneous turns only when the limit permits it.
