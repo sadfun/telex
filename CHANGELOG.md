@@ -4,6 +4,14 @@ All notable changes to Telex are documented in this file.
 
 ## Unreleased
 
+## [0.0.32] - 2026-08-02
+
+### Added
+
+- Added an authenticated **Schedules** Mini App tab for viewing, creating, editing, pausing,
+  resuming, and deleting owner-scoped schedules, with friendly cadence presets, custom RRULEs,
+  revision-safe updates, and explicit delete confirmation.
+
 ### Changed
 
 - Exercise `/compact` with no existing task and during a real in-flight command in both the core

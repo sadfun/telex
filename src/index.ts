@@ -203,6 +203,7 @@ export async function runTelex(): Promise<TelexRunResult> {
       workspace: config.workspace,
       logger: logger.child({ component: "scheduled-runs" }),
     });
+    miniApp.setScheduledRuns(scheduledRuns);
     const bridge = new CodexBridge(
       codex,
       publicUrl,
