@@ -1,22 +1,28 @@
 import {
   CalendarClock,
+  Check,
   ChevronLeft,
   CirclePlus,
   Clock3,
+  Maximize2,
   Pause,
   Pencil,
   Play,
   SlidersHorizontal,
   Sparkles,
   Trash2,
+  X,
 } from "lucide-react";
 import {
   type FormEvent,
   type MouseEvent,
   type ReactElement,
+  type TextareaHTMLAttributes,
   useCallback,
   useEffect,
+  useId,
   useMemo,
+  useRef,
   useState,
 } from "react";
 import { createRoot } from "react-dom/client";
@@ -62,8 +68,18 @@ import {
 interface TelegramWebApp {
   readonly initData: string;
   readonly colorScheme: "light" | "dark";
+  readonly BackButton?: {
+    readonly isVisible: boolean;
+    show(): void;
+    hide(): void;
+    onClick(listener: () => void): void;
+    offClick(listener: () => void): void;
+  };
   ready(): void;
   expand(): void;
+  enableClosingConfirmation?(): void;
+  disableClosingConfirmation?(): void;
+  showConfirm?(message: string, callback: (confirmed: boolean) => void): void;
   onEvent(event: "themeChanged", listener: () => void): void;
   offEvent(event: "themeChanged", listener: () => void): void;
   readonly HapticFeedback?: {
@@ -197,6 +213,127 @@ const defaultGranularApproval: GranularApproval = {
 
 const webApp = window.Telegram?.WebApp;
 const telegramReady = webApp !== undefined && webApp.initData.length > 0;
+const nativeTelegramNavigation = telegramReady && webApp?.BackButton !== undefined;
+
+interface NativeBackEntry {
+  readonly handler: () => void;
+  readonly order: number;
+  readonly priority: number;
+}
+
+const nativeBackEntries = new Map<symbol, NativeBackEntry>();
+const unsavedScopes = new Set<symbol>();
+let nativeBackOrder = 0;
+let nativeBackListening = false;
+let beforeUnloadListening = false;
+let closingConfirmationEnabled = false;
+
+function handleNativeBack(): void {
+  const entry = [...nativeBackEntries.values()].sort(
+    (left, right) => right.priority - left.priority || right.order - left.order,
+  )[0];
+  entry?.handler();
+}
+
+function syncNativeBackButton(): void {
+  const backButton = nativeTelegramNavigation ? webApp?.BackButton : undefined;
+  if (backButton === undefined) return;
+  if (nativeBackEntries.size > 0) {
+    if (!nativeBackListening) {
+      backButton.onClick(handleNativeBack);
+      nativeBackListening = true;
+    }
+    backButton.show();
+    return;
+  }
+  if (nativeBackListening) {
+    backButton.offClick(handleNativeBack);
+    nativeBackListening = false;
+  }
+  backButton.hide();
+}
+
+function useTelegramBackButton(handler: (() => void) | undefined, priority: number): void {
+  const handlerRef = useRef(handler);
+  handlerRef.current = handler;
+  const enabled = handler !== undefined && nativeTelegramNavigation;
+  useEffect(() => {
+    if (!enabled) return;
+    const id = Symbol("native-back-handler");
+    nativeBackOrder += 1;
+    nativeBackEntries.set(id, {
+      handler: () => handlerRef.current?.(),
+      order: nativeBackOrder,
+      priority,
+    });
+    syncNativeBackButton();
+    return () => {
+      nativeBackEntries.delete(id);
+      syncNativeBackButton();
+    };
+  }, [enabled, priority]);
+}
+
+function handleBeforeUnload(event: BeforeUnloadEvent): void {
+  event.preventDefault();
+  event.returnValue = "";
+}
+
+function syncUnsavedChangesGuard(): void {
+  const dirty = unsavedScopes.size > 0;
+  if (dirty && !beforeUnloadListening) {
+    window.addEventListener("beforeunload", handleBeforeUnload);
+    beforeUnloadListening = true;
+  } else if (!dirty && beforeUnloadListening) {
+    window.removeEventListener("beforeunload", handleBeforeUnload);
+    beforeUnloadListening = false;
+  }
+
+  if (!telegramReady) return;
+  if (dirty && !closingConfirmationEnabled) {
+    webApp?.enableClosingConfirmation?.();
+    closingConfirmationEnabled = true;
+  } else if (!dirty && closingConfirmationEnabled) {
+    webApp?.disableClosingConfirmation?.();
+    closingConfirmationEnabled = false;
+  }
+}
+
+function useUnsavedChanges(dirty: boolean): void {
+  useEffect(() => {
+    if (!dirty) return;
+    const id = Symbol("unsaved-changes");
+    unsavedScopes.add(id);
+    syncUnsavedChangesGuard();
+    return () => {
+      unsavedScopes.delete(id);
+      syncUnsavedChangesGuard();
+    };
+  }, [dirty]);
+}
+
+function confirmDiscardChanges(message = "Discard your unsaved changes?"): Promise<boolean> {
+  if (telegramReady && webApp?.showConfirm !== undefined) {
+    return new Promise((resolve) => {
+      try {
+        webApp?.showConfirm?.(message, resolve);
+      } catch {
+        resolve(window.confirm(message));
+      }
+    });
+  }
+  return Promise.resolve(window.confirm(message));
+}
+
+function navigateWithUnsavedGuard(action: () => void, forceGuard = false): void {
+  if (!forceGuard && unsavedScopes.size === 0) {
+    action();
+    return;
+  }
+  void confirmDiscardChanges().then((confirmed) => {
+    if (confirmed) action();
+  });
+}
 
 interface AsyncState<Value> {
   readonly value?: Value | undefined;
@@ -230,6 +367,165 @@ function useAsync<Value>(
     // biome-ignore lint/correctness/useExhaustiveDependencies: the caller owns the dependency list.
   }, deps);
   return state;
+}
+
+interface ExpandableTextareaProps
+  extends Omit<TextareaHTMLAttributes<HTMLTextAreaElement>, "onChange" | "value"> {
+  readonly label: string;
+  readonly value: string;
+  readonly onValueChange: (value: string) => void;
+}
+
+function ExpandableTextarea({
+  label,
+  value,
+  onValueChange,
+  className,
+  disabled,
+  id,
+  rows,
+  ...textareaProps
+}: ExpandableTextareaProps): ReactElement {
+  const [expanded, setExpanded] = useState(false);
+  return (
+    <>
+      <div className="expandableTextarea">
+        <textarea
+          {...textareaProps}
+          id={id}
+          className={className}
+          value={value}
+          rows={rows}
+          disabled={disabled}
+          onChange={(event) => onValueChange(event.currentTarget.value)}
+        />
+        <button
+          type="button"
+          className="expandTextareaButton"
+          aria-label={`Edit ${label} full screen`}
+          title="Edit full screen"
+          disabled={disabled}
+          onClick={() => setExpanded(true)}
+        >
+          <Maximize2 aria-hidden="true" />
+        </button>
+      </div>
+      {expanded ? (
+        <FullscreenTextEditor
+          label={label}
+          initialValue={value}
+          textareaProps={textareaProps}
+          onApply={(nextValue) => {
+            onValueChange(nextValue);
+            setExpanded(false);
+          }}
+          onCancel={() => setExpanded(false)}
+        />
+      ) : undefined}
+    </>
+  );
+}
+
+interface FullscreenTextEditorProps {
+  readonly label: string;
+  readonly initialValue: string;
+  readonly textareaProps: Omit<
+    TextareaHTMLAttributes<HTMLTextAreaElement>,
+    "className" | "disabled" | "id" | "onChange" | "rows" | "value"
+  >;
+  readonly onApply: (value: string) => void;
+  readonly onCancel: () => void;
+}
+
+function FullscreenTextEditor(props: FullscreenTextEditorProps): ReactElement {
+  const [value, setValue] = useState(props.initialValue);
+  const textareaId = useId();
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const dirty = value !== props.initialValue;
+  useUnsavedChanges(dirty);
+
+  const close = useCallback((): void => {
+    if (!dirty) {
+      props.onCancel();
+      return;
+    }
+    void confirmDiscardChanges(`Discard changes to ${props.label}?`).then((confirmed) => {
+      if (confirmed) props.onCancel();
+    });
+  }, [dirty, props.label, props.onCancel]);
+  const closeRef = useRef(close);
+  closeRef.current = close;
+  useTelegramBackButton(close, 100);
+
+  useEffect(() => {
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    const textarea = textareaRef.current;
+    textarea?.focus();
+    textarea?.setSelectionRange(props.initialValue.length, props.initialValue.length);
+    const onKeyDown = (event: KeyboardEvent): void => {
+      if (event.key === "Escape") closeRef.current();
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => {
+      document.body.style.overflow = previousOverflow;
+      window.removeEventListener("keydown", onKeyDown);
+    };
+  }, [props.initialValue.length]);
+
+  return (
+    <section
+      className="fullscreenEditor"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby={`${textareaId}-title`}
+    >
+      <header className="fullscreenEditorHeader">
+        <Button
+          type="button"
+          mode="plain"
+          size="s"
+          className="fullscreenEditorClose"
+          onClick={close}
+        >
+          <X className="size-5" aria-hidden="true" />
+          <span className="fullscreenEditorCloseLabel">Cancel</span>
+        </Button>
+        <div className="fullscreenEditorHeading">
+          <strong id={`${textareaId}-title`}>{props.label}</strong>
+          <Caption>{dirty ? "Draft not applied" : "Editing draft"}</Caption>
+        </div>
+        <Button
+          type="button"
+          size="s"
+          className="fullscreenEditorApply"
+          onClick={() => props.onApply(value)}
+        >
+          <Check className="size-4" aria-hidden="true" />
+          Apply
+        </Button>
+      </header>
+      <div className="fullscreenEditorBody">
+        <textarea
+          {...props.textareaProps}
+          ref={textareaRef}
+          id={textareaId}
+          className="fullscreenEditorTextarea"
+          value={value}
+          onChange={(event) => setValue(event.currentTarget.value)}
+        />
+      </div>
+      <footer className="fullscreenEditorFooter">
+        <Caption>
+          {value.length.toLocaleString()}
+          {props.textareaProps.maxLength === undefined
+            ? " characters"
+            : ` / ${Number(props.textareaProps.maxLength).toLocaleString()}`}
+        </Caption>
+        <Caption>Apply returns this draft to the form. Save the form to persist it.</Caption>
+      </footer>
+    </section>
+  );
 }
 
 function SettingsApp(): ReactElement {
@@ -364,6 +660,7 @@ function SettingsApp(): ReactElement {
   const remoteClientContextDirty =
     snapshot !== undefined && remoteClientContext !== snapshot.telex.remoteClientContext;
   const dirty = configDirty || remoteClientContextDirty;
+  useUnsavedChanges(activeTab === "settings" && dirty);
 
   useEffect(() => {
     if (!configDirty || snapshot === undefined) {
@@ -507,6 +804,21 @@ function SettingsApp(): ReactElement {
   };
 
   const retry = (): void => setLoadAttempt((attempt) => attempt + 1);
+  const selectTab = (nextTab: "schedules" | "settings" | "skills"): void => {
+    if (nextTab === activeTab) return;
+    navigateWithUnsavedGuard(
+      () => {
+        if (activeTab === "settings" && dirty && snapshot !== undefined) {
+          setDraft(draftFromConfig(snapshot.values));
+          setRemoteClientContext(snapshot.telex.remoteClientContext);
+          setValidation(snapshot.validation);
+          setNotice("Settings are up to date.");
+        }
+        setActiveTab(nextTab);
+      },
+      activeTab === "settings" && dirty,
+    );
+  };
   const settingsContent =
     snapshot === undefined || draft === undefined
       ? renderLoading(loadError, retry)
@@ -559,7 +871,7 @@ function SettingsApp(): ReactElement {
         <Tabbar.Item
           selected={activeTab === "settings"}
           text="Settings"
-          onClick={() => setActiveTab("settings")}
+          onClick={() => selectTab("settings")}
           aria-label="Settings"
         >
           {tabIcon("settings")}
@@ -567,7 +879,7 @@ function SettingsApp(): ReactElement {
         <Tabbar.Item
           selected={activeTab === "skills"}
           text="Skills"
-          onClick={() => setActiveTab("skills")}
+          onClick={() => selectTab("skills")}
           aria-label="Skills"
         >
           {tabIcon("skills")}
@@ -575,7 +887,7 @@ function SettingsApp(): ReactElement {
         <Tabbar.Item
           selected={activeTab === "schedules"}
           text="Schedules"
-          onClick={() => setActiveTab("schedules")}
+          onClick={() => selectTab("schedules")}
           aria-label="Schedules"
         >
           {tabIcon("schedules")}
@@ -849,11 +1161,27 @@ interface ScheduleEditorProps {
 }
 
 function ScheduleEditor(props: ScheduleEditorProps): ReactElement {
-  const [draft, setDraft] = useState<ScheduleDraft>(() => scheduleDraft(props.schedule));
+  const [initialDraft] = useState<ScheduleDraft>(() => scheduleDraft(props.schedule));
+  const [draft, setDraft] = useState<ScheduleDraft>(initialDraft);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string>();
   const [idempotencyKey] = useState(scheduleAttemptId);
   const existing = props.schedule;
+  const dirty = !scheduleDraftsEqual(draft, initialDraft);
+  useUnsavedChanges(dirty);
+
+  const cancel = useCallback((): void => {
+    if (saving) return;
+    if (!dirty) {
+      props.onCancel();
+      return;
+    }
+    void confirmDiscardChanges("Discard this schedule draft?").then((confirmed) => {
+      if (confirmed) props.onCancel();
+    });
+  }, [dirty, props.onCancel, saving]);
+  useTelegramBackButton(saving ? undefined : cancel, 20);
+
   const setValue = <Key extends keyof ScheduleDraft>(key: Key, value: ScheduleDraft[Key]): void => {
     setDraft((current) => ({ ...current, [key]: value }));
   };
@@ -899,10 +1227,12 @@ function ScheduleEditor(props: ScheduleEditorProps): ReactElement {
     <form onSubmit={(event) => void submit(event)}>
       <main className="page scheduleEditorPage">
         <header className="skillDetailHeader scheduleEditorHeader">
-          <Button type="button" mode="plain" size="s" disabled={saving} onClick={props.onCancel}>
-            <ChevronLeft className="size-4" aria-hidden="true" />
-            Schedules
-          </Button>
+          {nativeTelegramNavigation ? undefined : (
+            <Button type="button" mode="plain" size="s" disabled={saving} onClick={cancel}>
+              <ChevronLeft className="size-4" aria-hidden="true" />
+              Schedules
+            </Button>
+          )}
           <Headline Component="h1">
             {existing === undefined ? "New schedule" : "Edit schedule"}
           </Headline>
@@ -943,15 +1273,16 @@ function ScheduleEditor(props: ScheduleEditorProps): ReactElement {
               <Caption Component="label" className="controlLabel" htmlFor="schedule-prompt">
                 Instructions
               </Caption>
-              <textarea
+              <ExpandableTextarea
                 id="schedule-prompt"
                 className="nativeControl nativeTextarea schedulePrompt"
+                label="schedule instructions"
                 value={draft.prompt}
                 maxLength={20_000}
                 rows={5}
                 placeholder="Check the repository for failed CI runs and summarize anything actionable."
                 disabled={saving}
-                onChange={(event) => setValue("prompt", event.currentTarget.value)}
+                onValueChange={(value) => setValue("prompt", value)}
               />
               <Caption className="fieldHint">
                 This is the full prompt Codex receives on every run.
@@ -1116,15 +1447,16 @@ function ScheduleEditor(props: ScheduleEditorProps): ReactElement {
                 <Caption Component="label" className="controlLabel" htmlFor="schedule-rrule">
                   RRULE
                 </Caption>
-                <textarea
+                <ExpandableTextarea
                   id="schedule-rrule"
                   className="nativeControl nativeTextarea scheduleRrule"
+                  label="custom RRULE"
                   value={draft.customRrule}
                   rows={3}
                   maxLength={4_096}
                   spellCheck={false}
                   disabled={saving}
-                  onChange={(event) => setValue("customRrule", event.currentTarget.value)}
+                  onValueChange={(value) => setValue("customRrule", value)}
                 />
                 <Caption className="fieldHint">
                   One bounded RRULE line; DTSTART is managed by Telex.
@@ -1163,7 +1495,7 @@ function ScheduleEditor(props: ScheduleEditorProps): ReactElement {
           </Section>
         </div>
         <div className="scheduleEditorActions">
-          <Button type="button" mode="bezeled" size="l" disabled={saving} onClick={props.onCancel}>
+          <Button type="button" mode="bezeled" size="l" disabled={saving} onClick={cancel}>
             Cancel
           </Button>
           <Button type="submit" size="l" loading={saving}>
@@ -1184,6 +1516,7 @@ interface ScheduleDeleteDialogProps {
 }
 
 function ScheduleDeleteDialog(props: ScheduleDeleteDialogProps): ReactElement {
+  useTelegramBackButton(props.deleting ? undefined : props.onCancel, 50);
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent): void => {
       if (event.key === "Escape" && !props.deleting) props.onCancel();
@@ -1242,6 +1575,18 @@ function SkillsBrowser(): ReactElement {
   const [selectedSkill, setSelectedSkill] = useState<AvailableSkill>();
   const [directoryPath, setDirectoryPath] = useState("");
   const [selectedFilePath, setSelectedFilePath] = useState<string>();
+  const navigateBack = useCallback((): void => {
+    if (selectedFilePath !== undefined) {
+      setSelectedFilePath(undefined);
+      return;
+    }
+    if (directoryPath.length > 0) {
+      setDirectoryPath(parentDirectory(directoryPath));
+      return;
+    }
+    setSelectedSkill(undefined);
+  }, [directoryPath, selectedFilePath]);
+  useTelegramBackButton(selectedSkill === undefined ? undefined : navigateBack, 10);
 
   const skillsLoad = useAsync(requestSkills, [loadAttempt]);
   const documentLoad = useAsync(
@@ -1391,9 +1736,11 @@ function renderSkillDetail(options: SkillDetailOptions): ReactElement {
   return (
     <main className="page skillsPage">
       <header className="skillDetailHeader">
-        <Button mode="plain" size="s" onClick={options.onBack} aria-label="Back to skills">
-          ‹ Skills
-        </Button>
+        {nativeTelegramNavigation ? undefined : (
+          <Button mode="plain" size="s" onClick={options.onBack} aria-label="Back to skills">
+            ‹ Skills
+          </Button>
+        )}
         <Headline Component="h1">{options.skill.name}</Headline>
         <Caption className="pageSubtitle">{options.skill.description}</Caption>
       </header>
@@ -1623,6 +1970,10 @@ function scheduleDraft(schedule: ManagedSchedule | undefined): ScheduleDraft {
     timeZone: schedule.time_zone,
     notificationPolicy: schedule.notification_policy,
   };
+}
+
+function scheduleDraftsEqual(left: ScheduleDraft, right: ScheduleDraft): boolean {
+  return JSON.stringify(left) === JSON.stringify(right);
 }
 
 function validateScheduleDraft(draft: ScheduleDraft): string | undefined {
@@ -2405,6 +2756,7 @@ interface ResetConfirmationDialogProps {
 }
 
 function ResetConfirmationDialog(props: ResetConfirmationDialogProps): ReactElement {
+  useTelegramBackButton(props.applying ? undefined : props.onCancel, 50);
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent): void => {
       if (event.key === "Escape" && !props.applying) props.onCancel();
@@ -2548,14 +2900,15 @@ function listField(props: FieldProps): ReactElement {
       <Caption Component="label" className="controlLabel" htmlFor={`config-${props.draftKey}`}>
         {props.label}
       </Caption>
-      <textarea
+      <ExpandableTextarea
         id={`config-${props.draftKey}`}
         className={`nativeControl nativeTextarea ${issue?.severity === "error" ? "nativeControlError" : ""}`}
+        label={props.label.toLowerCase()}
         value={props.value}
         rows={3}
         placeholder="Leave empty to pass the full environment"
         disabled={props.disabled}
-        onChange={(event) => props.onChange(event.currentTarget.value)}
+        onValueChange={props.onChange}
       />
       <Caption className={issue === undefined ? "fieldHint" : "fieldHint fieldIssue"}>
         {issue?.message ?? props.description}

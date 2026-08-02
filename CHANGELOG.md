@@ -4,6 +4,20 @@ All notable changes to Telex are documented in this file.
 
 ## Unreleased
 
+## [0.0.33] - 2026-08-02
+
+### Added
+
+- Use Telegram's native Mini App back button for nested Skills, Schedules, dialogs, and the
+  full-screen editor while retaining the existing in-page back controls outside Telegram.
+- Give every multiline Mini App input a mobile full-screen editor with a local draft, character
+  count, explicit Apply action, and discard confirmation.
+
+### Fixed
+
+- Protect unsaved Settings and Schedule drafts when navigating between tabs, going back, closing
+  the Telegram Mini App, or unloading the page.
+
 ## [0.0.32] - 2026-08-02
 
 ### Added

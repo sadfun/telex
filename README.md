@@ -202,6 +202,11 @@ The service must be running when work becomes due; this is not a cloud scheduler
 
 The Mini App is pinned to the bot's **Settings** menu button when its public URL is available; `/config` remains an equivalent entry point. At startup Telex reconciles both Telegram's default button and each allowlisted private chat, so a stale chat-specific command-menu override cannot hide the Mini App. It uses source-owned UI components styled with Tailwind and accepts only signed Telegram `initData` from allowlisted private users. Its tab bar keeps **Settings** first, **Skills** second, and adds a **Schedules** screen for owner-scoped schedule management. The Skills screen lists every enabled skill from Codex's native `skills/list` response. Opening a skill shows its `SKILL.md` instructions and a read-only browser for bundled scripts, references, images, and other files. Skill paths remain confined to that skill's directory, and oversized files are not loaded into the browser.
 
+Inside Telegram, nested Mini App screens use the native header back button; ordinary browser
+rendering keeps the in-page back controls. Every multiline input can open a focused full-screen
+editor with a local draft and explicit Apply action. Unsaved Settings and Schedule drafts are
+protected on back navigation, tab changes, browser unload, and Telegram Mini App close.
+
 The settings tab includes a default-on remote session context toggle and covers the everyday settings from Codex's [basic configuration guide](https://learn.chatgpt.com/docs/config-file/config-basic), including models, reasoning, approval policy, permission profiles, sandboxing, web search, shell environment, and supported feature flags. Turning remote session context off stops Telex from adding its connector-aware instructions to Codex turns.
 
 Choices come from the running app-server and active configuration layers instead of a handwritten catalog. Every edit is previewed by the same server-side validator used for saves. A save is a version-checked `config/batchWrite`, so all changes either pass Codex validation and land together or leave `config.toml` untouched. The app-server runs with `--strict-config`, so unknown configuration keys fail loudly.
