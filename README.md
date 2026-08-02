@@ -264,11 +264,15 @@ download/input handling, ChatGPT transcription, prompt construction, and the fin
 scripts/e2e-container.sh core \
   --codex-token-file /run/user/1000/telex-codex-token.json \
   --voice-file /run/user/1000/telex-e2e.ogg \
-  --voice-text "telex end to end voice marker"
+  --voice-text "telex end to end voice marker" \
+  --parallelism 4
 ```
 
 The core run verifies text round-trip, voice transcription, generated-image attachment bytes,
-two concurrent conversations, and a real scheduled run after advancing only the scheduler clock.
+separate conversations, and a real scheduled run after advancing only the scheduler clock.
+Independent scenarios run concurrently on the single app-server, bounded by `--parallelism` (or
+`TELEX_E2E_PARALLELISM`, default `4`). The conversation-isolation check runs afterwards and uses
+two simultaneous turns only when the limit permits it.
 Missing credentials are requested interactively with hidden input; tokens are never accepted on
 the command line or written to logs.
 
@@ -288,13 +292,16 @@ scripts/e2e-container.sh telegram \
   --telex-bot-token-file /run/user/1000/telex-bot-token \
   --peer-bot-token-file /run/user/1000/telex-peer-token \
   --voice-file /run/user/1000/telex-e2e.ogg \
-  --voice-text "telex end to end voice marker"
+  --voice-text "telex end to end voice marker" \
+  --parallelism 4
 ```
 
-For real forum coverage, add `--chat-id ID --thread-ids ID,ID`; the suite then sends simultaneous
-turns through two Telegram topics and verifies that replies retain their topic. The Telegram run
-also creates and fires a schedule through the real channel. Test bots must have bot-to-bot delivery
-enabled and no competing `getUpdates` consumer.
+For real forum coverage, add `--chat-id ID --thread-ids ID,ID,...`. Each topic becomes one worker
+lane, so the effective Telegram concurrency is the smaller of `--parallelism` and the number of
+topics. Direct bot-to-bot chat is one Telegram conversation and therefore runs with effective
+parallelism `1`. With at least two topics the suite also verifies that simultaneous replies retain
+their topic. The Telegram run creates and fires a schedule through the real channel. Test bots
+must have bot-to-bot delivery enabled and no competing `getUpdates` consumer.
 
 CI and the release job typecheck, build, and load the E2E entry point, but do not claim a
 credentialless substitute run. Maintainers run both online suites before a release that changes

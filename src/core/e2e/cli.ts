@@ -3,24 +3,30 @@ import { stdin, stdout } from "node:process";
 import { createInterface } from "node:readline/promises";
 import { launchTelegramE2e, runTelegramE2eSuite } from "../../channels/telegram/e2e.js";
 import { type CodexE2eToken, E2E_MODEL, E2E_REASONING_EFFORT, launchE2eTelex } from "./instance.js";
-import { AdjustableE2eClock, type E2eScenarioResult, runCoreE2eSuite } from "./suite.js";
+import {
+  AdjustableE2eClock,
+  DEFAULT_E2E_PARALLELISM,
+  type E2eScenarioResult,
+  runCoreE2eSuite,
+} from "./suite.js";
 import type { E2eTraceEntry } from "./trace.js";
 
 const usage = `Usage:
   npm test -- --voice-file PATH --voice-text TEXT [--codex-token-file PATH]
   npm run test:telegram -- --voice-file PATH --voice-text TEXT [options]
 
-Core options:
+Common options:
   --codex-token-file PATH   mode-0600 JSON: accessToken, accountId, optional planType
   --codex-binary PATH       reuse an already installed pinned Codex executable
   --voice-file PATH         real speech recording sent as a voice attachment
   --voice-text TEXT         phrase expected in the real transcription
+  --parallelism N           maximum simultaneous Codex threads (default: 4)
 
 Telegram options:
   --telex-bot-token-file PATH  mode-0600 Telex test-bot token
   --peer-bot-token-file PATH   mode-0600 bot-to-bot driver token
   --chat-id ID                 optional real group/forum destination
-  --thread-ids ID,ID           optional real topics for concurrent-thread coverage
+  --thread-ids ID,ID,...       optional real topics used as parallel worker lanes
 
 Missing secrets are requested interactively with hidden input. Raw tokens are never accepted
 as command-line arguments and are never logged.`;
@@ -43,8 +49,15 @@ async function main(): Promise<void> {
   const requestToken = async (): Promise<CodexE2eToken> => token;
   const codexBinaryPath = parsed.values.get("codex-binary") ?? process.env.TELEX_E2E_CODEX_BINARY;
   const logLevel = process.env.TELEX_E2E_LOG_LEVEL === "debug" ? "debug" : "info";
+  const parallelism = positiveInteger(
+    parsed.values.get("parallelism") ??
+      process.env.TELEX_E2E_PARALLELISM ??
+      String(DEFAULT_E2E_PARALLELISM),
+    "parallelism",
+  );
   const clock = new AdjustableE2eClock();
   stdout.write(`E2E model: ${E2E_MODEL} (${E2E_REASONING_EFFORT})\n`);
+  stdout.write(`E2E parallelism limit: ${parallelism}\n`);
 
   if (parsed.mode === "core") {
     const instance = await launchE2eTelex({
@@ -55,7 +68,14 @@ async function main(): Promise<void> {
     });
     try {
       printTrace("startup", instance.trace.startup());
-      printResults(await runCoreE2eSuite({ instance, clock, voiceFile, expectedVoiceText }));
+      const results = await runCoreE2eSuite({
+        instance,
+        clock,
+        voiceFile,
+        expectedVoiceText,
+        parallelism,
+      });
+      printResults(results, instance.trace.background());
     } finally {
       await instance.stop();
     }
@@ -86,7 +106,14 @@ async function main(): Promise<void> {
   });
   try {
     printTrace("startup", instance.telex.trace.startup());
-    printResults(await runTelegramE2eSuite({ instance, clock, voiceFile, expectedVoiceText }));
+    const results = await runTelegramE2eSuite({
+      instance,
+      clock,
+      voiceFile,
+      expectedVoiceText,
+      parallelism,
+    });
+    printResults(results, instance.telex.trace.background());
   } finally {
     await instance.stop();
   }
@@ -202,13 +229,33 @@ function optionalInteger(value: string | undefined): number | undefined {
   return parsed;
 }
 
-function optionalThreadIds(value: string | undefined): readonly [number, number] | undefined {
+function optionalThreadIds(
+  value: string | undefined,
+): readonly [number, number, ...number[]] | undefined {
   if (value === undefined) return undefined;
-  const values = value.split(",").map((part) => optionalInteger(part.trim()));
-  if (values.length !== 2 || values[0] === undefined || values[1] === undefined) {
-    throw new Error("--thread-ids requires two comma-separated integers");
+  const values = value.split(",").map((part) => {
+    const parsed = Number(part.trim());
+    if (!Number.isSafeInteger(parsed)) {
+      throw new Error("--thread-ids requires comma-separated integers");
+    }
+    return parsed;
+  });
+  if (values.length < 2 || values[0] === undefined || values[1] === undefined) {
+    throw new Error("--thread-ids requires at least two comma-separated integers");
   }
-  return [values[0], values[1]];
+  const threadIds: [number, number, ...number[]] = [values[0], values[1], ...values.slice(2)];
+  if (new Set(threadIds).size !== threadIds.length) {
+    throw new Error("--thread-ids must not contain duplicates");
+  }
+  return threadIds;
+}
+
+function positiveInteger(value: string, name: string): number {
+  const parsed = Number(value);
+  if (!Number.isSafeInteger(parsed) || parsed < 1) {
+    throw new Error(`--${name} requires a positive integer`);
+  }
+  return parsed;
 }
 
 async function assertReadable(path: string): Promise<void> {
@@ -216,11 +263,15 @@ async function assertReadable(path: string): Promise<void> {
   if (!metadata.isFile() || metadata.size === 0) throw new Error(`Voice fixture is empty: ${path}`);
 }
 
-function printResults(results: readonly E2eScenarioResult[]): void {
+function printResults(
+  results: readonly E2eScenarioResult[],
+  background: readonly E2eTraceEntry[],
+): void {
   for (const result of results) {
     stdout.write(`PASS ${result.name} (${result.durationMs} ms)\n`);
     printTrace(result.name, result.trace);
   }
+  if (background.length > 0) printTrace("shared concurrent events", background);
   stdout.write(`E2E PASS: ${results.length} real-system scenarios\n`);
 }
 

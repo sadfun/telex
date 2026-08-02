@@ -17,9 +17,11 @@ finish_outer_phase() {
 usage() {
   cat <<'EOF'
 Usage:
-  scripts/e2e-container.sh core --codex-token-file PATH --voice-file PATH --voice-text TEXT
+  scripts/e2e-container.sh core --codex-token-file PATH --voice-file PATH --voice-text TEXT \
+    [--parallelism N]
   scripts/e2e-container.sh telegram --codex-token-file PATH --telex-bot-token-file PATH \
-    --peer-bot-token-file PATH --voice-file PATH --voice-text TEXT [--chat-id ID --thread-ids ID,ID]
+    --peer-bot-token-file PATH --voice-file PATH --voice-text TEXT \
+    [--parallelism N] [--chat-id ID --thread-ids ID,ID,...]
 EOF
 }
 
@@ -35,6 +37,7 @@ voice_file=
 voice_text=
 chat_id=
 thread_ids=
+parallelism=
 while [[ $# -gt 0 ]]; do
   [[ $# -ge 2 ]] || { usage >&2; exit 2; }
   case $1 in
@@ -45,6 +48,7 @@ while [[ $# -gt 0 ]]; do
     --voice-text) voice_text=$2 ;;
     --chat-id) chat_id=$2 ;;
     --thread-ids) thread_ids=$2 ;;
+    --parallelism) parallelism=$2 ;;
     *) usage >&2; exit 2 ;;
   esac
   shift 2
@@ -179,6 +183,7 @@ run_args=(
   --env "TELEX_E2E_LOG_LEVEL=${TELEX_E2E_LOG_LEVEL:-info}"
   --env "TELEX_E2E_SCRIPT=$test_script"
 )
+[[ -z $parallelism ]] || run_args+=(--env "TELEX_E2E_PARALLELISM=$parallelism")
 if [[ $mode == telegram ]]; then
   run_args+=(
     --env TELEX_E2E_MODE=telegram

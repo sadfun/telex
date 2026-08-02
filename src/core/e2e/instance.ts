@@ -233,6 +233,7 @@ export async function launchE2eTelex(options: LaunchE2eTelexOptions): Promise<E2
         ...(options.now === undefined
           ? {}
           : { now: () => options.now?.().getTime() ?? Date.now() }),
+        onTurnStarting: (threadId, conversationKey) => trace.bindThread(threadId, conversationKey),
       },
     );
     const login = await trace.startupSpan(

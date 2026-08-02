@@ -10,6 +10,9 @@ All notable changes to Telex are documented in this file.
   that the authenticated Codex account exposes that model, and print the selection with results.
 - Trace outer container setup and real per-scenario Codex, tool, transcription, scheduler, and
   Telegram API spans so slow E2E runs have an actionable breakdown.
+- Run independent real E2E scenarios concurrently with a configurable maximum thread count,
+  while keeping conversation-isolation checks within the same limit and removing their artificial
+  model-requested delay.
 
 ## [0.0.30] - 2026-08-01
 

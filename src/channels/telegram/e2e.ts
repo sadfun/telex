@@ -8,9 +8,14 @@ import {
   type E2eTelexInstance,
   launchE2eTelex,
 } from "../../core/e2e/instance.js";
-import type { AdjustableE2eClock, E2eScenarioResult } from "../../core/e2e/suite.js";
-import { E2eTrace, type E2eTraceEntry } from "../../core/e2e/trace.js";
-import { delay } from "../../shared/async.js";
+import {
+  type AdjustableE2eClock,
+  type E2eScenarioResult,
+  runE2eScenario,
+  runE2eScenarios,
+  validateE2eParallelism,
+} from "../../core/e2e/suite.js";
+import { E2eTrace } from "../../core/e2e/trace.js";
 import type { LogLevel } from "../../shared/logger.js";
 import { TelegramChannel } from "./channel.js";
 import { normalizeTelegramMessage } from "./message.js";
@@ -169,21 +174,21 @@ export interface LaunchTelegramE2eOptions {
   readonly logLevel?: LogLevel;
   /** Destination used by the peer; direct bot-to-bot mode defaults to the Telex bot username. */
   readonly chatId?: number;
-  /** Two real forum/topic IDs enable the parallel-thread scenario. */
-  readonly threadIds?: readonly [number, number];
+  /** Real forum/topic IDs provide independent Telegram conversation lanes. */
+  readonly threadIds?: readonly [number, number, ...number[]];
 }
 
 export class TelegramE2eInstance {
   public readonly telex: E2eTelexInstance;
   public readonly driver: TelegramE2eDriver;
   public readonly probe: TelegramApiProbe;
-  public readonly threadIds: readonly [number, number] | undefined;
+  public readonly threadIds: readonly [number, number, ...number[]] | undefined;
 
   public constructor(options: {
     telex: E2eTelexInstance;
     driver: TelegramE2eDriver;
     probe: TelegramApiProbe;
-    threadIds?: readonly [number, number];
+    threadIds?: readonly [number, number, ...number[]];
   }) {
     this.telex = options.telex;
     this.driver = options.driver;
@@ -267,6 +272,7 @@ export class TelegramE2eDriver {
   readonly #trace: E2eTrace;
   #offset = 0;
   readonly #messages: Message[] = [];
+  #polling: Promise<void> | undefined;
 
   public constructor(
     peer: Bot,
@@ -330,20 +336,37 @@ export class TelegramE2eDriver {
           const message = this.#messages.splice(buffered, 1)[0];
           if (message !== undefined) return message;
         }
-        const updates = await this.#peer.api.getUpdates({
-          offset: this.#offset,
-          timeout: Math.min(10, Math.max(1, Math.ceil((deadline - Date.now()) / 1_000))),
-          limit: 100,
-          allowed_updates: ["message"],
-        });
-        for (const update of updates) {
-          this.#offset = Math.max(this.#offset, update.update_id + 1);
-          const message = update.message;
-          if (message?.from?.id === this.#telexBotId) this.#messages.push(message);
-        }
+        await this.pollUpdates(deadline);
       }
       throw new Error("Timed out waiting for the Telegram E2E response");
     });
+  }
+
+  private async pollUpdates(deadline: number): Promise<void> {
+    const active = this.#polling;
+    if (active !== undefined) {
+      await active;
+      return;
+    }
+    const polling = (async () => {
+      const updates = await this.#peer.api.getUpdates({
+        offset: this.#offset,
+        timeout: Math.min(10, Math.max(1, Math.ceil((deadline - Date.now()) / 1_000))),
+        limit: 100,
+        allowed_updates: ["message"],
+      });
+      for (const update of updates) {
+        this.#offset = Math.max(this.#offset, update.update_id + 1);
+        const message = update.message;
+        if (message?.from?.id === this.#telexBotId) this.#messages.push(message);
+      }
+    })();
+    this.#polling = polling;
+    try {
+      await polling;
+    } finally {
+      if (this.#polling === polling) this.#polling = undefined;
+    }
   }
 }
 
@@ -352,153 +375,217 @@ export interface TelegramE2eSuiteOptions {
   readonly clock: AdjustableE2eClock;
   readonly voiceFile: string;
   readonly expectedVoiceText: string;
+  readonly parallelism: number;
 }
 
 export async function runTelegramE2eSuite(
   options: TelegramE2eSuiteOptions,
 ): Promise<readonly E2eScenarioResult[]> {
   const { driver, probe, telex } = options.instance;
-  const results: E2eScenarioResult[] = [];
-  await scenario(results, telex.trace, "Telegram text, reasoning, and activity", async () => {
-    await driver.sendText("Reply exactly TELEX_TELEGRAM_TEXT_OK.");
-    try {
-      await driver.waitFor(
-        (message) => messageText(message).includes("TELEX_TELEGRAM_TEXT_OK"),
-        300_000,
-        "Wait for Telegram text reply",
-      );
-    } catch (error) {
-      throw new Error(
-        `No Telegram response; Telex polls=${probe.count("getUpdates")}, inbound=${probe.sawUpdateFrom(driver.peerId)}, richDrafts=${probe.completedCount("sendRichMessageDraft")}/${probe.count("sendRichMessageDraft")}, plainDrafts=${probe.completedCount("sendMessageDraft")}/${probe.count("sendMessageDraft")}, typing=${probe.completedCount("sendChatAction")}/${probe.count("sendChatAction")}, richMessages=${probe.completedCount("sendRichMessage")}/${probe.count("sendRichMessage")}, messages=${probe.completedCount("sendMessage")}/${probe.count("sendMessage")}`,
-        { cause: error },
-      );
-    }
-    if (
-      !probe.saw(["sendRichMessageDraft"], /thinking/u) &&
-      !probe.saw(["sendMessageDraft", "sendChatAction"])
-    ) {
-      throw new Error("Telegram received neither rendered reasoning nor a typing activity call");
-    }
-  });
-  await scenario(results, telex.trace, "Telegram voice download and transcription", async () => {
-    await driver.sendVoice(
-      options.voiceFile,
-      `Reply TELEX_TELEGRAM_VOICE_OK only if the transcript contains: ${options.expectedVoiceText}`,
-    );
-    await driver.waitFor(
-      (message) => messageText(message).includes("TELEX_TELEGRAM_VOICE_OK"),
-      300_000,
-      "Wait for Telegram voice reply",
-    );
-  });
-  await scenario(results, telex.trace, "Telegram generated image upload", async () => {
-    await driver.sendText(
-      "Generate a simple square blue triangle image with the image generation tool. Say TELEX_TELEGRAM_IMAGE_OK.",
-    );
-    await driver.waitFor(
-      (message) => messageText(message).includes("TELEX_TELEGRAM_IMAGE_OK"),
-      300_000,
-      "Wait for Telegram image reply",
-    );
-    const attachment = await driver.waitFor(
-      (message) => (message.photo?.length ?? 0) > 0 || message.document !== undefined,
-      300_000,
-      "Wait for Telegram image attachment",
-    );
-    if ((attachment.photo?.length ?? 0) === 0) {
-      throw new Error("Telex generated image reached Telegram only as a document fallback");
-    }
-    if (!probe.saw(["sendPhoto"])) {
-      throw new Error("Telex did not upload the image as a Telegram photo");
-    }
-  });
-  await scenario(results, telex.trace, "Telegram generated document upload", async () => {
-    await driver.sendText(
-      "Create a file named telex-e2e.txt containing TELEX_DOCUMENT_CONTENT, attach it, and say TELEX_TELEGRAM_DOCUMENT_OK.",
-    );
-    await driver.waitFor(
-      (message) => messageText(message).includes("TELEX_TELEGRAM_DOCUMENT_OK"),
-      300_000,
-      "Wait for Telegram document reply",
-    );
-    let document: Message;
-    try {
-      document = await driver.waitFor(
-        (message) => message.document !== undefined,
-        60_000,
-        "Wait for Telegram document attachment",
-      );
-    } catch (error) {
-      throw new Error(
-        `No Telegram document; sendDocument=${probe.completedCount("sendDocument")}/${probe.count("sendDocument")}`,
-        { cause: error },
-      );
-    }
-    if (document.document?.file_name !== "telex-e2e.txt" || !probe.saw(["sendDocument"])) {
-      throw new Error("Telex did not attach the generated document with the expected name");
-    }
-  });
   const threads = options.instance.threadIds;
+  const requestedParallelism = validateE2eParallelism(options.parallelism);
+  const effectiveParallelism =
+    threads === undefined ? 1 : Math.min(requestedParallelism, threads.length);
+  const threadForLane = (lane: number): number | undefined => threads?.[lane];
+  const textThread = threadForLane(0);
+  const text = await runE2eScenario(
+    telex.trace,
+    "Telegram text, reasoning, and activity",
+    async () => {
+      telex.trace.bindConversation(driver.conversationKey(textThread));
+      await driver.sendText("Reply exactly TELEX_TELEGRAM_TEXT_OK.", textThread);
+      try {
+        await driver.waitFor(
+          (message) =>
+            inThread(message, textThread) &&
+            messageText(message).includes("TELEX_TELEGRAM_TEXT_OK"),
+          300_000,
+          "Wait for Telegram text reply",
+        );
+      } catch (error) {
+        throw new Error(
+          `No Telegram response; Telex polls=${probe.count("getUpdates")}, inbound=${probe.sawUpdateFrom(driver.peerId)}, richDrafts=${probe.completedCount("sendRichMessageDraft")}/${probe.count("sendRichMessageDraft")}, plainDrafts=${probe.completedCount("sendMessageDraft")}/${probe.count("sendMessageDraft")}, typing=${probe.completedCount("sendChatAction")}/${probe.count("sendChatAction")}, richMessages=${probe.completedCount("sendRichMessage")}/${probe.count("sendRichMessage")}, messages=${probe.completedCount("sendMessage")}/${probe.count("sendMessage")}`,
+          { cause: error },
+        );
+      }
+      if (
+        !probe.saw(["sendRichMessageDraft"], /thinking/u) &&
+        !probe.saw(["sendMessageDraft", "sendChatAction"])
+      ) {
+        throw new Error("Telegram received neither rendered reasoning nor a typing activity call");
+      }
+    },
+  );
+
+  const primary = await runE2eScenarios(telex.trace, effectiveParallelism, [
+    {
+      name: "Telegram voice download and transcription",
+      run: async (lane) => {
+        const threadId = threadForLane(lane);
+        telex.trace.bindConversation(driver.conversationKey(threadId));
+        await driver.sendVoice(
+          options.voiceFile,
+          `Reply TELEX_TELEGRAM_VOICE_OK only if the transcript contains: ${options.expectedVoiceText}`,
+          threadId,
+        );
+        await driver.waitFor(
+          (message) =>
+            inThread(message, threadId) && messageText(message).includes("TELEX_TELEGRAM_VOICE_OK"),
+          300_000,
+          "Wait for Telegram voice reply",
+        );
+      },
+    },
+    {
+      name: "Telegram generated image upload",
+      run: async (lane) => {
+        const threadId = threadForLane(lane);
+        telex.trace.bindConversation(driver.conversationKey(threadId));
+        await driver.sendText(
+          "Generate a simple square blue triangle image with the image generation tool. Say TELEX_TELEGRAM_IMAGE_OK.",
+          threadId,
+        );
+        await driver.waitFor(
+          (message) =>
+            inThread(message, threadId) && messageText(message).includes("TELEX_TELEGRAM_IMAGE_OK"),
+          300_000,
+          "Wait for Telegram image reply",
+        );
+        const attachment = await driver.waitFor(
+          (message) =>
+            inThread(message, threadId) &&
+            ((message.photo?.length ?? 0) > 0 || message.document !== undefined),
+          300_000,
+          "Wait for Telegram image attachment",
+        );
+        if ((attachment.photo?.length ?? 0) === 0) {
+          throw new Error("Telex generated image reached Telegram only as a document fallback");
+        }
+        if (!probe.saw(["sendPhoto"])) {
+          throw new Error("Telex did not upload the image as a Telegram photo");
+        }
+      },
+    },
+    {
+      name: "Telegram generated document upload",
+      run: async (lane) => {
+        const threadId = threadForLane(lane);
+        telex.trace.bindConversation(driver.conversationKey(threadId));
+        await driver.sendText(
+          "Create a file named telex-e2e.txt containing TELEX_DOCUMENT_CONTENT, attach it, and say TELEX_TELEGRAM_DOCUMENT_OK.",
+          threadId,
+        );
+        await driver.waitFor(
+          (message) =>
+            inThread(message, threadId) &&
+            messageText(message).includes("TELEX_TELEGRAM_DOCUMENT_OK"),
+          300_000,
+          "Wait for Telegram document reply",
+        );
+        let document: Message;
+        try {
+          document = await driver.waitFor(
+            (message) => inThread(message, threadId) && message.document !== undefined,
+            60_000,
+            "Wait for Telegram document attachment",
+          );
+        } catch (error) {
+          throw new Error(
+            `No Telegram document; sendDocument=${probe.completedCount("sendDocument")}/${probe.count("sendDocument")}`,
+            { cause: error },
+          );
+        }
+        if (document.document?.file_name !== "telex-e2e.txt" || !probe.saw(["sendDocument"])) {
+          throw new Error("Telex did not attach the generated document with the expected name");
+        }
+      },
+    },
+    {
+      name: "Telegram scheduler delivery",
+      run: async (lane) => {
+        const threadId = threadForLane(lane);
+        telex.trace.bindConversation(driver.conversationKey(threadId));
+        await driver.sendText(
+          'Create a cron named "Telegram E2E" every minute that always notifies and asks: Reply TELEX_TELEGRAM_SCHEDULE_OK. Then say TELEGRAM_SCHEDULE_CREATED.',
+          threadId,
+        );
+        await driver.waitFor(
+          (message) =>
+            inThread(message, threadId) &&
+            messageText(message).includes("TELEGRAM_SCHEDULE_CREATED"),
+          300_000,
+          "Wait for Telegram schedule creation reply",
+        );
+        const owner: ProviderReference = {
+          provider: "telegram",
+          resource: "user",
+          id: String(driver.peerId),
+        };
+        const conversation: ProviderReference = {
+          provider: "telegram",
+          resource: "conversation",
+          id: driver.conversationKey(threadId),
+        };
+        if (telex.scheduler.listForConversation(owner, conversation).length !== 1) {
+          throw new Error("Telegram channel did not bind the real schedule to its conversation");
+        }
+        await telex.codex.waitForIdle();
+        options.clock.advance(2 * 60_000);
+        await telex.trace.span("Scheduler tick and scheduled run", async () => {
+          await telex.scheduler.tick();
+          await telex.scheduler.waitForIdle();
+        });
+        await driver.waitFor(
+          (message) =>
+            inThread(message, threadId) &&
+            messageText(message).includes("TELEX_TELEGRAM_SCHEDULE_OK"),
+          300_000,
+          "Wait for scheduled Telegram delivery",
+        );
+      },
+    },
+  ]);
+
+  let isolation: E2eScenarioResult | undefined;
   if (threads !== undefined) {
-    await scenario(results, telex.trace, "Telegram parallel thread isolation", async () => {
-      await Promise.all([
-        driver.sendText("Reply exactly TELEGRAM_THREAD_ALPHA_OK.", threads[0]),
-        driver.sendText("Reply exactly TELEGRAM_THREAD_BETA_OK.", threads[1]),
-      ]);
-      const alpha = await driver.waitFor(
-        (message) =>
-          message.message_thread_id === threads[0] &&
-          messageText(message).includes("TELEGRAM_THREAD_ALPHA_OK"),
-        300_000,
-        "Wait for Telegram alpha thread",
-      );
-      const beta = await driver.waitFor(
-        (message) =>
-          message.message_thread_id === threads[1] &&
-          messageText(message).includes("TELEGRAM_THREAD_BETA_OK"),
-        300_000,
-        "Wait for Telegram beta thread",
-      );
+    isolation = await runE2eScenario(telex.trace, "Telegram thread isolation", async () => {
+      telex.trace.bindConversation(driver.conversationKey(threads[0]));
+      telex.trace.bindConversation(driver.conversationKey(threads[1]));
+      const sendAlpha = async () => {
+        await driver.sendText("Reply exactly TELEGRAM_THREAD_ALPHA_OK.", threads[0]);
+        return await driver.waitFor(
+          (message) =>
+            message.message_thread_id === threads[0] &&
+            messageText(message).includes("TELEGRAM_THREAD_ALPHA_OK"),
+          300_000,
+          "Wait for Telegram alpha thread",
+        );
+      };
+      const sendBeta = async () => {
+        await driver.sendText("Reply exactly TELEGRAM_THREAD_BETA_OK.", threads[1]);
+        return await driver.waitFor(
+          (message) =>
+            message.message_thread_id === threads[1] &&
+            messageText(message).includes("TELEGRAM_THREAD_BETA_OK"),
+          300_000,
+          "Wait for Telegram beta thread",
+        );
+      };
+      const [alpha, beta] =
+        requestedParallelism === 1
+          ? [await sendAlpha(), await sendBeta()]
+          : await Promise.all([sendAlpha(), sendBeta()]);
       if (messageText(alpha).includes("BETA") || messageText(beta).includes("ALPHA")) {
         throw new Error("Telegram thread output crossed topic boundaries");
       }
     });
   }
-  await scenario(results, telex.trace, "Telegram scheduler delivery", async () => {
-    await driver.sendText(
-      'Create a cron named "Telegram E2E" every minute that always notifies and asks: Reply TELEX_TELEGRAM_SCHEDULE_OK. Then say TELEGRAM_SCHEDULE_CREATED.',
-    );
-    await driver.waitFor(
-      (message) => messageText(message).includes("TELEGRAM_SCHEDULE_CREATED"),
-      300_000,
-      "Wait for Telegram schedule creation reply",
-    );
-    const owner: ProviderReference = {
-      provider: "telegram",
-      resource: "user",
-      id: String(driver.peerId),
-    };
-    const conversation: ProviderReference = {
-      provider: "telegram",
-      resource: "conversation",
-      id: driver.conversationKey(),
-    };
-    if (telex.scheduler.listForConversation(owner, conversation).length !== 1) {
-      throw new Error("Telegram channel did not bind the real schedule to its conversation");
-    }
-    await telex.codex.waitForIdle();
-    options.clock.advance(2 * 60_000);
-    await telex.trace.span("Scheduler tick and scheduled run", async () => {
-      await telex.scheduler.tick();
-      await telex.scheduler.waitForIdle();
-    });
-    await driver.waitFor(
-      (message) => messageText(message).includes("TELEX_TELEGRAM_SCHEDULE_OK"),
-      300_000,
-      "Wait for scheduled Telegram delivery",
-    );
-  });
-  return results;
+  return [
+    text,
+    ...primary.slice(0, 3),
+    ...(isolation === undefined ? [] : [isolation]),
+    ...primary.slice(3),
+  ];
 }
 
 function threadParameters(threadId: number | undefined): { message_thread_id?: number } {
@@ -509,24 +596,6 @@ function messageText(message: Message): string {
   return message.text ?? message.caption ?? normalizeTelegramMessage(message).text;
 }
 
-async function scenario(
-  results: E2eScenarioResult[],
-  trace: E2eTrace,
-  name: string,
-  run: () => Promise<void>,
-): Promise<void> {
-  const startedAt = Date.now();
-  trace.beginScenario(name);
-  let entries: readonly E2eTraceEntry[] = [];
-  try {
-    await run();
-  } catch (error) {
-    throw new Error(`${name}: ${error instanceof Error ? error.message : String(error)}`, {
-      cause: error,
-    });
-  } finally {
-    entries = trace.finishScenario(name);
-  }
-  results.push({ name, durationMs: Date.now() - startedAt, trace: entries });
-  await delay(250);
+function inThread(message: Message, threadId: number | undefined): boolean {
+  return message.message_thread_id === threadId;
 }

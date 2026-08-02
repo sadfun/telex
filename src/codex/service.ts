@@ -149,6 +149,8 @@ export interface CodexServiceProviders {
     request: ChatgptAuthTokensRefreshParams,
   ) => Promise<ChatgptAuthTokensRefreshResponse>;
   readonly now?: () => number;
+  /** Passive lifecycle observer used by isolated E2E tracing. */
+  readonly onTurnStarting?: (threadId: string, conversationKey: string) => void;
 }
 
 export class CodexService {
@@ -171,6 +173,7 @@ export class CodexService {
   readonly #explicitSkillInputs: ExplicitSkillInputProvider;
   readonly #externalAuthTokens: CodexServiceProviders["externalAuthTokens"];
   readonly #now: () => number;
+  readonly #onTurnStarting: CodexServiceProviders["onTurnStarting"];
   #pauseGate: Deferred<void> | undefined;
   #idleGate: Deferred<void> | undefined;
   #interruptingScheduledTurns = false;
@@ -204,6 +207,7 @@ export class CodexService {
     this.#explicitSkillInputs = providers.explicitSkillInputs ?? (() => []);
     this.#externalAuthTokens = providers.externalAuthTokens;
     this.#now = providers.now ?? Date.now;
+    this.#onTurnStarting = providers.onTurnStarting;
     rpc.onNotification((notification) => this.handleNotification(notification));
     rpc.onExit((exit) => this.handleTransportExit(exit.error));
     rpc.setServerRequestHandler(async (request) => await this.handleServerRequest(request));
@@ -436,6 +440,7 @@ export class CodexService {
     session: ThreadSession,
     request: StartTurnRequest,
   ): Promise<FinalizedTurn> {
+    this.#onTurnStarting?.(session.threadId, request.conversationKey);
     const additionalContext = this.additionalContext(request.connector, request.invocation);
     const pending = session.expectTurn(request);
     let response: TurnStartResponse;

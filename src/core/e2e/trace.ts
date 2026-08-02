@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from "node:async_hooks";
 import { performance } from "node:perf_hooks";
 import type { CodexAppServer } from "../../codex/rpc.js";
 import type { ThreadItem } from "../../generated/codex/v2/ThreadItem.js";
@@ -18,28 +19,35 @@ interface TraceScope {
 /** Passive wall-clock spans around real E2E operations and Codex protocol events. */
 export class E2eTrace {
   readonly #startup: TraceScope = { name: "startup", startedAt: performance.now(), entries: [] };
-  #scenario: TraceScope | undefined;
+  readonly #background: TraceScope = {
+    name: "shared concurrent events",
+    startedAt: this.#startup.startedAt,
+    entries: [],
+  };
+  readonly #scenario = new AsyncLocalStorage<TraceScope>();
+  readonly #conversationScopes = new Map<string, TraceScope>();
+  readonly #threadScopes = new Map<string, TraceScope>();
+  readonly #turnScopes = new Map<string, TraceScope>();
 
-  public beginScenario(name: string): void {
-    if (this.#scenario !== undefined) throw new Error(`E2E trace scenario is already active`);
-    this.#scenario = { name, startedAt: performance.now(), entries: [] };
-  }
-
-  public finishScenario(name: string): readonly E2eTraceEntry[] {
-    const scope = this.#scenario;
-    if (scope?.name !== name) throw new Error(`E2E trace scenario mismatch: ${name}`);
-    this.#scenario = undefined;
-    return sorted(scope.entries);
+  public async runScenario<T>(
+    name: string,
+    run: () => Promise<T>,
+  ): Promise<{ readonly result: T; readonly trace: readonly E2eTraceEntry[] }> {
+    const scope: TraceScope = { name, startedAt: performance.now(), entries: [] };
+    const result = await this.#scenario.run(scope, run);
+    return { result, trace: sorted(scope.entries) };
   }
 
   public startup(): readonly E2eTraceEntry[] {
     return sorted(this.#startup.entries);
   }
 
+  public background(): readonly E2eTraceEntry[] {
+    return sorted(this.#background.entries);
+  }
+
   public start(label: string, detail?: string): () => void {
-    const scope = this.#scenario;
-    if (scope === undefined) return () => undefined;
-    return startSpan(scope, label, detail);
+    return startSpan(this.#scenario.getStore() ?? this.#background, label, detail);
   }
 
   public startStartup(label: string, detail?: string): () => void {
@@ -63,6 +71,32 @@ export class E2eTrace {
       finish();
     }
   }
+
+  /** Bind an external channel conversation before its update reaches Telex asynchronously. */
+  public bindConversation(conversationKey: string): void {
+    const scope = this.#scenario.getStore();
+    if (scope !== undefined) this.#conversationScopes.set(conversationKey, scope);
+  }
+
+  /** Bind a real Codex thread to the scenario that is about to start a turn on it. */
+  public bindThread(threadId: string, conversationKey: string): void {
+    const scope = this.#scenario.getStore() ?? this.#conversationScopes.get(conversationKey);
+    if (scope !== undefined) this.#threadScopes.set(threadId, scope);
+  }
+
+  public startCodexTurn(threadId: string, turnId: string): () => void {
+    const scope = this.#threadScopes.get(threadId) ?? this.#background;
+    this.#turnScopes.set(turnId, scope);
+    const finish = startSpan(scope, "Codex turn", shortId(turnId));
+    return () => {
+      finish();
+      this.#turnScopes.delete(turnId);
+    };
+  }
+
+  public startCodexItem(turnId: string, label: string): () => void {
+    return startSpan(this.#turnScopes.get(turnId) ?? this.#background, label, shortId(turnId));
+  }
 }
 
 export function attachCodexE2eTrace(rpc: CodexAppServer, trace: E2eTrace): () => void {
@@ -71,19 +105,21 @@ export function attachCodexE2eTrace(rpc: CodexAppServer, trace: E2eTrace): () =>
     switch (notification.method) {
       case "turn/started": {
         const turn = notification.params.turn;
-        spans.set(`turn:${turn.id}`, trace.start("Codex turn", shortId(turn.id)));
+        spans.set(`turn:${turn.id}`, trace.startCodexTurn(notification.params.threadId, turn.id));
         return;
       }
       case "turn/completed": {
         const turn = notification.params.turn;
-        finishOrMark(spans, `turn:${turn.id}`, trace, "Codex turn", shortId(turn.id));
+        finishOrMark(spans, `turn:${turn.id}`, () =>
+          trace.startCodexTurn(notification.params.threadId, turn.id),
+        );
         return;
       }
       case "item/started": {
         const item = notification.params.item;
         const label = tracedItemLabel(item);
         if (label !== undefined) {
-          spans.set(`item:${item.id}`, trace.start(label, shortId(notification.params.turnId)));
+          spans.set(`item:${item.id}`, trace.startCodexItem(notification.params.turnId, label));
         }
         return;
       }
@@ -91,7 +127,9 @@ export function attachCodexE2eTrace(rpc: CodexAppServer, trace: E2eTrace): () =>
         const item = notification.params.item;
         const label = tracedItemLabel(item);
         if (label !== undefined) {
-          finishOrMark(spans, `item:${item.id}`, trace, label, shortId(notification.params.turnId));
+          finishOrMark(spans, `item:${item.id}`, () =>
+            trace.startCodexItem(notification.params.turnId, label),
+          );
         }
         return;
       }
@@ -116,16 +154,10 @@ function startSpan(scope: TraceScope, label: string, detail?: string): () => voi
   };
 }
 
-function finishOrMark(
-  spans: Map<string, () => void>,
-  key: string,
-  trace: E2eTrace,
-  label: string,
-  detail?: string,
-): void {
+function finishOrMark(spans: Map<string, () => void>, key: string, start: () => () => void): void {
   const finish = spans.get(key);
   spans.delete(key);
-  if (finish === undefined) trace.start(label, detail)();
+  if (finish === undefined) start()();
   else finish();
 }
 
