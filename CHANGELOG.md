@@ -4,6 +4,13 @@ All notable changes to Telex are documented in this file.
 
 ## Unreleased
 
+## [0.0.34] - 2026-08-02
+
+### Fixed
+
+- Allow an authenticated owner to view, update, or delete an explicitly identified schedule from
+  another conversation without changing its original delivery or thread binding.
+
 ## [0.0.33] - 2026-08-02
 
 ### Added

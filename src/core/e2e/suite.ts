@@ -122,6 +122,17 @@ export async function runCoreE2eSuite(
         if (schedules.length !== 1) {
           throw new Error(`Expected one real schedule, found ${schedules.length}`);
         }
+        const schedule = schedules[0];
+        if (schedule === undefined) throw new Error("The real schedule disappeared");
+        const managed = await channel.send({
+          conversation: "scheduler-manager",
+          text: `Use automation_update to first view schedule id ${schedule.id}, then change only its name to "E2E minute managed". After both tool calls succeed, reply with exactly TELEX_SCHEDULE_MANAGED and nothing else.`,
+        });
+        expectMarker(managed, "TELEX_SCHEDULE_MANAGED");
+        const updated = options.instance.scheduler.listForConversation(owner, conversation)[0];
+        if (updated?.name !== "E2E minute managed") {
+          throw new Error(`Cross-conversation update failed: ${updated?.name ?? "missing"}`);
+        }
         options.clock.advance(2 * 60_000);
         await options.instance.trace.span("Scheduler tick and scheduled run", async () => {
           await options.instance.scheduler.tick();
@@ -133,6 +144,14 @@ export async function runCoreE2eSuite(
         );
         if (!published.message.text.includes("TELEX_SCHEDULER_E2E_OK")) {
           throw new Error(`Scheduled run returned unexpected output: ${published.message.text}`);
+        }
+        const deleted = await channel.send({
+          conversation: "scheduler-manager",
+          text: `Use automation_update to delete schedule id ${schedule.id}. After the tool succeeds, reply with exactly TELEX_SCHEDULE_DELETED and nothing else.`,
+        });
+        expectMarker(deleted, "TELEX_SCHEDULE_DELETED");
+        if (options.instance.scheduler.listForConversation(owner, conversation).length !== 0) {
+          throw new Error("Cross-conversation delete left the schedule behind");
         }
       },
     },

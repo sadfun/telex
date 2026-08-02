@@ -132,7 +132,7 @@ export class AutomationManagementError extends Error {
 const automationUpdateSpec = {
   type: "function",
   name: "automation_update",
-  description: `Manage Telex scheduled runs. Use this whenever the user asks to schedule, repeat, monitor, remind, follow up later, list schedules, pause, resume, change, or delete a scheduled task. Use kind "heartbeat" to revisit this same Codex thread; use "cron" for a fresh persistent thread on every run. Telex accepts a bounded RFC 5545 RRULE subset: MINUTELY with INTERVAL; HOURLY with optional BYMINUTE; DAILY or WEEKLY with optional BYMINUTE, BYHOUR, and BYDAY; plus UNTIL, and WKST for WEEKLY. Use one line, no DTSTART, and keep BY lists small. Do not invent owners, destinations, or thread IDs: Telex binds them to the current conversation.`,
+  description: `Manage Telex scheduled runs. Use this whenever the user asks to schedule, repeat, monitor, remind, follow up later, list schedules, pause, resume, change, or delete a scheduled task. Use kind "heartbeat" to revisit this same Codex thread; use "cron" for a fresh persistent thread on every run. Telex accepts a bounded RFC 5545 RRULE subset: MINUTELY with INTERVAL; HOURLY with optional BYMINUTE; DAILY or WEEKLY with optional BYMINUTE, BYHOUR, and BYDAY; plus UNTIL, and WKST for WEEKLY. Use one line, no DTSTART, and keep BY lists small. New schedules and unfiltered lists bind to the current conversation; an existing schedule explicitly identified by id can be viewed, updated, or deleted from any conversation owned by the same authenticated user. Do not invent owners, destinations, or thread IDs.`,
   inputSchema: toolJsonSchema(automationOperationSchema),
 } as const satisfies CodexDynamicTool["spec"];
 
@@ -708,9 +708,7 @@ export class ScheduledRunsEngine {
     switch (operation.mode) {
       case "view": {
         if (operation.id !== undefined) {
-          return summarizeAutomation(
-            this.requireAccessibleAutomation(operation.id, owner, conversation),
-          );
+          return summarizeAutomation(this.requireOwnedAutomation(operation.id, owner));
         }
         return {
           automations: this.listForConversation(owner, conversation).map(summarizeAutomation),
@@ -734,11 +732,11 @@ export class ScheduledRunsEngine {
         };
       }
       case "update": {
-        const updated = await this.updateAutomation(operation, owner, conversation);
+        const updated = await this.updateAutomation(operation, owner);
         return { updated: true, automation: summarizeAutomation(updated) };
       }
       case "delete": {
-        this.requireAccessibleAutomation(operation.id, owner, conversation);
+        this.requireOwnedAutomation(operation.id, owner);
         await this.#store.deleteAutomation(operation.id);
         return { deleted: true, id: operation.id };
       }
