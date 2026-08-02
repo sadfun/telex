@@ -4,6 +4,13 @@ All notable changes to Telex are documented in this file.
 
 ## Unreleased
 
+## [0.0.31] - 2026-08-02
+
+### Added
+
+- Added `/compact` through Codex app-server's native compaction turn, with busy protection and
+  visible progress for both manual and Codex-triggered automatic context compaction.
+
 ### Changed
 
 - Pin real E2E conversational and scheduled turns to GPT-5.6 Luna with medium reasoning, validate

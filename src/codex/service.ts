@@ -21,6 +21,7 @@ import type { FileChangeRequestApprovalResponse } from "../generated/codex/v2/Fi
 import type { GetAccountResponse } from "../generated/codex/v2/GetAccountResponse.js";
 import type { LoginAccountResponse } from "../generated/codex/v2/LoginAccountResponse.js";
 import type { PermissionsRequestApprovalResponse } from "../generated/codex/v2/PermissionsRequestApprovalResponse.js";
+import type { ThreadCompactStartResponse } from "../generated/codex/v2/ThreadCompactStartResponse.js";
 import type { ThreadResumeResponse } from "../generated/codex/v2/ThreadResumeResponse.js";
 import type { ThreadStartParams } from "../generated/codex/v2/ThreadStartParams.js";
 import type { ThreadStartResponse } from "../generated/codex/v2/ThreadStartResponse.js";
@@ -94,6 +95,11 @@ interface StartTurnRequest extends TurnPresentation {
   readonly turnSettings: CodexTurnSettings;
   readonly outputSchema?: JsonValue;
   /** Called once the turn exists in Codex and its rendering is session-owned. */
+  readonly onStarted?: () => void;
+}
+
+interface StartCompactionRequest extends TurnPresentation {
+  /** Called once the compaction turn exists and its rendering is session-owned. */
   readonly onStarted?: () => void;
 }
 
@@ -470,6 +476,29 @@ export class CodexService {
     return await view.terminal.promise;
   }
 
+  /** Start a native compaction turn, whose empty RPC response has no turn ID. */
+  private async startCompaction(
+    session: ThreadSession,
+    request: StartCompactionRequest,
+  ): Promise<FinalizedTurn> {
+    this.#onTurnStarting?.(session.threadId, request.conversationKey);
+    const pending = session.expectTurn(request);
+    try {
+      await this.#rpc.request<ThreadCompactStartResponse>({
+        method: "thread/compact/start",
+        params: { threadId: session.threadId },
+      });
+    } catch (error) {
+      const view = pending.cancel();
+      if (view === undefined) throw error;
+      request.onStarted?.();
+      return await view.terminal.promise;
+    }
+    const view = await pending.waitForClaim();
+    request.onStarted?.();
+    return await view.terminal.promise;
+  }
+
   private async transcribeVoiceMessages(
     text: string,
     attachments: readonly InboundAttachment[],
@@ -494,6 +523,78 @@ export class CodexService {
   public async resetConversation(conversationKey: string): Promise<void> {
     await this.interrupt(conversationKey);
     await this.#conversations.delete(conversationKey);
+  }
+
+  public async compactConversation(
+    conversationKey: string,
+    connector: string,
+    responder: MessageResponder,
+    invocation: CodexInvocationContext = {},
+  ): Promise<boolean> {
+    const storedThread = this.#conversations.get(conversationKey);
+    if (storedThread === undefined) return false;
+    if (
+      this.#conversationSessions.get(conversationKey)?.busy === true ||
+      (this.#foregroundWaiting.get(conversationKey) ?? 0) > 0
+    ) {
+      throw conversationBusyError();
+    }
+    const lease = this.#queue.tryAcquire(conversationKey);
+    if (lease === undefined) throw conversationBusyError();
+    try {
+      await this.enterJob();
+      try {
+        const settings = await this.#effectiveSettings();
+        const threadId = await this.resumeThreadStrict(
+          storedThread,
+          settings.thread ?? {},
+          conversationKey,
+          connector,
+        );
+        const session = this.requireSession(threadId);
+        if (session.busy) throw conversationBusyError();
+        this.#conversationSessions.set(conversationKey, session);
+        session.adoptPresenter(conversationKey, connector, responder, invocation);
+        const stream = responder.createStream();
+        let started = false;
+        try {
+          await stream.start({ summary: "Compacting context…", actions: [], plan: [] });
+          const finalized = await this.startCompaction(session, {
+            origin: "user",
+            stream,
+            responder,
+            invocation,
+            conversationKey,
+            connector,
+            onStarted: () => {
+              started = true;
+            },
+          });
+          this.#logger.debug("Codex context compaction finalized", {
+            conversationKey,
+            turnId: finalized.turn.id,
+            status: finalized.turn.status,
+          });
+          if (finalized.turn.status === "failed") {
+            this.#logger.warn("Codex context compaction failed", {
+              conversationKey,
+              turnId: finalized.turn.id,
+              error: finalized.turn.error?.message,
+            });
+          }
+        } catch (error) {
+          this.#logger.error("Codex context compaction failed", error, { conversationKey });
+          // Once a turn started, its session owns the stream, including failure.
+          if (!started) await stream.fail(errorMessage(error));
+        }
+        return true;
+      } finally {
+        this.#lastForegroundAt.set(conversationKey, this.#now());
+        this.leaveJob();
+      }
+    } finally {
+      lease.release();
+    }
   }
 
   public async activateConversationThread(
@@ -949,6 +1050,13 @@ export class CodexService {
       session.endServerRequest(requestId);
     }
   }
+}
+
+function conversationBusyError(): BridgeError {
+  return new BridgeError(
+    "The conversation is busy. Stop or wait for the current turn first.",
+    "CONVERSATION_BUSY",
+  );
 }
 
 function notificationThreadId(notification: ServerNotification): string | undefined {

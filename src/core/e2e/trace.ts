@@ -181,6 +181,8 @@ function tracedItemLabel(item: ThreadItem): string | undefined {
       return "Web search";
     case "sleep":
       return "Codex sleep";
+    case "contextCompaction":
+      return "Context compaction";
     default:
       return undefined;
   }

@@ -4,6 +4,7 @@ import type {
   ChoiceOption,
   DeliveryReceipt,
   InboundAttachment,
+  InboundCommand,
   MessageHandler,
   MessageResponder,
   MessagingChannel,
@@ -32,6 +33,7 @@ export interface E2eInbound {
   readonly conversation?: string;
   readonly sender?: string;
   readonly text: string;
+  readonly command?: InboundCommand;
   readonly attachments?: readonly InboundAttachment[];
 }
 
@@ -154,6 +156,7 @@ export class ProtocolE2eChannel implements MessagingChannel {
         reference: { provider: this.name, resource: "message", id },
         sender: { id: sender, displayName: sender },
         text: input.text,
+        ...(input.command === undefined ? {} : { command: input.command }),
         attachments: input.attachments ?? [],
         responder,
       });

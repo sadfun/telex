@@ -416,6 +416,23 @@ export async function runTelegramE2eSuite(
       }
     },
   );
+  const compaction = await runE2eScenario(
+    telex.trace,
+    "Telegram manual context compaction",
+    async () => {
+      telex.trace.bindConversation(driver.conversationKey(textThread));
+      await driver.sendText("/compact", textThread);
+      await driver.waitFor(
+        (message) =>
+          inThread(message, textThread) && messageText(message).includes("Context compacted."),
+        300_000,
+        "Wait for Telegram context compaction",
+      );
+    },
+  );
+  if (!compaction.trace.some((entry) => entry.label === "Context compaction")) {
+    throw new Error("Telegram did not observe the native context-compaction item");
+  }
 
   const primary = await runE2eScenarios(telex.trace, effectiveParallelism, [
     {
@@ -582,6 +599,7 @@ export async function runTelegramE2eSuite(
   }
   return [
     text,
+    compaction,
     ...primary.slice(0, 3),
     ...(isolation === undefined ? [] : [isolation]),
     ...primary.slice(3),

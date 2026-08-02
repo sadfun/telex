@@ -155,7 +155,24 @@ export async function runCoreE2eSuite(
       }
     },
   );
-  return [...primary.slice(0, 3), isolation, ...primary.slice(3)];
+  const compaction = await runE2eScenario(
+    options.instance.trace,
+    "manual context compaction",
+    async () => {
+      const reply = await channel.send({
+        text: "/compact",
+        command: { name: "compact", args: "" },
+      });
+      expectMarker(reply, "Context compacted.");
+      if (!reply.progress.some((progress) => progress.summary === "Compacting context…")) {
+        throw new Error("Telex did not expose native context-compaction progress");
+      }
+    },
+  );
+  if (!compaction.trace.some((entry) => entry.label === "Context compaction")) {
+    throw new Error("The native context-compaction item was absent from the protocol trace");
+  }
+  return [...primary.slice(0, 3), compaction, isolation, ...primary.slice(3)];
 }
 
 export async function runE2eScenarios(

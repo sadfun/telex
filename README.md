@@ -152,6 +152,7 @@ Then restart the service. Rollback changes application code only; it does not re
 | `/new` | Interrupt the current turn, forget its thread, and start fresh on the next message. |
 | `/back` | Return to the previously active Codex task. |
 | `/stop` | Interrupt the running Codex turn. |
+| `/compact` | Ask Codex to summarize earlier context in the current task; unavailable while a turn is running. |
 | `/schedules` | List your scheduled runs and their next execution times. |
 | `/status` | Check app-server connectivity and the current Codex account. |
 | `/login` | Start Codex's ChatGPT device-code login in a private chat. |
@@ -162,7 +163,7 @@ Then restart the service. Rollback changes application code only; it does not re
 | `/update` | Check for and install the latest Telex release, then restart the service. |
 | `/help` | Show the command list. |
 
-Messages that are not commands become `turn/start` requests. Telegram voice messages are transcribed before the turn starts, while their original OGG files remain available to Codex. Photos and supported image files use Codex's native image input. Videos, other audio, documents, animated stickers, and other binary files are downloaded under `.telex/attachments` in the Codex workspace and passed as local paths; captions, replies, forwards, polls, contacts, locations, checklists, and Telegram-only structures are preserved as concise text context. Codex commentary drives Telegram's thinking indicator, final-answer deltas drive the draft, and approval or user-input requests become inline choices.
+Messages that are not commands become `turn/start` requests. Telegram voice messages are transcribed before the turn starts, while their original OGG files remain available to Codex. Photos and supported image files use Codex's native image input. Videos, other audio, documents, animated stickers, and other binary files are downloaded under `.telex/attachments` in the Codex workspace and passed as local paths; captions, replies, forwards, polls, contacts, locations, checklists, and Telegram-only structures are preserved as concise text context. Codex commentary drives Telegram's thinking indicator, final-answer deltas drive the draft, approval or user-input requests become inline choices, and native automatic or manual context compaction is shown in the same progress stream.
 
 Every turn also carries connector-derived application context separately from the user's message. It tells Codex that the user is remote through the current connector, so host-local browser windows, GUI state, and `localhost` links are not user-accessible. The connector name is dynamic rather than Telegram-specific, preserving the channel abstraction for future transports.
 
@@ -269,7 +270,8 @@ scripts/e2e-container.sh core \
 ```
 
 The core run verifies text round-trip, voice transcription, generated-image attachment bytes,
-separate conversations, and a real scheduled run after advancing only the scheduler clock.
+native context compaction, separate conversations, and a real scheduled run after advancing only
+the scheduler clock.
 Independent scenarios run concurrently on the single app-server, bounded by `--parallelism` (or
 `TELEX_E2E_PARALLELISM`, default `4`). The conversation-isolation check runs afterwards and uses
 two simultaneous turns only when the limit permits it.
