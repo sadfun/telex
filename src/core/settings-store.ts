@@ -6,7 +6,7 @@ const settingsSchema = z.strictObject({
   remoteClientContext: z.boolean(),
 });
 
-const storedSettingsSchema = settingsSchema.extend({
+export const storedSettingsSchema = settingsSchema.extend({
   version: z.literal(1),
 });
 

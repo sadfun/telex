@@ -1,5 +1,105 @@
 # Telex
 
+Development continues in [Wirebot](https://github.com/sadfun/wirebot). **Telex 0.0.35 is the
+migration release for existing 0.0.34 instances.** New installations should use Wirebot directly.
+
+## Automatic migration to Wirebot
+
+The normal Telex release updater installs this release and restarts the existing service. Before
+starting a bot, it prepares Docker, pulls `ghcr.io/sadfun/wirebot:latest`, and copies the configured
+data and workspace into `~/.local/share/telex-wirebot/<instance-id>/` (or the corresponding
+`XDG_DATA_HOME` directory). The original Telex files and configuration remain intact.
+
+The copy includes Codex authentication, sessions and SQLite databases (including WAL files),
+memory, skills, configuration, conversation-to-thread mappings and history, schedules, delivery
+records, settings, attachments, and workspace files. The copy is mounted inside the container at
+the original absolute paths as well as `/data`, preserving stored rollout paths and thread working
+directories. The workspace's `.wirebot` is linked to `.telex`, so existing schedule memories and
+attachment paths still resolve. No host Docker socket is exposed to the agent.
+
+The default `workspace-write` Codex sandbox setting becomes `danger-full-access` **inside the
+container**, matching Wirebot's machine model: ordinary Docker cannot run Codex's nested
+bubblewrap sandbox. Approval policy and other Codex settings stay intact. The original host
+configuration remains unchanged. Wirebot logs at least at `info` level so the updater can verify
+its startup event.
+
+Once Wirebot reports that its connectors and scheduler are ready, and its health endpoint confirms
+the existing Codex account, each allowlisted Telegram user receives:
+
+> Telex just got a big update! Your instance is now [Wirebot](https://github.com/sadfun/wirebot),
+> the next evolution of telex.
+>
+> Your login, conversations, memory, and schedules are preserved. Slack and Discord are now
+> supported, and updates are automatic. Just keep chatting.
+
+Successful deliveries are recorded per user; failed deliveries retry. A crash between Telegram
+accepting a message and saving its receipt can cause that message to repeat.
+
+### Docker and the host service
+
+- Linux: reuse a local Docker daemon, including rootless Docker. If Docker is missing, install
+  it using a pinned, checksum-verified official Docker installer and enable its system service.
+  Installation needs root or passwordless sudo; the updater never waits for a password.
+- macOS: reuse Docker Desktop or Colima. If necessary, install Docker and Colima through an
+  existing Homebrew installation and enable Colima's login service. Homebrew or Docker Desktop
+  must already be available. Linux and macOS on x86-64 and ARM64 are supported.
+- Migration installs a **systemd timer and oneshot service** on Linux, or a **launchd job with
+  `StartInterval`** on macOS, then disables and stops the old telex service. There is no updater
+  process between checks. A small shell script checks every `TELEX_UPDATE_INTERVAL_HOURS`
+  (six hours by default), pulls before stopping anything, and exits if the image is unchanged.
+  Node runs only for the first notification, an image replacement, or recovery; it exits after
+  that work. Each replacement
+  retains a stopped-data snapshot and restores both image and data if startup fails. The latest
+  snapshot is kept at the migrated data directory's `-backup` sibling and rotated on the next
+  update. Interrupted replacements recover at the next scheduled check or after reboot.
+- Docker's `unless-stopped` restart policy keeps Wirebot running after Telex exits. Stopping
+  the updater disables checks, not the bot: use `docker stop <container-name>` to stop Wirebot,
+  after stopping its updater. Keep the migration release and Node installed for occasional
+  update transactions. The standard installer services are retired automatically; if using a
+  custom process manager, remove its old `telex start` job. Source development can use
+  `TELEX_MIGRATION=off npm run dev` to run native Telex.
+
+The private instance directory contains `migration.json` (container name, Docker endpoint, data
+path and notification credentials), `wirebot.env`, and `update.sh`. Extra environment variables from the launcher's env file are
+retained, excluding host-only paths and replaced runtime settings. Wirebot's HTTP port is
+published at the original Telex host/port, so an existing `PUBLIC_URL` reverse proxy keeps working.
+Slack and Discord are available but require their own connector credentials; migration does not
+enable them automatically.
+
+Allow disk space for the migrated data/workspace and another copy for update rollback, in addition
+to the Docker image. External symlink targets, host-installed programs, host keychain credentials,
+and services bound to the host's localhost need container-compatible configuration. Remote Docker
+daemons and paths that conflict with the image's system directories are rejected.
+
+### Deferring migration and recovery
+
+Set `TELEX_MIGRATION=off` in `telex.env` **before migration** to defer it. If preparation or initial
+startup fails, the original Telex instance resumes; inspect the telex service logs, fix the
+reported prerequisite, and restart that service to retry. Failed copies are retained for inspection.
+No success announcement is sent on failure.
+
+After migration, `TELEX_MIGRATION=off` cannot switch back to the stale original state, and
+`telex update` / `telex update --rollback` refuse to replace the migration release. For recovery,
+stop the updater first, inspect `migration.json`, and back up the **migrated** data before
+changing the container or image. The original Telex directory is a pre-migration backup and does
+not contain conversations or token refreshes made since migration. Do not run it alongside Wirebot.
+
+For a container named `telex-wirebot-<instance-id>`, the Linux timer and oneshot service are
+both named `telex-wirebot-<instance-id>-update`. Use `systemctl --user disable --now
+telex-wirebot-<instance-id>-update.timer` and `systemctl --user stop
+telex-wirebot-<instance-id>-update.service` before maintenance (omit `--user` for a root system
+installation). On macOS, disable and boot out `gui/$(id -u)/com.sadfun.telex-wirebot-<instance-id>-update`
+with `launchctl`. Linux logs go to the journal; macOS retains the last check's `update.log` in
+the instance directory. Running `/bin/sh <instance-directory>/update.sh` checks immediately.
+
+Run `npm run test:migration` for the isolated migration/rollback regression check. On a machine
+with Docker, `TELEX_TEST_DOCKER=1 npm run test:migration` also boots the published image against a
+simulated Telegram API and verifies its mounted data, readiness, and snapshot restoration. CI
+and release builds also set `TELEX_TEST_SYSTEMD=1` to verify real service retirement and that the
+oneshot updater has no remaining process. No real Telegram or ChatGPT credentials are used.
+
+The rest of this README documents native Telex and its pre-migration installation.
+
 Telex is a self-hosted Telegram bridge for OpenAI Codex. Telegram is only the transport: a dedicated [Codex app-server](https://github.com/openai/codex/blob/main/codex-rs/app-server/README.md) owns threads, turns, tools, approvals, authentication, and configuration.
 
 Telex supports private conversations, scheduled runs, automatic Telegram voice-message transcription, photos and files in both directions, forwarded and replied-to context, polls and other structured messages, streamed replies and thinking, interactive approvals, guest mentions, persistent Codex threads, and an authenticated settings Mini App. It installs a pinned Codex CLI into isolated application storage, so it never depends on a global Codex installation.

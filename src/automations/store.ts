@@ -13,7 +13,7 @@ import {
   type ProviderReference,
 } from "./types.js";
 
-const storedStateSchema = z.preprocess(
+export const storedStateSchema = z.preprocess(
   migrateStoredState,
   z.strictObject({
     version: z.literal(1),

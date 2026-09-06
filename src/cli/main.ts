@@ -39,13 +39,23 @@ async function main(args: readonly string[]): Promise<number> {
   switch (args[0]) {
     case "start": {
       if (args.length !== 1) throw new Error(usage);
-      const { runTelex } = await import("../index.js");
-      const result = await runTelex();
-      return result.reason === "updated" ? 75 : 0;
+      const { runWithWirebot } = await import("../update/wirebot.js");
+      const result = await runWithWirebot(async () => {
+        const { runTelex } = await import("../index.js");
+        return await runTelex();
+      });
+      return result?.reason === "updated" ? 75 : 0;
     }
     case "version": {
       if (args.length !== 1) throw new Error(usage);
       console.log(await readTelexVersion(projectRootFrom(import.meta.url)));
+      return 0;
+    }
+    case "wirebot-update": {
+      const directory = args[1];
+      if (args.length !== 2 || directory === undefined) throw new Error(usage);
+      const { maintainWirebot } = await import("../update/wirebot.js");
+      await maintainWirebot(directory);
       return 0;
     }
     case "update":
@@ -58,6 +68,8 @@ async function main(args: readonly string[]): Promise<number> {
 }
 
 async function updateTelex(args: UpdateArguments): Promise<number> {
+  const { assertTelexReleaseUpdatesAllowed } = await import("../update/wirebot.js");
+  await assertTelexReleaseUpdatesAllowed();
   const projectRoot = projectRootFrom(import.meta.url);
   const config = loadUpdateConfig();
   const currentVersion = await readTelexVersion(projectRoot);

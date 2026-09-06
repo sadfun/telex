@@ -12,6 +12,8 @@ export async function runCommand(
   options: Readonly<{
     cwd: string;
     env?: NodeJS.ProcessEnv;
+    signal?: AbortSignal;
+    timeout?: number;
   }>,
 ): Promise<CommandResult> {
   return await new Promise<CommandResult>((resolve, reject) => {
@@ -20,13 +22,15 @@ export async function runCommand(
       env: options.env ?? process.env,
       stdio: ["ignore", "pipe", "pipe"],
       shell: false,
+      ...(options.signal === undefined ? {} : { signal: options.signal }),
+      ...(options.timeout === undefined ? {} : { timeout: options.timeout }),
     });
     const stdout: Buffer[] = [];
     const stderr: Buffer[] = [];
     child.stdout.on("data", (chunk: Buffer) => stdout.push(chunk));
     child.stderr.on("data", (chunk: Buffer) => stderr.push(chunk));
     child.once("error", reject);
-    child.once("exit", (code, signal) => {
+    child.once("close", (code, signal) => {
       const result = {
         stdout: Buffer.concat(stdout).toString("utf8"),
         stderr: Buffer.concat(stderr).toString("utf8"),
