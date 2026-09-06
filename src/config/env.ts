@@ -24,6 +24,7 @@ const envSchema = z.object({
     .refine((value) => new URL(value).protocol === "https:", "PUBLIC_URL must use HTTPS")
     .optional(),
   TELEX_TUNNEL: z.enum(["auto", "off"]).default("auto"),
+  TELEX_MIGRATION: z.enum(["auto", "off"]).default("auto"),
   TELEX_DATA_DIR: z.string().min(1).default(".telex"),
   CODEX_WORKSPACE: z.string().min(1).default(".telex/workspace"),
   HOST: z.string().min(1).default("127.0.0.1"),
@@ -38,6 +39,7 @@ interface AppConfig {
   readonly telegramPollTimeout: number;
   readonly publicUrl: string | undefined;
   readonly tunnelMode: "auto" | "off";
+  readonly migrationMode: "auto" | "off";
   readonly dataDirectory: string;
   readonly workspace: string;
   readonly updateMode: UpdateMode;
@@ -72,6 +74,7 @@ export function loadAppConfig(environment: NodeJS.ProcessEnv = process.env): App
     telegramPollTimeout: parsed.TELEGRAM_POLL_TIMEOUT,
     publicUrl: parsed.PUBLIC_URL?.replace(/\/$/, ""),
     tunnelMode: parsed.TELEX_TUNNEL,
+    migrationMode: parsed.TELEX_MIGRATION,
     dataDirectory: resolve(parsed.TELEX_DATA_DIR),
     workspace: resolve(parsed.CODEX_WORKSPACE),
     host: parsed.HOST,

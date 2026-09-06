@@ -23,6 +23,10 @@ jobs:
           test "$GITHUB_REF_NAME" = "v$package_version"
       - run: npm ci
       - run: npm run check
+      - name: Verify migration and published Wirebot image
+        run: npm run test:migration
+        env:
+          TELEX_TEST_DOCKER: "1"
       - run: npm run build
       - name: Load E2E entry point
         run: npm test -- --help

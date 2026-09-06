@@ -7,7 +7,7 @@ const conversationStateSchema = z.object({
   previousThreadIds: z.array(z.string().min(1)).max(10),
 });
 
-const storedStateSchema = z.object({
+export const storedStateSchema = z.object({
   version: z.literal(2),
   conversations: z.record(z.string(), conversationStateSchema),
 });

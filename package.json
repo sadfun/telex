@@ -1,6 +1,6 @@
 {
   "name": "telex",
-  "version": "0.0.34",
+  "version": "0.0.35",
   "private": true,
   "type": "module",
   "description": "Telex — a Telegram bridge for the OpenAI Codex app-server.",
@@ -25,6 +25,7 @@
     "dev": "npm run build && node --env-file-if-exists=.env --watch dist/cli/main.js start",
     "start": "node --env-file-if-exists=.env dist/cli/main.js start",
     "test": "npm run test:e2e --",
+    "test:migration": "node --import tsx --test src/update/wirebot.test.ts",
     "test:e2e": "node --import tsx src/core/e2e/cli.ts core",
     "test:telegram": "node --import tsx src/core/e2e/cli.ts telegram",
     "protocol:generate-bindings": "node --import tsx src/cli/main.ts codex check --apply --version $(cat codex.version)",
