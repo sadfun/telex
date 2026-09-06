@@ -20,8 +20,8 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm run check
-      - name: Verify migration and published Wirebot image
-        run: sudo env "PATH=$PATH" TMPDIR=/root TELEX_TEST_DOCKER=1 npm run test:migration
+      - name: Verify migration, service handoff, and published Wirebot image
+        run: sudo env "PATH=$PATH" TMPDIR=/root TELEX_TEST_DOCKER=1 TELEX_TEST_SYSTEMD=1 npm run test:migration
       - run: npm run build
       - name: Load E2E entry point
         run: npm test -- --help

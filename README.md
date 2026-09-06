@@ -43,18 +43,24 @@ accepting a message and saving its receipt can cause that message to repeat.
 - macOS: reuse Docker Desktop or Colima. If necessary, install Docker and Colima through an
   existing Homebrew installation and enable Colima's login service. Homebrew or Docker Desktop
   must already be available. Linux and macOS on x86-64 and ARM64 are supported.
-- The existing **telex systemd/launchd service becomes the Wirebot image updater**. Keep it
-  enabled. It checks every `TELEX_UPDATE_INTERVAL_HOURS` (six hours by default), pulls before
-  stopping anything, and recreates the container only when the image changes. Each replacement
+- Migration installs a **systemd timer and oneshot service** on Linux, or a **launchd job with
+  `StartInterval`** on macOS, then disables and stops the old telex service. There is no updater
+  process between checks. A small shell script checks every `TELEX_UPDATE_INTERVAL_HOURS`
+  (six hours by default), pulls before stopping anything, and exits if the image is unchanged.
+  Node runs only for the first notification, an image replacement, or recovery; it exits after
+  that work. Each replacement
   retains a stopped-data snapshot and restores both image and data if startup fails. The latest
   snapshot is kept at the migrated data directory's `-backup` sibling and rotated on the next
-  update. Interrupted replacements recover on service restart.
-- Starting/stopping the telex service starts/stops its Wirebot container. A foreground
-  `telex start` runs the same updater under your existing process manager. Source development
-  can use `TELEX_MIGRATION=off npm run dev` to run native Telex.
+  update. Interrupted replacements recover at the next scheduled check or after reboot.
+- Docker's `unless-stopped` restart policy keeps Wirebot running after Telex exits. Stopping
+  the updater disables checks, not the bot: use `docker stop <container-name>` to stop Wirebot,
+  after stopping its updater. Keep the migration release and Node installed for occasional
+  update transactions. The standard installer services are retired automatically; if using a
+  custom process manager, remove its old `telex start` job. Source development can use
+  `TELEX_MIGRATION=off npm run dev` to run native Telex.
 
-The instance directory contains `migration.json` (container name, Docker endpoint and data path)
-and a private `wirebot.env` file. Extra environment variables from the launcher's env file are
+The private instance directory contains `migration.json` (container name, Docker endpoint, data
+path and notification credentials), `wirebot.env`, and `update.sh`. Extra environment variables from the launcher's env file are
 retained, excluding host-only paths and replaced runtime settings. Wirebot's HTTP port is
 published at the original Telex host/port, so an existing `PUBLIC_URL` reverse proxy keeps working.
 Slack and Discord are available but require their own connector credentials; migration does not
@@ -74,14 +80,23 @@ No success announcement is sent on failure.
 
 After migration, `TELEX_MIGRATION=off` cannot switch back to the stale original state, and
 `telex update` / `telex update --rollback` refuse to replace the migration release. For recovery,
-stop the telex service first, inspect `migration.json`, and back up the **migrated** data before
+stop the updater first, inspect `migration.json`, and back up the **migrated** data before
 changing the container or image. The original Telex directory is a pre-migration backup and does
 not contain conversations or token refreshes made since migration. Do not run it alongside Wirebot.
+
+For a container named `telex-wirebot-<instance-id>`, the Linux timer and oneshot service are
+both named `telex-wirebot-<instance-id>-update`. Use `systemctl --user disable --now
+telex-wirebot-<instance-id>-update.timer` and `systemctl --user stop
+telex-wirebot-<instance-id>-update.service` before maintenance (omit `--user` for a root system
+installation). On macOS, disable and boot out `gui/$(id -u)/com.sadfun.telex-wirebot-<instance-id>-update`
+with `launchctl`. Linux logs go to the journal; macOS retains the last check's `update.log` in
+the instance directory. Running `/bin/sh <instance-directory>/update.sh` checks immediately.
 
 Run `npm run test:migration` for the isolated migration/rollback regression check. On a machine
 with Docker, `TELEX_TEST_DOCKER=1 npm run test:migration` also boots the published image against a
 simulated Telegram API and verifies its mounted data, readiness, and snapshot restoration. CI
-and release builds run both checks. No real Telegram or ChatGPT credentials are used by these tests.
+and release builds also set `TELEX_TEST_SYSTEMD=1` to verify real service retirement and that the
+oneshot updater has no remaining process. No real Telegram or ChatGPT credentials are used.
 
 The rest of this README documents native Telex and its pre-migration installation.
 

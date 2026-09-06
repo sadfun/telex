@@ -10,8 +10,9 @@ All notable changes to Telex are documented in this file.
 
 - Migrate 0.0.34 instances to Wirebot's Docker image on startup, preserving the original data
   and copying authentication, conversations, memory, schedules, settings, and workspace files.
-- Reuse the installed telex service to maintain Docker image updates, with startup checks,
-  data snapshots, rollback, and recovery after interrupted updates.
+- Retire the telex service after migration and use a scheduled shell check for Docker image
+  updates, with no resident updater process. Run update transactions only when needed, retaining
+  startup checks, data snapshots, rollback, and recovery after interrupted updates.
 - Notify Telegram users after the migrated instance is ready; retain native Telex if initial
   preparation or startup fails. Set `TELEX_MIGRATION=off` before migration to defer it.
 

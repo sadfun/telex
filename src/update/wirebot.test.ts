@@ -17,15 +17,18 @@ import { test } from "node:test";
 import { loadAppConfig } from "../config/env.js";
 import { atomicWriteJson } from "../shared/fs.js";
 import { Logger } from "../shared/logger.js";
+import { runCommand } from "../shared/process.js";
 import { bindMount, Docker, wirebotImage } from "./docker.js";
 import {
   acquireRuntimeLock,
+  maintainWirebot,
   migrationDirectory,
   migrationMessage,
   prepareMigration,
   runWithWirebot,
   updateWirebot,
 } from "./wirebot.js";
+import { launchAgent, systemdUnits, updaterScript, wirebotService } from "./wirebot-service.js";
 
 test("migration preserves 0.0.34 state and survives failed/interrupted image updates", {
   timeout: 30_000,
@@ -42,6 +45,16 @@ test("migration preserves 0.0.34 state and survives failed/interrupted image upd
   let liveData: string | undefined;
   let checks = 0;
   const commands: string[][] = [];
+  let activations = 0;
+  let failService = false;
+  t.mock.method(wirebotService, "prepare", async (directory: string) => {
+    if (failService) throw new Error("simulated unavailable service manager");
+    return async () => {
+      activations += 1;
+      await assert.rejects(stat(join(directory, "runtime.lock")), { code: "ENOENT" });
+      await maintainWirebot(directory);
+    };
+  });
   const containers = new Map<
     string,
     {
@@ -132,7 +145,6 @@ test("migration preserves 0.0.34 state and survives failed/interrupted image upd
     assert(checks > 0, "the announcement must follow readiness verification");
     response.setHeader("Content-Type", "application/json");
     response.end(JSON.stringify({ ok: true, result: { message_id: messages.length } }));
-    setTimeout(() => process.emit("SIGTERM"), 20);
   });
   await new Promise<void>((resolve) => telegram.listen(0, "127.0.0.1", resolve));
   try {
@@ -283,14 +295,15 @@ test("migration preserves 0.0.34 state and survives failed/interrupted image upd
     ]);
     assert.equal(
       containers.get(state.name)?.State.Running,
-      false,
-      "stopping the host service stops its container",
+      true,
+      "the migration process exits while Docker keeps Wirebot running",
     );
+    assert.equal(activations, 1);
+    assert.equal(await readFile(join(directory, "current-image"), "utf8"), `${oldImage}\n`);
+    await assert.rejects(stat(join(directory, "maintenance-needed")), { code: "ENOENT" });
     // Even an opt-out cannot accidentally launch stale Telex alongside migrated Wirebot.
     process.env.TELEX_MIGRATION = "off";
-    const shutdown = setTimeout(() => process.emit("SIGTERM"), 100);
     await runWithWirebot(noFallback);
-    clearTimeout(shutdown);
     assert.equal(messages.length, 1, "successful announcements must not repeat on restart");
     await docker.run(["start", state.name]);
 
@@ -326,9 +339,7 @@ test("migration preserves 0.0.34 state and survives failed/interrupted image upd
     // Recover a crash after renaming the old container but before creating its replacement.
     await docker.run(["stop", state.name]);
     await docker.run(["rename", state.name, `${state.name}-previous`]);
-    const restart = setTimeout(() => process.emit("SIGTERM"), 100);
     await runWithWirebot(noFallback);
-    clearTimeout(restart);
     assert(containers.has(state.name));
     assert(!containers.has(`${state.name}-previous`));
 
@@ -349,6 +360,12 @@ test("migration preserves 0.0.34 state and survives failed/interrupted image upd
     containers.clear();
     state = { ...state, status: "prepared", notifiedUserIds: [] };
     await atomicWriteJson(stateFile, state);
+    failService = true;
+    assert.equal(await runWithWirebot(async () => "telex-fallback"), "telex-fallback");
+    assert.equal(containers.size, 0, "missing scheduler must fail before starting Wirebot");
+    assert.equal(messages.length, 1);
+    failService = false;
+    await atomicWriteJson(stateFile, state);
     failReady = true;
     assert.equal(await runWithWirebot(async () => "telex-fallback"), "telex-fallback");
     assert.equal(containers.size, 0);
@@ -368,6 +385,155 @@ test("migration preserves 0.0.34 state and survives failed/interrupted image upd
     await new Promise<void>((resolve) => telegram.close(() => resolve()));
     for (const key of Object.keys(process.env)) if (!(key in savedEnv)) delete process.env[key];
     Object.assign(process.env, savedEnv);
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("scheduled shell checks exit without Node when the image is unchanged", async () => {
+  const root = await mkdtemp(join(tmpdir(), "wirebot shell '$-"));
+  const name = "telex-wirebot-0123456789ab";
+  const oldImage = `sha256:${"a".repeat(64)}`;
+  const newImage = `sha256:${"b".repeat(64)}`;
+  const script = join(root, "update.sh");
+  const docker = join(root, "docker");
+  const maintenance = join(root, "maintain");
+  try {
+    await writeFile(
+      docker,
+      `#!/bin/sh
+set -eu
+printf '%s\\n' "$*" >> docker-calls
+case "$1" in
+  inspect) cat status ;;
+  pull) [ ! -f fail-pull ] ;;
+  image) cat latest ;;
+  *) exit 2 ;;
+esac
+`,
+      { mode: 0o700 },
+    );
+    await writeFile(
+      maintenance,
+      `#!/bin/sh
+set -eu
+[ "$1" = 'literal $HOME $(touch injected)' ]
+printf 'called\\n' >> maintenance-calls
+[ ! -f fail-maintenance ]
+`,
+      { mode: 0o700 },
+    );
+    await writeFile(
+      script,
+      updaterScript(
+        root,
+        name,
+        [docker],
+        [maintenance, "literal $HOME $(touch injected)"],
+        "  printf 'retired\\n' >> retirement",
+      ),
+    );
+    await writeFile(join(root, "current-image"), oldImage);
+    await writeFile(join(root, "latest"), oldImage);
+    await writeFile(join(root, "status"), `true false ${oldImage} ${name}`);
+    const check = () => runCommand("/bin/sh", [script], { cwd: root, timeout: 5_000 });
+    await check();
+    await check();
+    assert.equal(await readFile(join(root, "retirement"), "utf8"), "retired\n");
+    await assert.rejects(stat(join(root, "maintenance-calls")), { code: "ENOENT" });
+    await assert.rejects(stat(join(root, "maintenance-needed")), { code: "ENOENT" });
+
+    await writeFile(join(root, "fail-pull"), "");
+    await assert.rejects(check());
+    await assert.rejects(stat(join(root, "maintenance-calls")), { code: "ENOENT" });
+    await rm(join(root, "fail-pull"));
+    await writeFile(join(root, "latest"), newImage);
+    await check();
+    assert.equal(await readFile(join(root, "maintenance-calls"), "utf8"), "called\n");
+    await stat(join(root, "maintenance-needed"));
+    await assert.rejects(stat(join(root, "injected")), { code: "ENOENT" });
+    // A failed/interrupted transaction must retry even if the registry tag changes back.
+    await writeFile(join(root, "latest"), oldImage);
+    await writeFile(join(root, "fail-maintenance"), "");
+    await assert.rejects(check());
+    await stat(join(root, "maintenance-needed"));
+    await rm(join(root, "fail-maintenance"));
+    await check();
+    assert.equal((await readFile(join(root, "maintenance-calls"), "utf8")).split("\n").length, 4);
+    await rm(join(root, "maintenance-needed"));
+    await writeFile(join(root, "status"), `false false ${oldImage} ${name}`);
+    await check();
+    await stat(join(root, "maintenance-needed"));
+    const units = systemdUnits(script, 21_600);
+    assert.match(units.service, /Type=oneshot/u);
+    assert.match(units.service, /Restart=no/u);
+    assert.match(units.service, /\$\$/u);
+    assert.match(units.timer, /OnUnitInactiveSec=21600s/u);
+    const plist = launchAgent(name, `${script}&`, 21_600);
+    assert(!plist.includes("KeepAlive"));
+    assert.match(plist, /<key>StartInterval<\/key><integer>21600<\/integer>/u);
+    assert(plist.includes("&amp;"));
+    if (process.platform === "darwin") {
+      await writeFile(join(root, "test.plist"), plist);
+      await runCommand("plutil", ["-lint", join(root, "test.plist")], { cwd: root });
+    }
+    if (process.env.TELEX_TEST_SYSTEMD === "1") {
+      assert.equal(process.platform, "linux");
+      assert.equal(process.getuid?.(), 0);
+      const unit = `telex-test-${crypto.randomUUID()}`;
+      const legacy = `${unit}-legacy.service`;
+      const files = [legacy, `${unit}.service`, `${unit}.timer`];
+      const ctl = (...args: string[]) =>
+        runCommand("systemctl", args, { cwd: root, timeout: 20_000 });
+      try {
+        await writeFile(
+          join("/run/systemd/system", legacy),
+          "[Service]\nExecStart=/bin/sleep infinity\nRestart=always\n[Install]\nWantedBy=multi-user.target\n",
+        );
+        await writeFile(join("/run/systemd/system", `${unit}.service`), units.service);
+        await writeFile(join("/run/systemd/system", `${unit}.timer`), units.timer);
+        await writeFile(
+          script,
+          updaterScript(
+            root,
+            name,
+            [docker],
+            [maintenance, "literal $HOME $(touch injected)"],
+            `  systemctl disable --now ${legacy}`,
+          ),
+        );
+        await rm(join(root, "service-retired"));
+        await rm(join(root, "maintenance-needed"));
+        await writeFile(join(root, "status"), `true false ${oldImage} ${name}`);
+        const before = await readFile(join(root, "maintenance-calls"), "utf8");
+        await ctl("daemon-reload");
+        await ctl("enable", "--now", legacy);
+        await ctl("enable", "--now", `${unit}.timer`);
+        await ctl("start", `${unit}.service`);
+        assert.equal(
+          (await ctl("show", legacy, "-p", "ActiveState", "--value")).stdout.trim(),
+          "inactive",
+        );
+        assert.equal(
+          (await ctl("show", legacy, "-p", "UnitFileState", "--value")).stdout.trim(),
+          "disabled",
+        );
+        assert.equal(
+          (await ctl("show", `${unit}.service`, "-p", "MainPID", "--value")).stdout.trim(),
+          "0",
+        );
+        assert.equal(
+          (await ctl("show", `${unit}.timer`, "-p", "ActiveState", "--value")).stdout.trim(),
+          "active",
+        );
+        assert.equal(await readFile(join(root, "maintenance-calls"), "utf8"), before);
+      } finally {
+        await ctl("disable", "--now", `${unit}.timer`, legacy);
+        await ctl("stop", `${unit}.service`);
+        for (const file of files) await rm(join("/run/systemd/system", file), { force: true });
+        await ctl("daemon-reload");
+      }
+    }
+  } finally {
     await rm(root, { recursive: true, force: true });
   }
 });

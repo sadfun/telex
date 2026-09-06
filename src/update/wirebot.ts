@@ -4,7 +4,6 @@ import { cp, lstat, mkdir, open, readFile, realpath, rm, symlink } from "node:fs
 import { createServer } from "node:net";
 import { homedir } from "node:os";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
-import { setTimeout as delay } from "node:timers/promises";
 import { parseEnv } from "node:util";
 import { Api } from "grammy";
 import { z } from "zod";
@@ -15,6 +14,7 @@ import { storedSettingsSchema as settingsSchema } from "../core/settings-store.j
 import { atomicWriteFile, atomicWriteJson } from "../shared/fs.js";
 import { Logger } from "../shared/logger.js";
 import { bindMount, Docker, ensureDocker, wirebotImage } from "./docker.js";
+import { wirebotService } from "./wirebot-service.js";
 
 type Config = ReturnType<typeof loadAppConfig>;
 const ownerLabel = "io.github.sadfun.telex-migration";
@@ -29,6 +29,11 @@ const stateSchema = z.object({
   updating: z.boolean(),
   expectAuthentication: z.boolean(),
   notifiedUserIds: z.array(z.number().int().positive()),
+  notification: z.object({
+    token: z.string(),
+    apiBase: z.string(),
+    userIds: z.array(z.number().int().positive()),
+  }),
 });
 type MigrationState = z.infer<typeof stateSchema>;
 
@@ -47,7 +52,7 @@ export async function assertTelexReleaseUpdatesAllowed(): Promise<void> {
   });
   if (await exists(join(directory, "migration.json"))) {
     throw new Error(
-      "This instance has moved to Wirebot. The telex service updates its Docker image automatically; do not roll back Telex against the obsolete source snapshot. See README.md for recovery instructions.",
+      "This instance has moved to Wirebot. A scheduled updater maintains its Docker image; do not roll back Telex against the obsolete source snapshot. See README.md for recovery instructions.",
     );
   }
 }
@@ -67,6 +72,7 @@ export async function runWithWirebot<T>(runTelex: () => Promise<T>): Promise<T |
   process.once("SIGINT", stop);
   process.once("SIGTERM", stop);
   let docker: Docker | undefined;
+  let activateUpdater: (() => Promise<void>) | undefined;
   try {
     // Read again under the lock: another launcher may just have completed migration.
     state = await readState(stateFile);
@@ -103,16 +109,20 @@ export async function runWithWirebot<T>(runTelex: () => Promise<T>): Promise<T |
       await docker.ensureRunning(abort.signal);
       // An active migration must never fall back to the obsolete source snapshot.
       if (state.status === "active") {
+        activateUpdater = await wirebotService.prepare(directory, state, config.updateIntervalMs);
         state = await reconcileContainers(docker, stateFile, state);
         await startContainer(docker, state, abort.signal);
       } else {
         try {
+          // Verify and write the replacement service before crossing the migration boundary.
+          activateUpdater = await wirebotService.prepare(directory, state, config.updateIntervalMs);
           await startContainer(docker, state, abort.signal);
         } catch (error) {
           // Cleanup must succeed before Telex can resume polling with its original state.
           await removeOwnedContainer(docker, state.name);
           await rm(stateFile);
           state = undefined;
+          activateUpdater = undefined;
           logger.error("Wirebot did not start; the original Telex instance is preserved", error);
         }
         if (state !== undefined) {
@@ -121,42 +131,64 @@ export async function runWithWirebot<T>(runTelex: () => Promise<T>): Promise<T |
           const active = { ...state, status: "active" as const };
           await atomicWriteJson(stateFile, active);
           state = active;
-          logger.info("Migrated to Wirebot; the Telex service now maintains its Docker image", {
+          logger.info("Migrated to Wirebot; handing updates to the operating system's timer", {
             directory,
           });
         }
       }
     }
 
-    if (state !== undefined && docker !== undefined) {
-      while (!abort.signal.aborted) {
-        state = await notifyMigratedUsers(config, stateFile, state, logger);
-        try {
-          await delay(config.updateIntervalMs, undefined, { signal: abort.signal });
-          state = await updateWirebot(docker, stateFile, state, abort.signal, logger);
-        } catch (error) {
-          if (abort.signal.aborted) break;
-          state = (await readState(stateFile)) ?? state;
-          if (state.updating) throw error; // Let the service restart and finish restoring the snapshot.
-          logger.error("Wirebot image update failed; keeping the previous image", error);
-        }
-      }
+    if (state !== undefined) {
+      // The first scheduled run delivers the notice, after the replacement service is installed.
+      await atomicWriteFile(join(directory, "maintenance-needed"), "");
     } else if (!abort.signal.aborted) {
       process.off("SIGINT", stop);
       process.off("SIGTERM", stop);
       return await runTelex();
     }
-    return undefined;
   } finally {
     process.off("SIGINT", stop);
     process.off("SIGTERM", stop);
     try {
-      if (abort.signal.aborted && state !== undefined && docker !== undefined) {
+      if (abort.signal.aborted && state?.status === "prepared" && docker !== undefined) {
         await docker.run(["stop", "--time", "60", state.name]);
       }
     } finally {
       await unlock();
     }
+  }
+  // Release the migration lock before the new job stops the old, restarting Telex service.
+  await activateUpdater?.();
+  return undefined;
+}
+
+/** Runs only when the shell check detects a changed image or unfinished maintenance. */
+export async function maintainWirebot(directory: string): Promise<void> {
+  const unlock = await acquireRuntimeLock(join(directory, "runtime.lock"));
+  const stateFile = join(directory, "migration.json");
+  const logger = new Logger("info", { component: "wirebot-updater" });
+  const abort = new AbortController();
+  const stop = () => abort.abort();
+  process.once("SIGINT", stop);
+  process.once("SIGTERM", stop);
+  try {
+    let state = await readState(stateFile);
+    if (state?.status !== "active") throw new Error("Wirebot migration is not active");
+    await atomicWriteFile(join(directory, "maintenance-needed"), "");
+    const docker = new Docker(state.dockerCommand);
+    await docker.ensureRunning(abort.signal);
+    state = await reconcileContainers(docker, stateFile, state);
+    await startContainer(docker, state, abort.signal);
+    state = await notifyMigratedUsers(stateFile, state, logger);
+    state = await updateWirebot(docker, stateFile, state, abort.signal, logger);
+    // Keep the marker on any failure, including a crash between the JSON and cache writes.
+    await atomicWriteFile(join(directory, "current-image"), `${state.image}\n`);
+    if (state.notification.userIds.every((id) => state.notifiedUserIds.includes(id)))
+      await rm(join(directory, "maintenance-needed"));
+  } finally {
+    process.off("SIGINT", stop);
+    process.off("SIGTERM", stop);
+    await unlock();
   }
 }
 
@@ -305,6 +337,11 @@ export async function prepareMigration(
     ],
     expectAuthentication: Boolean(auth?.tokens?.access_token || auth?.OPENAI_API_KEY),
     notifiedUserIds: [],
+    notification: {
+      token: config.telegramToken,
+      apiBase: config.telegramApiBase,
+      userIds: [...config.allowedUserIds],
+    },
   });
 }
 
@@ -477,16 +514,15 @@ async function removeOwnedContainer(docker: Docker, name: string): Promise<void>
 }
 
 async function notifyMigratedUsers(
-  config: Config,
   file: string,
   state: MigrationState,
   logger: Logger,
 ): Promise<MigrationState> {
-  const api = new Api(config.telegramToken, {
-    apiRoot: config.telegramApiBase,
+  const api = new Api(state.notification.token, {
+    apiRoot: state.notification.apiBase,
     timeoutSeconds: 15,
   });
-  for (const userId of config.allowedUserIds) {
+  for (const userId of state.notification.userIds) {
     if (state.notifiedUserIds.includes(userId)) continue;
     try {
       await api.sendMessage(userId, migrationMessage, {
