@@ -108,18 +108,22 @@ export async function runWithWirebot<T>(runTelex: () => Promise<T>): Promise<T |
       } else {
         try {
           await startContainer(docker, state, abort.signal);
-          const active = { ...state, status: "active" as const };
-          await atomicWriteJson(stateFile, active);
-          state = active;
-          logger.info("Migrated to Wirebot; the Telex service now maintains its Docker image", {
-            directory,
-          });
         } catch (error) {
           // Cleanup must succeed before Telex can resume polling with its original state.
           await removeOwnedContainer(docker, state.name);
           await rm(stateFile);
           state = undefined;
           logger.error("Wirebot did not start; the original Telex instance is preserved", error);
+        }
+        if (state !== undefined) {
+          // Once ready, Wirebot may already accept messages. A failed checkpoint must retry
+          // against this copy, never start Telex with the now-obsolete original data.
+          const active = { ...state, status: "active" as const };
+          await atomicWriteJson(stateFile, active);
+          state = active;
+          logger.info("Migrated to Wirebot; the Telex service now maintains its Docker image", {
+            directory,
+          });
         }
       }
     }
@@ -386,15 +390,16 @@ export async function updateWirebot(
     state = pending;
     await docker.run(["rename", state.name, previous], signal);
     await startContainer(docker, { ...state, image }, signal);
-    const candidate = { ...state, image, updating: false };
-    await atomicWriteJson(stateFile, candidate);
-    state = candidate;
-    logger.info("Updated Wirebot image", { image });
   } catch (error) {
     state = await reconcileContainers(docker, stateFile, state);
     await docker.run(["start", state.name]);
     throw error;
   }
+  // A ready candidate can already have accepted messages. Retry a failed commit on restart.
+  const candidate = { ...state, image, updating: false };
+  await atomicWriteJson(stateFile, candidate);
+  state = candidate;
+  logger.info("Updated Wirebot image", { image });
   await removeOwnedContainer(docker, previous);
   return state;
 }
@@ -408,6 +413,21 @@ async function reconcileContainers(
   const prior = await ownedContainer(docker, previous);
   const current = await ownedContainer(docker, state.name);
   if (state.updating) {
+    if (prior !== undefined && current?.State.Running && current.Image !== state.image) {
+      let ready = false;
+      try {
+        await docker.waitUntilReady(state.name, false, AbortSignal.timeout(180_000));
+        ready = true;
+      } catch {
+        // The replacement never became usable; restore its pre-update snapshot below.
+      }
+      if (ready) {
+        state = { ...state, image: current.Image, updating: false };
+        await atomicWriteJson(stateFile, state);
+        await removeOwnedContainer(docker, previous);
+        return state;
+      }
+    }
     if (current?.State.Running) await docker.run(["stop", "--time", "60", state.name]);
     if (prior !== undefined) {
       await removeOwnedContainer(docker, state.name);

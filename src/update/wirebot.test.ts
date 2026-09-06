@@ -38,6 +38,7 @@ test("migration preserves 0.0.34 state and survives failed/interrupted image upd
   let latestImage = oldImage;
   let failPull = false;
   let failReady = false;
+  let blockCheckpoint: string | undefined;
   let liveData: string | undefined;
   let checks = 0;
   const commands: string[][] = [];
@@ -57,6 +58,10 @@ test("migration preserves 0.0.34 state and survives failed/interrupted image upd
   t.mock.method(Docker.prototype, "waitUntilReady", async (_name: string, expectAuth: boolean) => {
     checks += 1;
     if (checks === 1) assert.equal(expectAuth, true);
+    if (blockCheckpoint !== undefined) {
+      await rm(blockCheckpoint);
+      await mkdir(blockCheckpoint);
+    }
     if (failReady) {
       assert(liveData);
       await writeFile(join(liveData, "conversations.json"), "incompatible candidate state");
@@ -352,6 +357,13 @@ test("migration preserves 0.0.34 state and survives failed/interrupted image upd
       JSON.parse(await readFile(join(config.dataDirectory, "conversations.json"), "utf8")),
       stateData,
     );
+    // Readiness is the handoff boundary: checkpoint failure must never start stale Telex.
+    failReady = false;
+    await atomicWriteJson(stateFile, state);
+    blockCheckpoint = stateFile;
+    await assert.rejects(runWithWirebot(noFallback));
+    assert.equal(containers.get(state.name)?.State.Running, true);
+    assert.equal(messages.length, 1);
   } finally {
     await new Promise<void>((resolve) => telegram.close(() => resolve()));
     for (const key of Object.keys(process.env)) if (!(key in savedEnv)) delete process.env[key];
