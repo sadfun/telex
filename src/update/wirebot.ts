@@ -235,6 +235,15 @@ export async function prepareMigration(
   const envFile = join(root, "wirebot.env");
   await atomicWriteFile(envFile, environment);
   const mounts = new Map<string, string>([["/data", data]]);
+  if (
+    [config.dataDirectory, sourceData, config.workspace, sourceWorkspace].some((path) =>
+      within("/root", path),
+    )
+  ) {
+    // The image's /root is mode 0700; root-owned Telex installs must remain reachable by UID 1000.
+    await mkdir(join(data, "home"), { recursive: true, mode: 0o700 });
+    mounts.set("/root", join(data, "home"));
+  }
   for (const destination of new Set([config.dataDirectory, sourceData]))
     mounts.set(destination, data);
   for (const destination of new Set([config.workspace, sourceWorkspace]))

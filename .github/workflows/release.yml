@@ -24,9 +24,7 @@ jobs:
       - run: npm ci
       - run: npm run check
       - name: Verify migration and published Wirebot image
-        run: npm run test:migration
-        env:
-          TELEX_TEST_DOCKER: "1"
+        run: sudo env "PATH=$PATH" TMPDIR=/root TELEX_TEST_DOCKER=1 npm run test:migration
       - run: npm run build
       - name: Load E2E entry point
         run: npm test -- --help

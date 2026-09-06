@@ -137,10 +137,21 @@ export class Docker {
     signal?: AbortSignal,
   ): Promise<void> {
     await mkdir(destination, { recursive: true, mode: 0o700 });
+    const name = `telex-wirebot-copy-${createHash("sha256").update([source, destination].sort().join("\0")).digest("hex").slice(0, 12)}`;
+    const existing = await this.container(name);
+    if (existing !== undefined) {
+      if (existing.Config.Labels?.["io.github.sadfun.telex-copy"] !== name)
+        throw new Error(`Container ${name} belongs to another application`);
+      await this.run(["rm", "--force", name]);
+    }
     await this.run(
       [
         "run",
         "--rm",
+        "--name",
+        name,
+        "--label",
+        `io.github.sadfun.telex-copy=${name}`,
         "--network",
         "none",
         "--user",
