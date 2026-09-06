@@ -1,5 +1,5 @@
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { externalProcessEnvironment } from "../shared/environment.js";
 import { atomicWriteFile } from "../shared/fs.js";
@@ -128,9 +128,13 @@ export const wirebotService = {
   ): Promise<() => Promise<void>> {
     const seconds = Math.max(60, Math.ceil(intervalMs / 1_000));
     const script = join(directory, "update.sh");
+    // The installer's launcher keeps the stable Node path; Homebrew may remove this
+    // process's versioned Cellar executable during its next upgrade.
     const maintenance = [
-      process.execPath,
-      fileURLToPath(new URL("./wirebot-maintain.js", import.meta.url)),
+      ...(process.env.TELEX_INSTALL_DIR
+        ? [join(resolve(process.env.TELEX_INSTALL_DIR), "bin", "telex")]
+        : [process.execPath, fileURLToPath(new URL("../cli/main.js", import.meta.url))]),
+      "wirebot-update",
       directory,
     ];
     const name = `${state.name}-update`;

@@ -51,6 +51,13 @@ async function main(args: readonly string[]): Promise<number> {
       console.log(await readTelexVersion(projectRootFrom(import.meta.url)));
       return 0;
     }
+    case "wirebot-update": {
+      const directory = args[1];
+      if (args.length !== 2 || directory === undefined) throw new Error(usage);
+      const { maintainWirebot } = await import("../update/wirebot.js");
+      await maintainWirebot(directory);
+      return 0;
+    }
     case "update":
       return await updateTelex(parseUpdateArguments(args));
     case "codex":
