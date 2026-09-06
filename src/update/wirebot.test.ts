@@ -47,11 +47,13 @@ test("migration preserves 0.0.34 state and survives failed/interrupted image upd
   const commands: string[][] = [];
   let activations = 0;
   let failService = false;
+  let failActivation = false;
   t.mock.method(wirebotService, "prepare", async (directory: string) => {
     if (failService) throw new Error("simulated unavailable service manager");
     return async () => {
       activations += 1;
       await assert.rejects(stat(join(directory, "runtime.lock")), { code: "ENOENT" });
+      if (failActivation) throw new Error("simulated scheduler activation failure");
       await maintainWirebot(directory);
     };
   });
@@ -137,6 +139,7 @@ test("migration preserves 0.0.34 state and survives failed/interrupted image upd
     }
   });
   const messages: Array<{ chat_id: number; text: string }> = [];
+  let failNotice = false;
   const telegram = createServer(async (request, response) => {
     assert(request.url?.endsWith("/sendMessage"));
     const chunks = [];
@@ -144,6 +147,11 @@ test("migration preserves 0.0.34 state and survives failed/interrupted image upd
     messages.push(JSON.parse(Buffer.concat(chunks).toString()));
     assert(checks > 0, "the announcement must follow readiness verification");
     response.setHeader("Content-Type", "application/json");
+    if (failNotice) {
+      response.statusCode = 503;
+      response.end(JSON.stringify({ ok: false, error_code: 503, description: "Try later" }));
+      return;
+    }
     response.end(JSON.stringify({ ok: true, result: { message_id: messages.length } }));
   });
   await new Promise<void>((resolve) => telegram.listen(0, "127.0.0.1", resolve));
@@ -374,13 +382,32 @@ test("migration preserves 0.0.34 state and survives failed/interrupted image upd
       JSON.parse(await readFile(join(config.dataDirectory, "conversations.json"), "utf8")),
       stateData,
     );
-    // Readiness is the handoff boundary: checkpoint failure must never start stale Telex.
     failReady = false;
+    await atomicWriteJson(stateFile, state);
+    failActivation = true;
+    await assert.rejects(runWithWirebot(noFallback), /scheduler activation failure/u);
+    assert.equal(JSON.parse(await readFile(stateFile, "utf8")).status, "active");
+    assert.equal(containers.get(state.name)?.State.Running, true);
+    assert.equal(messages.length, 1, "activation failure must not announce a completed handoff");
+    failActivation = false;
+    // Readiness is the handoff boundary: checkpoint failure must never start stale Telex.
     await atomicWriteJson(stateFile, state);
     blockCheckpoint = stateFile;
     await assert.rejects(runWithWirebot(noFallback));
     assert.equal(containers.get(state.name)?.State.Running, true);
     assert.equal(messages.length, 1);
+    blockCheckpoint = undefined;
+    await rm(stateFile, { recursive: true });
+    await atomicWriteJson(stateFile, { ...state, status: "active" });
+    failNotice = true;
+    await maintainWirebot(directory);
+    assert.deepEqual(JSON.parse(await readFile(stateFile, "utf8")).notifiedUserIds, []);
+    await stat(join(directory, "maintenance-needed"));
+    failNotice = false;
+    await maintainWirebot(directory);
+    await maintainWirebot(directory);
+    assert.equal(messages.length, 3, "retry the failed notice once, then remember delivery");
+    await assert.rejects(stat(join(directory, "maintenance-needed")), { code: "ENOENT" });
   } finally {
     await new Promise<void>((resolve) => telegram.close(() => resolve()));
     for (const key of Object.keys(process.env)) if (!(key in savedEnv)) delete process.env[key];
